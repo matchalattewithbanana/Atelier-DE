@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     let mut check_gbm = false;
     let mut check_render = false;
     let mut check_kms = false;
+    let mut check_atomic = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--nested" => nested = true,
@@ -32,13 +33,21 @@ fn main() -> Result<()> {
             "--check-gbm" => check_gbm = true,
             "--check-render" => check_render = true,
             "--check-kms" => check_kms = true,
+            "--check-atomic" => check_atomic = true,
             "--socket" => socket = Some(args.next().context("--socket requires a name")?),
             "--help" | "-h" => {
-                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\natelier-compositor --check-gbm (requires native-gbm feature and local text login)\natelier-compositor --check-render (requires native-gbm feature and local text login)\natelier-compositor --check-kms (requires native-kms feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
+                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\natelier-compositor --check-gbm (requires native-gbm feature and local text login)\natelier-compositor --check-render (requires native-gbm feature and local text login)\natelier-compositor --check-kms (requires native-kms feature and local text login)\natelier-compositor --check-atomic (requires native-kms feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
                 return Ok(());
             }
             other => bail!("unknown argument {other}"),
         }
+    }
+    if check_atomic {
+        if nested || probe || check_seat || check_gbm || check_render || check_kms || socket.is_some() { bail!("--check-atomic cannot be combined with other modes"); }
+        #[cfg(feature = "native-kms")]
+        return seat::check(seat::Check::Atomic);
+        #[cfg(not(feature = "native-kms"))]
+        bail!("rebuild with --features native-kms to validate an atomic route");
     }
     if check_kms {
         if nested || probe || check_seat || check_gbm || check_render || socket.is_some() { bail!("--check-kms cannot be combined with other modes"); }
