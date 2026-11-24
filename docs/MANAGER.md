@@ -1,6 +1,6 @@
 # Atelier Manager
 
-The independent manager provides local inventory, planning and explicit user-local deployment staging and selection. It has no Smithay, GTK or Mango Atelier dependency. System package installation and login integration are not implemented.
+The independent manager provides local inventory, planning and explicit user-local deployment staging and selection. It has no Smithay, GTK or Mango Atelier dependency. Experimental Arch-family package installation is available as a separate explicit command; login integration is not implemented.
 
 ```sh
 cargo run -p atelier-manager -- doctor
@@ -36,6 +36,18 @@ atelier-manager packages shell settings --json
 ```
 
 On Arch-family systems, missing source-build products expand into conservative package candidates, with deduplicated reasons. The wizard also includes selected optional provider packages. A bounded, read-only `pacman -T` query checks the local dependency database when pacman and coreutils timeout are detected; unexpected results are unknown, not marked installed. No package database refresh, repository query, sudo or installation occurs. Candidates do not guarantee runtime compatibility or repository availability; native hardware remains experimental, and Mango Atelier's own setup preview is authoritative for rice/app groups. Other distributions currently report that package mapping is unavailable. The initial doctor command remains subprocess-free.
+
+## Arch-family package installation (experimental)
+
+Run as your regular desktop user in an interactive terminal:
+
+```sh
+atelier-manager install-packages shell settings
+```
+
+This separate command recomputes catalog targets, checks missing dependencies with fixed system executables, and requires typing `upgrade and install` before invoking sudo. It uses `pacman -Syu --needed` rather than a standalone database refresh or partial upgrade. **This may upgrade the whole system.** Pacman's own transaction confirmation remains enabled. Repository availability and additional dependency changes are determined by pacman, not by the initial candidate list. No AUR helper is invoked. Optional wizard provider choices and rice-specific package groups are not applied by this command.
+
+Before invoking sudo, the manager stores the installed-package inventory and requested targets in a new private transaction directory under `${XDG_STATE_HOME:-$HOME/.local/state}/atelier-manager/package-transactions/`. It records the exit outcome and attempts a post-transaction inventory. These files are diagnostic checkpoints, not backups of packages, databases or configuration. Create a separate system snapshot before upgrading if recovery is needed. On failure, inspect pacman's output and use the distribution's recovery process; Atelier does not automatically downgrade or remove system packages. Native binary staging and login changes remain separate.
 
 ## Native build staging (experimental)
 

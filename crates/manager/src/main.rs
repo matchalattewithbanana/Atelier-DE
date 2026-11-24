@@ -161,6 +161,11 @@ fn main() -> Result<()> {
                 for note in &preview.notes { println!("Note: {note}"); }
             }
         }
+        [mode, products @ ..] if mode == "install-packages" => {
+            let report = report();
+            let plan = catalog::plan(products, &report)?;
+            packages::install(&plan, &report)?;
+        }
         [mode] if mode == "setup" => {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
             println!("{}", if result.is_some() { "Preview accepted. No changes made." } else { "Setup cancelled. No changes made." });
@@ -185,7 +190,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nSetup without --from is preview-only; staging and selection require explicit confirmation."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nSetup without --from is preview-only; staging and selection require explicit confirmation."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
