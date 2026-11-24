@@ -8,6 +8,7 @@ mod selection;
 mod session;
 mod mango;
 mod release;
+mod trust;
 mod discovery;
 use serde::Serialize;
 use std::{env, fs, io::{self, BufRead, IsTerminal, Read, Write}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
@@ -211,6 +212,10 @@ fn main() -> Result<()> {
     match args.as_slice() {
         [mode, repo] if mode == "release-discover" => discovery::run(repo, false)?,
         [mode, repo, flag] if mode == "release-discover" && flag == "--prerelease" => discovery::run(repo, true)?,
+        [mode] if mode == "release-trust" => trust::list()?,
+        [mode, action, key] if mode == "release-trust" && action == "pin" => trust::pin(Path::new(key))?,
+        [mode, action, id] if mode == "release-trust" && action == "revoke" => trust::revoke(id)?,
+        [mode, manifest, sig_flag, sig, key_flag, id, from, source] if mode == "release-accept" && sig_flag == "--signature" && key_flag == "--key-id" && from == "--from" => trust::accept(Path::new(manifest), Path::new(sig), id, Path::new(source))?,
         [mode, rest @ ..] if mode == "release-manifest" => release::generate(rest)?,
         [mode, manifest, flag, source] if mode == "release-verify" && flag == "--from" => release::verify(Path::new(manifest), Path::new(source))?,
         [mode, manifest, sig_flag, sig, key_flag, key, from, source] if mode == "release-verify-signed" && sig_flag == "--signature" && key_flag == "--key" && from == "--from" => release::verify_signed(Path::new(manifest), Path::new(sig), Path::new(key), Path::new(source))?,
@@ -302,7 +307,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\natelier-manager release-discover native [--prerelease]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\natelier-manager release-trust [pin PUBLIC_KEY | revoke KEY_ID]\natelier-manager release-discover native [--prerelease]\natelier-manager release-accept MANIFEST --signature SIG --key-id KEY_ID --from BUILD_DIR\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA --sequence N PRODUCT [PRODUCT...]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
