@@ -187,3 +187,5 @@ The optional Rice backups page uses the Mango snapshot backend for list, inspect
 The optional Live rice preview page uses the versioned Mango supervisor contract instead of executing a local checkout. It requires the matching live Wayland session and a restarted compatible supervisor; see [Mango integration](MANGO_INTEGRATION.md). Preview recovery is supervisor-owned, not GTK-window-owned.
 
 Appearance Studio now provides optional Classic palette and layout editing via the reviewed Mango appearance API; see [Mango integration](MANGO_INTEGRATION.md). Native appearance settings remain separately owned by Atelier Settings.
+
+Appearance Studio supports all nine Classic colors and bundled preset drafts, with reset and existing reviewed-save recovery. See [Mango integration](MANGO_INTEGRATION.md).
