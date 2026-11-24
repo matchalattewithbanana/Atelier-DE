@@ -118,3 +118,7 @@ atelier-manager recovery-status
 ```
 
 Package history reads existing checkpoints without creating directories or running commands. New transactions persist atomic outcome and final dependency-verification markers separately; a missing outcome can indicate interruption, while older records without a verification marker remain unknown rather than assumed successful. A missing after-inventory is reported independently. History is a historical record, not a current package-health check; entries are listed by ID, not chronology. Recovery-status emits schema-1 JSON with full hash checks of current and previous native deployments independently, structural failures of other bundles, and package transaction history. Backend errors are reported separately. No automatic repair, package rollback, native activation, deletion or Mango configuration restoration is performed. Mango recovery remains delegated to its installer. Review local paths and diagnostic data before sharing.
+
+## Native release metadata
+
+See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generation, detached publisher signature authentication and artifact verification. These commands do not download, install or activate releases.
