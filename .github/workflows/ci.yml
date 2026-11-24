@@ -16,13 +16,17 @@ jobs:
       - name: Install native development libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev libgbm-dev libdrm-dev
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev libgbm-dev libdrm-dev dbus-daemon libglib2.0-bin
       - name: Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Check workspace
         run: cargo +stable check --workspace --all-targets
       - name: Test workspace
         run: cargo +stable test --workspace
+      - name: Isolated notification D-Bus smoke
+        run: |
+          cargo +stable build -p atelier-notifications
+          dbus-run-session -- bash scripts/notification-smoke.sh
       - name: Build nested session binaries
         run: cargo +stable build -p atelier-compositor -p atelier-session
       - name: Nested Wayland smoke
