@@ -16,7 +16,7 @@ native-input = ["native-seat", "smithay/backend_libinput"]
 native-session = ["native-kms", "native-input"]
 
 [dependencies]
-rustix = { version = "1", features = ["fs"], optional = true }
+rustix = { version = "1", features = ["fs", "event"], optional = true }
 atelier-config.workspace = true
 anyhow.workspace = true
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_winit", "desktop", "wayland_frontend"] }
