@@ -14,6 +14,8 @@ fn tty_allowed(tty: bool, session: Option<&str>, graphical: bool) -> bool {
 
 pub enum Check {
     Seat,
+    #[cfg(feature = "native-input")]
+    Input,
     #[cfg(feature = "native-gbm")]
     Gbm,
     #[cfg(feature = "native-gbm")]
@@ -43,6 +45,9 @@ pub fn check(kind: Check) -> Result<()> {
             .map_err(|error| anyhow::anyhow!("dispatch seat events: {error}"))?;
     }
 
+    #[cfg(feature = "native-input")]
+    if matches!(kind, Check::Input) { return crate::native_input::check(&session, &mut event_loop); }
+
     let seat = session.seat();
     let udev = UdevBackend::new(&seat)
         .map_err(|error| anyhow::anyhow!("enumerate DRM devices for {seat}: {error}"))?;
@@ -57,6 +62,8 @@ pub fn check(kind: Check) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("seat denied {}: {error}", device.display()))?;
     let diagnostic_result = match kind {
         Check::Seat => Ok(()),
+        #[cfg(feature = "native-input")]
+        Check::Input => unreachable!("input check is handled before DRM acquisition"),
         #[cfg(feature = "native-gbm")]
         Check::Gbm => crate::gbm_check::check(&fd, false),
         #[cfg(feature = "native-gbm")]
