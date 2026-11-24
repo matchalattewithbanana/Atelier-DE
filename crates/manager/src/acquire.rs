@@ -1,7 +1,7 @@
 //! Fetch authenticated release assets into isolated, non-installed cache bundles.
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, env, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
+use std::{collections::BTreeSet, env, fs::{self, File, OpenOptions}, io::{self, IsTerminal, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
 use crate::{deploy, discovery::{self, ApiAsset, Asset}, trust, release::ReleaseManifest};
 
 fn cache_root() -> Result<PathBuf> {
@@ -89,6 +89,45 @@ pub fn run(choice: &str, id: &str, key: &str, prerelease: bool) -> Result<()> {
     Ok(())
 }
 
+fn cache_directory(path: &Path) -> Result<()> {
+    let m = fs::symlink_metadata(path)?;
+    if !m.is_dir() || m.uid() != nix::unistd::Uid::effective().as_raw() || m.permissions().mode() & 0o022 != 0 {
+        bail!("unsafe cache directory: {}", path.display());
+    }
+    Ok(())
+}
+fn valid_cache_id(id: &str) -> bool {
+    id.strip_prefix("release-").is_some_and(|suffix| !suffix.is_empty() && suffix.len() <= 64
+        && suffix.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+pub fn stage_cached(id: &str, key: &str) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive staging requires a terminal"); }
+    if !valid_cache_id(id) { bail!("expected cache ID release-... (the final directory name from release-fetch)"); }
+    let root = cache_root()?;
+    cache_directory(&root)?;
+    let path = root.join(id);
+    cache_directory(&path)?;
+    let bin = path.join("bin");
+    cache_directory(&bin)?;
+    let bytes = crate::release::bounded_file(&path.join("manifest.json"), 64 * 1024)?;
+    let signature = crate::release::bounded_file(&path.join("manifest.sig"), 16 * 1024)?;
+    let release = trust::check_candidate(&bytes, &signature, key)?;
+    release.verify_local(&bin)?;
+    println!("Authenticated release {} (sequence {})", release.version, release.sequence.context("missing release sequence")?);
+    println!("Publisher: {key}\nProducts: {}", release.products.join(", "));
+    println!("Stage a new complete deployment and accept its release sequences. No running session, package, settings or active selection changes.");
+    print!("Type 'stage release' to proceed: "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "stage release" { println!("Cancelled."); return Ok(()); }
+    cache_directory(&root)?;
+    cache_directory(&path)?;
+    cache_directory(&bin)?;
+    let staged = trust::stage_authenticated(&bytes, &signature, key, &bin)?;
+    println!("Release staged at {}. Activate separately after reviewing deployments.", staged.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +143,13 @@ mod tests {
         ])).unwrap();
         let assets = binary_assets(&api, &release).unwrap();
         (release, assets)
+    }
+    #[test]
+    fn cache_ids_cannot_escape_storage() {
+        assert!(valid_cache_id("release-Ab12"));
+        for id in ["release-", "../release-A", "release-A/../B", "/tmp/release-A"] {
+            assert!(!valid_cache_id(id));
+        }
     }
     #[test]
     fn cache_only_completes_after_hash_and_final_policy_check() {

@@ -53,3 +53,13 @@ atelier-manager release-fetch native RELEASE_ID --key-id KEY_ID
 ```
 
 Use an already independently pinned key and numeric release ID from discovery. Add `--prerelease` for prereleases. The manager fetches bounded manifest/signature assets, authenticates exact manifest bytes and checks schema-2 sequence policy before acquiring binary assets. Binary assets are named `EXECUTABLE-linux-ARCH`, with sizes matching the signed manifest. Each download is streamed into a private temporary directory, checked against signed SHA-256 and only then made executable. All artifacts and current trust policy are rechecked before writing the completion manifest. Failed attempts are cleaned up on normal error paths; interrupted directories without completion markers are invalid. Completed bundles are under `${XDG_CACHE_HOME:-$HOME/.cache}/atelier-manager/releases/`. This is acquisition only; no code runs, no deployment is staged, no high-water mark is advanced. Cache consumers must reauthenticate against current pinned trust, verify bytes and enforce sequence policy at time of acceptance. No reuse, automatic cleanup, freshness guarantee or real remote acceptance test is provided. GitHub CLI must already be authenticated for private repos.
+
+## Stage a verified cached release
+
+```sh
+atelier-manager release-stage CACHE_ID --key-id KEY_ID
+atelier-manager deployments
+atelier-manager activate DEPLOYMENT_ID
+```
+
+Use the cache directory basename (release-...) printed by release-fetch. Staging requires a terminal and typed approval. It authenticates the saved exact manifest with current pinned trust, checks all local artifact hashes, then under the trust lock rechecks the signature and sequence policy and copies only the signed artifact identities into a new deployment. The exact signed manifest, signature and release provenance are retained in the deployment. High-water marks are persisted before publishing the completion marker; a later storage failure may leave the release accepted but not staged. Retrying the same accepted identity is allowed. Existing deployment selection is unchanged. This stages the entire signed bundle, not a selective merge with an existing deployment. Activation and local rollback remain separate, and are not remote acceptance operations; they do not enforce current release revocations or sequence floors. No automatic activation or package installation occurs.

@@ -20,7 +20,7 @@ pub(super) struct ReleaseManifest {
     pub revision: String,
     os: String,
     pub arch: String,
-    products: Vec<String>,
+    pub products: Vec<String>,
     pub artifacts: Vec<ReleaseArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
