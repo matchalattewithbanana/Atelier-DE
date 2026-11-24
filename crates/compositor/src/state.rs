@@ -38,6 +38,9 @@ pub struct Atelier {
     pending: Vec<ToplevelSurface>,
     layout: atelier_config::Layout,
     windows: Vec<Window>,
+    active_workspace: usize,
+    parked: [Vec<(Window, Point<i32, Logical>)>; 4],
+    focused: Option<Window>,
 }
 
 impl Atelier {
@@ -59,6 +62,7 @@ impl Atelier {
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(),
+            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None,
         })
     }
 
@@ -89,6 +93,7 @@ impl Atelier {
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
+        self.focused = window.clone();
         if let Some(window) = &window { self.space.raise_element(window, true); }
         for candidate in self.space.elements() {
             if let Some(toplevel) = candidate.toplevel() {
@@ -98,6 +103,41 @@ impl Atelier {
         }
         let target = window.as_ref().and_then(Window::toplevel).map(|s| s.wl_surface().clone());
         if let Some(keyboard) = self.seat.get_keyboard() { keyboard.set_focus(self, target, serial); }
+    }
+
+    pub fn select_workspace(&mut self, target: usize, move_focused: bool, serial: Serial) {
+        if target >= self.parked.len() || target == self.active_workspace { return; }
+        if self.seat.get_pointer().is_some_and(|p| p.is_grabbed()) || self.seat.get_keyboard().is_some_and(|k| k.is_grabbed()) { return; }
+        if move_focused {
+            let Some(window) = self.focused.clone() else { return; };
+            let position = self.space.element_location(&window).unwrap_or((24, 24).into());
+            self.unmap(&window);
+            window.set_activated(false);
+            if let Some(surface) = window.toplevel() { surface.send_pending_configure(); }
+            self.parked[target].push((window, position));
+            return;
+        }
+        self.focus(None, serial);
+        // Preserve stacking and floating coordinates while removing every hidden window from rendering and hit testing.
+        let outgoing: Vec<_> = self.space.elements().filter_map(|w| self.space.element_location(w).map(|p| (w.clone(), p))).collect();
+        for (window, _) in &outgoing { self.space.unmap_elem(window); }
+        self.parked[self.active_workspace] = outgoing;
+        self.active_workspace = target;
+        let incoming = std::mem::take(&mut self.parked[target]);
+        self.windows.clear();
+        for (window, position) in incoming {
+            self.space.map_element(window.clone(), position, false);
+            self.windows.push(window);
+        }
+        self.reflow();
+        let next = self.space.elements().next_back().cloned();
+        self.focus(next, serial);
+        tracing::info!(workspace = target + 1, "workspace activated");
+    }
+
+    fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
+        self.windows.iter().chain(self.parked.iter().flatten().map(|(window, _)| window))
+            .find(|w| w.toplevel().is_some_and(|s| s.wl_surface() == surface)).cloned()
     }
 
     pub fn surface_under_pointer(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
@@ -120,11 +160,12 @@ impl Atelier {
     }
 
     fn unmap(&mut self, window: &Window) {
-        let was_top = self.space.elements().next_back() == Some(window);
+        for hidden in &mut self.parked { hidden.retain(|(candidate, _)| candidate != window); }
+        let had_focus = self.focused.as_ref() == Some(window);
         self.space.unmap_elem(window);
         self.windows.retain(|candidate| candidate != window);
         self.reflow();
-        if was_top {
+        if had_focus {
             let next = self.space.elements().next_back().cloned();
             self.focus(next, SERIAL_COUNTER.next_serial());
         }
@@ -152,7 +193,7 @@ impl CompositorHandler for Atelier {
             let mapped = with_states(&root, |states| {
                 states.data_map.get::<RendererSurfaceStateUserData>().is_some_and(|state| state.lock().unwrap().buffer().is_some())
             });
-            let existing = self.space.elements().find(|window| window.toplevel().is_some_and(|s| s.wl_surface() == &root)).cloned();
+            let existing = self.window_for_surface(&root);
             if let Some(window) = existing {
                 if mapped { window.on_commit(); }
                 else if let Some(toplevel) = window.toplevel().cloned() {
@@ -212,7 +253,7 @@ impl XdgShellHandler for Atelier {
     }
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.pending.retain(|candidate| candidate != &surface);
-        let removed = self.space.elements().find(|w| w.toplevel() == Some(&surface)).cloned();
+        let removed = self.window_for_surface(surface.wl_surface());
         if let Some(window) = removed { self.unmap(&window); }
     }
 }
