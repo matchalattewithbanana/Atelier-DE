@@ -389,6 +389,7 @@ pub fn run_native(
     compositor.resize_with_refresh(i32::from(width), i32::from(height), refresh);
     let state = Rc::new(RefCell::new(compositor));
     let listener = ListeningSocket::bind(socket).context("bind native Wayland socket")?;
+    let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
 
     let device = GbmDevice::new(DeviceFd::from(fd.try_clone()?))
         .map_err(|error| anyhow::anyhow!("create native GBM device: {error}"))?;
@@ -473,6 +474,7 @@ pub fn run_native(
                 if input_dirty.replace(false) { queue.invalidate(); }
                 {
                     let mut state = state.borrow_mut();
+                    workspace_control.poll(&mut state, started.elapsed().as_millis() as u32)?;
                     // Conservative scene invalidation: a client request may alter content,
                     // stacking, regions or frame callbacks. Idle sessions do not submit.
                     if server.dispatch_clients(&mut *state)? > 0 { queue.invalidate(); }
