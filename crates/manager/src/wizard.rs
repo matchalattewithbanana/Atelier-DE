@@ -22,6 +22,10 @@ pub struct Preview {
     apply_supported: bool,
 }
 
+impl Preview {
+    pub(super) fn requested_products(&self) -> &[String] { &self.plan.requested }
+}
+
 fn ask(input: &mut impl BufRead, out: &mut impl Write, prompt: &str) -> Result<Option<String>> {
     write!(out, "{prompt} ")?; out.flush()?;
     let mut line = String::new();
@@ -166,6 +170,7 @@ mod tests {
         let (result, output) = preview("3\nnone\ny\n");
         let result = result.unwrap();
         assert_eq!(result.plan.steps.len(), 2);
+        assert_eq!(result.requested_products(), &["shell".to_owned(), "settings".to_owned()]);
         assert!(!result.apply_supported);
         assert!(result.first_session.is_none());
         assert!(output.contains("sudo: not used"));
