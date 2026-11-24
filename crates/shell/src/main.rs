@@ -5,6 +5,8 @@ use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 #[cfg(feature = "layer-panel")]
 mod panel;
+#[cfg(feature = "layer-panel")]
+mod workspace_backend;
 
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder().application_id("org.atelier.Shell").flags(gio::ApplicationFlags::NON_UNIQUE).build();
