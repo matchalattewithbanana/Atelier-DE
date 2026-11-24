@@ -143,7 +143,8 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
     for warning in &plan.warnings { writeln!(out, "  Note: {warning}")?; }
     for candidate in &packages.candidates { writeln!(out, "  Package {}: {} ({})", candidate.package, candidate.state, candidate.reasons.join(", "))?; }
     for note in &packages.notes { writeln!(out, "  Package note: {note}")?; }
-    writeln!(out, "  Package changes: none\n  User files/backups: none\n  sudo: not used\n  Recovery: not needed; apply is not implemented")?;
+    writeln!(out, "  Package changes: none\n  User files/backups: deployment-only if separately confirmed\n  sudo: not used\n  Recovery: incomplete staged copies are removed automatically; previous deployments remain untouched")?;
+    writeln!(out, "  Apply scope: with `setup --from BUILD_DIR`, only selected native Atelier binaries can be staged; package installation, rice changes, provider setup, and login/session changes are not applied")?;
     let Some(answer) = ask(input, out, "Accept this preview? [y/N]:")? else { return Ok(None); };
     if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") { return Ok(None); }
     if plan.steps.is_empty() { bail!("empty installation plan"); }
