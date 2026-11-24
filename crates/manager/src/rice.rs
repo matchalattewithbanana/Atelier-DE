@@ -277,14 +277,25 @@ pub(super) const APPEARANCE_FIELDS: &[(&str, &str, &str, Option<(u32,u32)>)] = &
     ("panelOpacity", "--panel-opacity", "Panel opacity (%)", Some((60,100))),
     ("fontSize", "--font-size", "Font size", Some((10,18))),
     ("fontFamily", "--font-family", "Font family", None),
+    ("background", "--background", "Background color (#RRGGBB)", None),
+    ("surface", "--surface", "Surface color (#RRGGBB)", None),
+    ("elevated", "--elevated", "Elevated color (#RRGGBB)", None),
+    ("text", "--text", "Text color (#RRGGBB)", None),
+    ("muted", "--muted", "Muted color (#RRGGBB)", None),
+    ("border", "--border", "Border color (#RRGGBB)", None),
+    ("success", "--success", "Success color (#RRGGBB)", None),
+    ("danger", "--danger", "Danger color (#RRGGBB)", None),
 ];
 #[derive(Deserialize)]
-struct AppearanceResponse { schema: u32, sha256: String, palette: serde_json::Value }
+pub(super) struct AppearancePreset { pub id: String, pub name: String, pub palette: serde_json::Value }
+#[derive(Deserialize)]
+struct AppearanceResponse { schema: u32, sha256: String, palette: serde_json::Value, presets: Vec<AppearancePreset> }
 pub(super) struct AppearanceReview {
     path: PathBuf,
     target: String,
     fingerprint: String,
     pub palette: serde_json::Value,
+    pub presets: Vec<AppearancePreset>,
 }
 fn appearance_edits(values: &[String], palette: &serde_json::Value) -> Result<Vec<String>> {
     if values.len() != APPEARANCE_FIELDS.len() { bail!("invalid appearance field set"); }
@@ -297,8 +308,8 @@ fn appearance_edits(values: &[String], palette: &serde_json::Value) -> Result<Ve
             if number < *min || number > *max { bail!("{title} must be between {min} and {max}"); }
             serde_json::json!(number)
         } else {
-            if *key == "accent" && !(value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)) {
-                bail!("accent must be a six-digit hex color");
+            if *key != "fontFamily" && !(value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)) {
+                bail!("{title} must be a six-digit hex color");
             }
             if *key == "fontFamily" && (value.chars().count() > 80 || value.chars().any(char::is_control)) {
                 bail!("font family must contain 1–80 printable characters");
@@ -320,7 +331,20 @@ pub(super) fn review_appearance(path: &Path, target: &str) -> Result<AppearanceR
     if response.schema != 1 || response.sha256.len()!=64
         || !response.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !response.palette.is_object() { bail!("invalid appearance review response"); }
-    Ok(AppearanceReview { path: checkout.root, target: target.into(), fingerprint:response.sha256,palette:response.palette })
+    let mut ids = std::collections::BTreeSet::new();
+    if response.presets.len() > 64 || response.presets.iter().any(|p|
+        p.id.is_empty() || p.id.len()>48 || !p.id.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'))
+        || !ids.insert(p.id.clone()) || p.name.is_empty() || !p.palette.is_object()) {
+        bail!("invalid bundled appearance presets");
+    }
+    for preset in &response.presets {
+        let values = APPEARANCE_FIELDS.iter().map(|(key,_,_,_)| {
+            let value=&preset.palette[*key];
+            value.as_str().map(str::to_owned).or_else(||value.as_u64().map(|n|n.to_string())).unwrap_or_default()
+        }).collect::<Vec<_>>();
+        appearance_edits(&values,&response.palette)?;
+    }
+    Ok(AppearanceReview { path: checkout.root, target: target.into(), fingerprint:response.sha256,palette:response.palette,presets:response.presets })
 }
 impl AppearanceReview {
     pub(super) fn changes(&self, values: &[String]) -> Result<Vec<String>> {
@@ -359,6 +383,10 @@ mod tests {
         values[1]="18".into(); values[8]="--help".into();
         assert_eq!(appearance_edits(&values,&palette).unwrap(),vec!["--radius=18","--font-family=--help"]);
         values[0]="red".into();
+        assert!(appearance_edits(&values,&palette).is_err());
+        values[0]="#123456".into(); values[9]="#10131B".into();
+        assert!(appearance_edits(&values,&palette).unwrap().contains(&"--background=#10131B".to_owned()));
+        values[16]="invalid".into();
         assert!(appearance_edits(&values,&palette).is_err());
     }
     #[test]
