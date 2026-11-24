@@ -1,5 +1,7 @@
 # Atelier DE — Native desktop
 
+> **Official direction:** [Atelier Ecosystem Vision](VISION.md) — our shared product architecture, independence principles, installation strategy and development priorities.
+
 Atelier DE is an independent Wayland desktop environment being developed in Rust. It is separate from the existing MangoWM-based distribution and uses Smithay directly. This repository is the native desktop, not an extension of a third-party compositor.
 
 **Development status: 0.1.0-alpha.1.** The first implementation targets a nested window in an existing Wayland or X11 session. It is not yet suitable as your login session or as a replacement for your daily compositor.
