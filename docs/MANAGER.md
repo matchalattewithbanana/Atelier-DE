@@ -191,3 +191,5 @@ Appearance Studio now provides optional Classic palette and layout editing via t
 Appearance Studio supports all nine Classic colors and bundled preset drafts, with reset and existing reviewed-save recovery. See [Mango integration](MANGO_INTEGRATION.md).
 
 Classic portable theme import/export is available in Appearance Studio. Themes contain validated appearance data only; importing never applies configuration, and export never overwrites an existing file.
+
+The optional Wallpapers page provides local gallery browsing, bounded thumbnail preview, per-output static images/slideshows and reviewed recovery through the Classic backend. See [Mango integration](MANGO_INTEGRATION.md).

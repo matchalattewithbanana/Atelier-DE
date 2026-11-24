@@ -442,9 +442,85 @@ impl AppearanceReview {
     }
 }
 
+#[derive(Clone,Deserialize)]
+pub(super) struct WallpaperState {
+    schema:u32,
+    sha256:String,
+    pub wallpapers:std::collections::BTreeMap<String,String>,
+    pub slideshows:std::collections::BTreeMap<String,String>,
+}
+#[derive(Deserialize)]
+pub(super) struct WallpaperItem { pub name:String, pub path:String }
+#[derive(Clone)]
+pub(super) struct WallpaperReview {
+    path:PathBuf,
+    target:String,
+    pub state:WallpaperState,
+}
+#[derive(Clone,Copy)]
+pub(super) enum WallpaperMode { Image, Slideshow, Clear }
+fn wallpaper_args(mode:WallpaperMode,screen:&str,value:&str)->Result<Vec<String>>{
+    if screen.is_empty() || screen.len()>128 || !screen.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'_'|b'-'|b'.'|b':')){
+        bail!("enter the exact output name (e.g. DP-1)");
+    }
+    let mode=match mode {WallpaperMode::Image=>"image",WallpaperMode::Slideshow=>"slideshow",WallpaperMode::Clear=>"clear"};
+    if mode!="clear" && (!Path::new(value).is_absolute() || value.chars().any(char::is_control)){bail!("use an absolute local image or folder path");}
+    let value=if mode=="clear"{""}else{value};
+    Ok(vec![format!("--screen={screen}"),format!("--mode={mode}"),format!("--path={value}")])
+}
+pub(super) fn review_wallpaper(path:&Path,target:&str)->Result<WallpaperReview>{
+    if live_desktop_present(){bail!("close all Mango Atelier sessions before editing wallpapers");}
+    let checkout=Checkout::open(path)?;
+    let state:WallpaperState=serde_json::from_slice(&checkout.run(target,&["wallpaper-review","inspect"],"180s")?)
+        .context("unsupported wallpaper review API; update Mango Atelier")?;
+    if state.schema!=1 || state.sha256.len()!=64 || !state.sha256.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)){bail!("invalid wallpaper review");}
+    Ok(WallpaperReview{path:checkout.root,target:target.into(),state})
+}
+impl WallpaperReview{
+    pub(super) fn gallery(&self,folder:&str)->Result<Vec<WallpaperItem>>{
+        if !Path::new(folder).is_absolute(){bail!("use an absolute folder path");}
+        let checkout=Checkout::open(&self.path)?;
+        let items:Vec<WallpaperItem>=serde_json::from_slice(&checkout.run(&self.target,&["wallpaper-review","gallery",folder],"30s")?)?;
+        if items.len()>1000 || items.iter().any(|i|!Path::new(&i.path).is_absolute() || i.path.chars().any(char::is_control)){bail!("invalid wallpaper gallery response");}
+        Ok(items)
+    }
+    pub(super) fn thumbnail(&self,image:&str)->Result<Vec<u8>>{
+        if !Path::new(image).is_absolute(){bail!("use an absolute image path");}
+        let checkout=Checkout::open(&self.path)?;
+        let bytes=checkout.run(&self.target,&["wallpaper-review","thumbnail",image],"30s")?;
+        // Only accept the backend's small, re-encoded PNG, never arbitrary source bytes.
+        if bytes.len()<24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || &bytes[12..16]!=b"IHDR" {bail!("invalid wallpaper preview");}
+        let width=u32::from_be_bytes(bytes[16..20].try_into()?);
+        let height=u32::from_be_bytes(bytes[20..24].try_into()?);
+        if width==0 || height==0 || width>480 || height>320{bail!("wallpaper preview exceeds dimensions");}
+        Ok(bytes)
+    }
+    pub(super) fn apply(self,mode:WallpaperMode,screen:&str,value:&str)->Result<String>{
+        if live_desktop_present(){bail!("close all Mango Atelier sessions before editing wallpapers");}
+        let mut args=vec!["wallpaper-review".into(),"apply".into(),format!("--expected-sha256={}",self.state.sha256)];
+        args.extend(wallpaper_args(mode,screen,value)?);
+        let checkout=Checkout::open(&self.path)?;
+        let args:Vec<_>=args.iter().map(String::as_str).collect();
+        let result:serde_json::Value=serde_json::from_slice(&checkout.run(&self.target,&args,"180s")?)?;
+        match result["status"].as_str(){
+            Some("saved") if result["recovery"].as_str().is_some_and(valid_snapshot_id)=>Ok(format!("Wallpaper saved for {screen}. Recovery snapshot: {}. Takes effect on next login.",result["recovery"].as_str().unwrap())),
+            Some("unchanged")=>Ok("No wallpaper changes saved.".into()),
+            _=>bail!("Unknown wallpaper result; inspect Rice backups before retrying"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wallpaper_operations_validate_output_and_paths(){
+        assert!(wallpaper_args(WallpaperMode::Image,"DP-1","relative.png").is_err());
+        assert!(wallpaper_args(WallpaperMode::Clear,"--help","").is_ok()); // Passed as a value, not an option.
+        assert!(wallpaper_args(WallpaperMode::Clear,"bad\nname","").is_err());
+        assert_eq!(wallpaper_args(WallpaperMode::Slideshow,"DP-1","/home/user/Pictures").unwrap(),vec!["--screen=DP-1","--mode=slideshow","--path=/home/user/Pictures"]);
+        assert_eq!(wallpaper_args(WallpaperMode::Clear,"DP-2","/ignored").unwrap()[2],"--path=");
+    }
     #[test]
     fn portable_theme_round_trip_and_no_overwrite() {
         let tmp=tempfile::tempdir().unwrap();
