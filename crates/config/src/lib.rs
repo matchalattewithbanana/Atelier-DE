@@ -142,3 +142,14 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "theme = [");
     }
 }
+
+/// A per-display local workspace channel, used only by Atelier clients.
+/// Reject arbitrary paths and never fall back to a host compositor socket.
+pub fn workspace_paths(display: &str) -> Result<(PathBuf, PathBuf)> {
+    if display.is_empty() || display.len() > 64 || !display.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        bail!("invalid Atelier display name");
+    }
+    let runtime = PathBuf::from(env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is required")?);
+    if !runtime.is_absolute() { bail!("XDG_RUNTIME_DIR must be absolute"); }
+    Ok((runtime.join(format!("{display}.workspace")), runtime.join(format!("{display}.workspace-state"))))
+}
