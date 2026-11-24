@@ -21,3 +21,21 @@ atelier-session --native --no-shell
 ```
 
 The compositor retains its existing seat checks. This is not a production login session, and physical GPU, input and VT recovery validation remain outstanding. Do not run with sudo or replace your working desktop session.
+
+## Saved shell profiles
+
+Create `${XDG_CONFIG_HOME:-$HOME/.config}/atelier-de/session-profiles.toml` yourself:
+
+```toml
+version = 1
+
+[profiles.classic]
+program = "quickshell"
+args = ["-c", "my-profile"]
+
+[profiles.native-panel]
+program = "atelier-shell"
+args = ["--panel"]
+```
+
+Then use `atelier-session --list-profiles` to inspect available profiles or `atelier-session --nested --profile classic` to explicitly select one. Named profiles override the default shell-start preference and cannot be combined with `--no-shell` or `--shell-command`. They are trusted user-authored configuration: a selected profile launches its executable with literal argument strings, without shell expansion. Listing does not execute anything; malformed files are rejected without modification. Do not import or run untrusted profile commands. The default session remains unchanged if a profile is not selected.
