@@ -13,3 +13,4 @@ tempfile.workspace = true
 sha2 = "0.10"
 libc = "0.2"
 nix = { version = "0.29", features = ["user"] }
+fs2 = "0.4"

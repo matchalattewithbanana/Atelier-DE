@@ -45,4 +45,16 @@ After building the selected native components from a trusted local checkout, run
 atelier-manager stage --from target/debug shell settings
 ```
 
-`stage` resolves native product dependencies and verifies each selected artifact before showing an explicit confirmation. It creates a new private deployment under `${XDG_DATA_HOME:-$HOME/.local/share}/atelier-manager/deployments/`, copies only allowlisted native executable filenames, and records sizes and SHA-256 hashes in a completion manifest. The hash detects later corruption; it is not a signature or proof of provenance. Source builds must be trusted. No binaries are run, existing deployments overwritten, system packages installed, login sessions changed or PATH modified. A failed copy removes its own temporary staging directory; an interrupted directory without the completion manifest is not a valid deployment. A complete deployment can be launched directly from its `bin` folder for testing. Activation and rollback of the selected deployment pointer, package transactions and Mango integration are follow-up work. The `setup` wizard still ends in a preview and does not invoke staging automatically.
+`stage` resolves native product dependencies and verifies each selected artifact before showing an explicit confirmation. It creates a new private deployment under `${XDG_DATA_HOME:-$HOME/.local/share}/atelier-manager/deployments/`, copies only allowlisted native executable filenames, and records sizes and SHA-256 hashes in a completion manifest. The hash detects later corruption; it is not a signature or proof of provenance. Source builds must be trusted. No binaries are run, existing deployments overwritten, system packages installed, login sessions changed or PATH modified. A failed copy removes its own temporary staging directory; an interrupted directory without the completion manifest is not a valid deployment. A complete deployment can be launched directly from its `bin` folder for testing. Package transactions and Mango integration are follow-up work. The `setup` wizard still ends in a preview and does not invoke staging automatically.
+
+## Select or roll back staged deployments
+
+```sh
+atelier-manager deployments
+atelier-manager verify DEPLOYMENT_ID
+atelier-manager activate DEPLOYMENT_ID
+atelier-manager active-path
+atelier-manager rollback
+```
+
+Activation and rollback confirm the exact target, verify the manifest and every artifact hash, and atomically update a single selection record with current and previous IDs under an exclusive lock. A stale review or corrupt deployment is rejected without switching. Previous deployment files remain intact. `active-path` prints the selected bin directory after structural and size checks; use `verify` for a full hash check. This is a manager-local selection, not a display-manager change or system-wide install. To test a selected bundle, explicitly launch the desired binary from that directory or add it to PATH for the current shell yourself. Running sessions and shell startup files are not modified. A rollback switches the record back to the previous complete deployment, not system packages or user settings. Hashes detect corruption, not authenticity.
