@@ -65,11 +65,9 @@ pub fn preview(plan: &Plan, report: &Report, providers: &[String]) -> PackagePre
     }
     let packages = candidates(plan, providers);
     let names: BTreeSet<_> = packages.keys().cloned().collect();
-    let pacman = report.package_managers.iter().find(|tool| tool.name == "pacman").and_then(|tool| tool.path.as_ref());
-    let timeout = report.optional_tools.iter().find(|tool| tool.name == "timeout").and_then(|tool| tool.path.as_ref());
     let missing = if names.is_empty() { Some(BTreeSet::new()) }
-        else if let (Some(pacman), Some(timeout)) = (pacman, timeout) {
-            Command::new(timeout).args(["--kill-after=1s", "5s"]).arg(pacman)
+        else if trusted_tool(PACMAN).is_ok() && trusted_tool(TIMEOUT).is_ok() {
+            Command::new(TIMEOUT).args(["--kill-after=1s", "5s"]).arg(PACMAN)
                 .arg("-T").args(&names).env("LC_ALL", "C").output().ok()
                 .and_then(|output| missing_from_output(output, &names))
         } else { None };

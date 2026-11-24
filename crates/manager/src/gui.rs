@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 use gtk::{gio, glib, prelude::*};
 use std::{sync::mpsc, thread, time::Duration};
 use crate::{acquire, catalog, packages, selection, trust};
+mod setup;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -104,7 +105,7 @@ fn rows(page: Page) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-fn label(text: &str, class: &str) -> gtk::Label {
+pub(super) fn label(text: &str, class: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_xalign(0.0);
     label.set_wrap(true);
@@ -206,6 +207,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
         });
         if id == "overview" { button.emit_clicked(); }
     }
+    stack.add_titled(&setup::build(), Some("setup"), "Installation");
     window.set_child(Some(&layout));
     window
 }

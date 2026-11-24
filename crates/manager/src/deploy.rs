@@ -167,6 +167,28 @@ fn review_and_stage(plan: StagePlan, input: &mut impl io::BufRead, out: &mut imp
     Ok(Some(id))
 }
 
+/// Review a local source build without writing anything. The returned opaque
+/// plan pins the reviewed hashes for a later separately approved staging.
+#[cfg(feature = "gui")]
+pub(super) fn review_local(source: &Path, ids: &[String]) -> Result<(StagePlan, String)> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run staging as your desktop user, not root"); }
+    if !source.is_absolute() { bail!("use an absolute trusted build directory"); }
+    let mut plan = StagePlan::prepare(source, data_root()?, ids)?;
+    let mut detail = format!("Trusted local build: {}\nNew deployment under: {}\n", plan.source.display(), plan.root.display());
+    for item in &mut plan.binaries {
+        let identity = read_artifact(&item.source, &item.name, io::sink())?;
+        detail.push_str(&format!("{}: {} bytes\nSHA-256 {}\n", identity.name, identity.bytes, identity.sha256));
+        item.reviewed = Some(identity);
+    }
+    Ok((plan, detail))
+}
+
+#[cfg(feature = "gui")]
+pub(super) fn stage_reviewed(plan: StagePlan) -> Result<PathBuf> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run staging as your desktop user, not root"); }
+    stage(plan)
+}
+
 pub fn run(source: &Path, ids: &[String]) -> Result<Option<String>> {
     if nix::unistd::Uid::effective().is_root() { bail!("run staging as your desktop user, not root or sudo"); }
     let plan = StagePlan::prepare(source, data_root()?, ids)?;
