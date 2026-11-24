@@ -52,3 +52,17 @@ atelier-services network-action deactivate CONNECTION_UUID
 ```
 
 Actions are explicit and affect the current system network; NetworkManager and its authorization policy remain in control. Atelier requests no sudo, never reads or stores network passwords and never modifies or deletes connection profiles. Activation is limited to discovered saved UUIDs and can fail if authentication or authorization is required. New protected network setup and secret-agent integration remain future work. No connectivity probes or external requests are made by the inventory provider.
+
+
+## Bluetooth
+
+The optional BlueZ provider uses `bluetoothctl` (with the paired-device filter) and coreutils `timeout`. It reports adapters, power state, paired device names and connection status. Unknown state is null. With zero or multiple adapters, power and paired-device state are intentionally not inferred; control commands refuse to run. Adapter-scoped D-Bus support remains future work.
+
+```sh
+atelier-services bluetooth
+atelier-services bluetooth-action power on
+atelier-services bluetooth-action connect AA:BB:CC:DD:EE:FF
+atelier-services bluetooth-action disconnect AA:BB:CC:DD:EE:FF
+```
+
+Actions require an explicit request and a single adapter, validate device addresses against the paired inventory, and verify the requested state afterwards. No discovery scans, pairing, trust changes, removal or credential handling are performed. BlueZ and system authorization remain in charge. Commands are bounded, but GUI integrations must execute them in a worker. The provider's text parser is intentionally strict and may report unrecognized output as unavailable; real BlueZ acceptance testing is required.
