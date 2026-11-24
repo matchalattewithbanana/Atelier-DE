@@ -1,5 +1,6 @@
 //! Initial read-only ecosystem manager and installation diagnostics.
 use anyhow::{bail, Result};
+mod catalog;
 use serde::Serialize;
 use std::{env, fs, io::{self, Read}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -121,8 +122,30 @@ fn main() -> Result<()> {
             println!("\nPresence is not a compatibility or runtime readiness guarantee. No commands were executed.");
         }
         [mode, flag] if mode == "doctor" && flag == "--json" => println!("{}", serde_json::to_string_pretty(&report())?),
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\nRead-only inventory; no setup or package changes."),
-        _ => bail!("usage: atelier-manager doctor [--json]"),
+        [mode] if mode == "catalog" => {
+            for product in catalog::PRODUCTS {
+                println!("{} — {} [{}]\n  {}", product.id, product.name, product.source, product.note);
+            }
+        }
+        [mode, flag] if mode == "catalog" && flag == "--json" => {
+            println!("{}", serde_json::to_string_pretty(&catalog::PRODUCTS)?);
+        }
+        [mode, rest @ ..] if mode == "plan" => {
+            let json = rest.last().is_some_and(|arg| arg == "--json");
+            let selected = if json { &rest[..rest.len() - 1] } else { rest };
+            let plan = catalog::plan(selected, &report())?;
+            if json { println!("{}", serde_json::to_string_pretty(&plan)?); }
+            else {
+                println!("Atelier installation preview — no changes");
+                for step in &plan.steps {
+                    println!("  {}: {} [{}]", step.name, step.status, step.source);
+                    if !step.missing_binaries.is_empty() { println!("    Missing: {}", step.missing_binaries.join(", ")); }
+                }
+                for warning in &plan.warnings { println!("Note: {warning}"); }
+            }
+        }
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\nRead-only inventory and planning; no setup or package changes."),
+        _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
 }
