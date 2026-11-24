@@ -45,3 +45,7 @@ The Panel, dock & widgets page uses Mango #21’s reviewed layout API. Edit comp
 ## Wallpaper-derived colors
 
 Appearance Studio can generate deterministic dark and light palettes from a local wallpaper using Mango #22 and optional python-pillow. The bounded image decoder and palette generator run in the trusted backend; the native Manager validates all nine returned color roles. Choosing a variant updates only the editable color draft, not wallpaper selection, typography or layout. Saving requires the existing reviewed appearance transaction. Generated colors target 4.5:1 contrast on opaque generated surfaces (border 3:1), not a complete accessibility certification. No live wallpaper tracking or automatic recoloring.
+
+## Custom rice registry
+
+The Custom rices page requires Mango #23 and a trusted local checkout. It reviews a bounded absolute JSON manifest or registered custom ID, displays its full definition and fingerprint, and requires the exact typed registration/removal phrase. Changes to inputs invalidate the review. The backend rechecks the manifest and refuses duplicate registrations or removal of built-in, current and rollback profiles. Registration never installs or launches anything; unregistering leaves source and settings files intact. Export snapshots first, since unregistered rice snapshots may no longer be discoverable. Close all Atelier sessions and avoid concurrent legacy registry/selection edits. This does not sandbox custom code when it is subsequently launched.
