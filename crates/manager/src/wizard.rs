@@ -24,6 +24,9 @@ pub struct Preview {
 
 impl Preview {
     pub(super) fn requested_products(&self) -> &[String] { &self.plan.requested }
+    pub(super) fn install_packages(&self, report: &Report) -> Result<()> {
+        crate::packages::install(&self.plan, report, &self.optional_providers)
+    }
 }
 
 fn ask(input: &mut impl BufRead, out: &mut impl Write, prompt: &str) -> Result<Option<String>> {
