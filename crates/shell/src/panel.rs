@@ -1,8 +1,9 @@
 //! Optional GTK layer-shell panel; the searchable launcher stays a normal window.
-use atelier_config::{component, config_path, workspace_paths, Config};
+use atelier_config::{component, config_path, Config};
+use crate::workspace_backend::{installed_helper, WorkspaceBackend};
 use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::{fs, io::Read, os::unix::net::UnixDatagram, process::Command, time::Duration};
+use std::{fs, rc::Rc, process::Command, time::Duration};
 
 pub fn build(app: &gtk::Application) {
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
@@ -28,21 +29,29 @@ pub fn build(app: &gtk::Application) {
     });
     bar.append(&launcher);
 
-    let paths = std::env::var("WAYLAND_DISPLAY").ok().and_then(|display| workspace_paths(&display).ok());
+    let backend = Rc::new(WorkspaceBackend::detect());
+    let backend_label = gtk::Label::new(Some(backend.label()));
+    backend_label.add_css_class("dim-label");
+    bar.append(&backend_label);
     let mut workspaces = Vec::new();
-    for index in 1..=4u8 {
+    for index in 1..=backend.count() as u8 {
         let button = gtk::Button::with_label(&index.to_string());
         button.set_tooltip_text(Some(&format!("Workspace {index}")));
         button.add_css_class("flat");
-        button.set_sensitive(paths.as_ref().is_some_and(|(command, _)| command.exists()));
-        let destination = paths.as_ref().map(|(command, _)| command.clone());
-        button.connect_clicked(move |_| {
-            if let Some(path) = &destination {
-                if let Ok(socket) = UnixDatagram::unbound() { let _ = socket.send_to(&[index], path); }
-            }
-        });
+        button.set_sensitive(false);
+        let target = Rc::clone(&backend);
+        button.connect_clicked(move |_| target.focus(index));
         bar.append(&button);
         workspaces.push(button);
+    }
+    if backend.is_external() && installed_helper("atelier").is_some() {
+        let rices = gtk::Button::with_label("Rices");
+        rices.set_tooltip_text(Some("Browse installed and available Atelier rice products"));
+        let app_ref = app.downgrade();
+        rices.connect_clicked(move |_| {
+            if let Some(app) = app_ref.upgrade() { show_rices(&app); }
+        });
+        bar.append(&rices);
     }
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0); spacer.set_hexpand(true); bar.append(&spacer);
     let clock = gtk::Label::new(None);
@@ -64,10 +73,10 @@ pub fn build(app: &gtk::Application) {
         let power = battery_percent();
         battery.set_visible(power.is_some());
         if let Some(power) = power { battery.set_text(&format!("Battery {power}%")); }
-        let active = paths.as_ref().and_then(|(_, state)| fs::File::open(state).ok()).and_then(|mut file| { let mut byte = [0u8]; file.read_exact(&mut byte).ok().map(|_| byte[0]) });
+        let snapshot = backend.snapshot();
         for (index, button) in workspaces.iter().enumerate() {
-            button.set_sensitive(paths.as_ref().is_some_and(|(command, _)| command.exists()));
-            if active == Some((index + 1) as u8) { button.add_css_class("suggested-action"); }
+            button.set_sensitive(snapshot.is_some());
+            if snapshot.as_ref().is_some_and(|state| state.active[index]) { button.add_css_class("suggested-action"); }
             else { button.remove_css_class("suggested-action"); }
         }
     };
@@ -104,4 +113,35 @@ fn battery_percent() -> Option<u32> {
         }
     }
     None
+}
+
+fn show_rices(app: &gtk::Application) {
+    let Some(helper) = installed_helper("atelier") else { return; };
+    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Rice products").default_width(570).default_height(420).build();
+    let text = gtk::TextView::new();
+    text.set_editable(false);
+    text.set_monospace(true);
+    text.set_wrap_mode(gtk::WrapMode::WordChar);
+    text.buffer().set_text("Loading rice catalog…");
+    let scroll = gtk::ScrolledWindow::builder().child(&text).build();
+    window.set_child(Some(&scroll));
+    window.present();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = match Command::new(helper).args(["rice", "list"]).output() {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+            Ok(output) => format!("Rice manager returned {}:\n{}", output.status, String::from_utf8_lossy(&output.stderr)),
+            Err(error) => format!("Rice manager could not start: {error}"),
+        };
+        let _ = send.send(result);
+    });
+    let weak = text.downgrade();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let Some(view) = weak.upgrade() else { return glib::ControlFlow::Break; };
+        match receive.try_recv() {
+            Ok(result) => { view.buffer().set_text(&result); glib::ControlFlow::Break }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => { view.buffer().set_text("Rice manager unavailable."); glib::ControlFlow::Break }
+        }
+    });
 }
