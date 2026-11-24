@@ -3,6 +3,7 @@
 mod nested;
 mod state;
 mod layout;
+mod workspace_control;
 #[cfg(any(feature = "native-session", test))]
 mod frame_queue;
 mod input_router;
