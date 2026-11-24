@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/config", "crates/compositor", "crates/session", "crates/shell", "crates/settings"]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+atelier-config = { path = "crates/config" }
+anyhow = "1.0"
+gtk = { package = "gtk4", version = "0.9" }
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

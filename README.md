@@ -41,13 +41,14 @@ cargo test --workspace
 The supervisor prints the actual Wayland socket name. From a second terminal in the **same user session**, connect an installed Wayland-native application with that name:
 
 ```sh
-WAYLAND_DISPLAY=wayland-atelier-<printed-id> foot
+WAYLAND_DISPLAY=wayland-atelier-12345 foot # substitute the printed socket name
 ```
 
 Alternatively, start only the compositor with an explicit socket name:
 
 ```sh
 ./target/debug/atelier-compositor --nested --socket wayland-atelier-dev
+# In another terminal:
 WAYLAND_DISPLAY=wayland-atelier-dev ./target/debug/atelier-shell
 ```
 
