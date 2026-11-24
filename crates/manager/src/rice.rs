@@ -153,9 +153,138 @@ pub(super) fn execute(path: &Path, target: &str, action: Action, id: &str) -> Re
     Ok(items)
 }
 
+/// Snapshot operations are a closed vocabulary; arbitrary CLI flags and
+/// community-provided paths cannot become delegated commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SnapshotAction { List, Inspect, Create, Import, Export, Rename, Restore, Delete }
+
+fn valid_snapshot_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 29 && b[8] == b'T' && b[15] == b'Z' && b[16] == b'-'
+        && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
+        && b[17..].iter().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+}
+fn snapshot_label(name: &str) -> Result<()> {
+    if name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        bail!("snapshot name must have 1–80 characters without control characters");
+    }
+    Ok(())
+}
+fn archive_path(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if !p.is_absolute() || p.extension().and_then(|s| s.to_str()) != Some("zip")
+        || path.chars().any(char::is_control) {
+        bail!("enter an absolute .zip archive path");
+    }
+    Ok(())
+}
+impl SnapshotAction {
+    /// Fields are validated before constructing any argument list.
+    fn arguments(self, id: &str, value: &str) -> Result<Vec<String>> {
+        let mut args = vec!["snapshot".into()];
+        if matches!(self, Self::Inspect | Self::Export | Self::Rename | Self::Restore | Self::Delete)
+            && !valid_snapshot_id(id) { bail!("enter an exact snapshot ID from the inventory"); }
+        match self {
+            Self::List => args.extend(["list".into(), "--json".into()]),
+            Self::Inspect => args.extend(["show".into(), id.into()]),
+            Self::Create => {
+                if !valid_id(id) { bail!("enter a registered rice ID"); }
+                snapshot_label(value)?;
+                args.extend(["create".into(), id.into(), format!("--name={value}")]);
+            }
+            Self::Import => {
+                archive_path(value)?;
+                args.extend(["import".into(), value.into()]);
+            }
+            Self::Export => {
+                archive_path(value)?;
+                args.extend(["export".into(), id.into(), value.into()]);
+            }
+            Self::Rename => {
+                snapshot_label(value)?;
+                args.extend(["rename".into(), id.into(), "--".into(), value.into()]);
+            }
+            Self::Restore => args.extend(["restore".into(), id.into()]),
+            Self::Delete => args.extend(["delete".into(), id.into()]),
+        }
+        Ok(args)
+    }
+
+    pub(super) fn phrase(self, id: &str, value: &str) -> Result<Option<String>> {
+        self.arguments(id, value)?;
+        Ok(match self {
+            Self::List | Self::Inspect => None,
+            Self::Create => Some(format!("create snapshot {id}")),
+            Self::Import => Some("import archive".into()),
+            Self::Export => Some(format!("export {id}")),
+            Self::Rename => Some(format!("rename {id}")),
+            Self::Restore => Some(format!("restore offline {id}")),
+            Self::Delete => Some(format!("delete {id}")),
+        })
+    }
+}
+fn live_desktop_present() -> bool {
+    MARKERS.iter().any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+        || ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"].iter().any(|key| {
+            std::env::var(key).unwrap_or_default().split(':')
+                .any(|name| matches!(name.to_ascii_lowercase().as_str(), "mango" | "mangowm" | "hyprland" | "niri"))
+        })
+}
+pub(super) fn snapshots(path: &Path, action: SnapshotAction, id: &str, value: &str, confirmation: &str) -> Result<Vec<Item>> {
+    let args = action.arguments(id, value)?;
+    if let Some(expected) = action.phrase(id, value)? {
+        if confirmation != expected { bail!("type exactly: {expected}"); }
+    }
+    // Do not clear live detection markers to bypass the delegated restore guard.
+    // A different or unmanaged session may still exist: typed offline assurance
+    // is required in addition to this conservative environment check.
+    if action == SnapshotAction::Restore && live_desktop_present() {
+        bail!("restore from a separate desktop after closing all Mango Atelier sessions and previews");
+    }
+    let checkout = Checkout::open(path)?;
+    // Snapshot store and rice configuration are shared across compositors.
+    // Restore is offline only; never pass the backend's --allow-active switch.
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = checkout.run("mango", &args, "180s")?;
+    if action == SnapshotAction::List {
+        let data: Vec<Snapshot> = serde_json::from_slice(&output)?;
+        return Ok(data.into_iter().map(|entry| Item {
+            title: entry.name, status: format!("{} · {} files", entry.rice, entry.files), detail: entry.id,
+        }).collect());
+    }
+    let (title, status) = match action {
+        SnapshotAction::Inspect => ("Snapshot manifest", "Validated by Mango Atelier"),
+        SnapshotAction::Restore => ("Restore result", "Review recovery snapshot ID"),
+        SnapshotAction::Import => ("Import result", "Stored only; not restored"),
+        SnapshotAction::Export => ("Export result", "Private archive; review before sharing"),
+        SnapshotAction::Create => ("Snapshot creation", "Saved"),
+        SnapshotAction::Rename => ("Rename result", "Completed"),
+        SnapshotAction::Delete => ("Deletion result", "Completed"),
+        SnapshotAction::List => unreachable!(),
+    };
+    Ok(vec![Item { title: title.into(), status: status.into(), detail: String::from_utf8_lossy(&output).into_owned() }])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_actions_restrict_ids_paths_and_flags() {
+        let id = "20261124T160000Z-0123456789ab";
+        assert!(valid_snapshot_id(id));
+        for bad in ["../archive","--allow-active","20261124T160000Z-0123456789AB","20261124T160000Z-0123456789a"] {
+            assert!(SnapshotAction::Restore.arguments(bad, "").is_err());
+        }
+        assert_eq!(SnapshotAction::Restore.arguments(id,"").unwrap(),vec!["snapshot","restore",id]);
+        assert_eq!(SnapshotAction::Restore.phrase(id,"").unwrap().as_deref(),Some(format!("restore offline {id}").as_str()));
+        assert!(SnapshotAction::Import.arguments("","relative.zip").is_err());
+        assert!(SnapshotAction::Export.arguments(id,"/tmp/other.txt").is_err());
+        assert_eq!(SnapshotAction::Create.arguments("atelier","--allow-active").unwrap(),vec!["snapshot","create","atelier","--name=--allow-active"]);
+        assert_eq!(SnapshotAction::Rename.arguments(id,"--help").unwrap(),vec!["snapshot","rename",id,"--","--help"]);
+        assert!(SnapshotAction::Create.arguments("atelier","bad\nname").is_err());
+        assert!(SnapshotAction::Delete.phrase(id,"").unwrap().is_some());
+        assert!(SnapshotAction::Inspect.phrase(id,"").unwrap().is_none());
+    }
     #[test]
     fn actions_are_closed_and_selection_is_next_login_only() {
         assert_eq!(mutation_args(Action::Select,"niri","atelier").unwrap(), vec!["use","atelier","--compositor","niri","--next-login"]);
