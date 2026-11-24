@@ -50,6 +50,14 @@ impl History {
     fn list(&self) -> fdo::Result<String> {
         serde_json::to_string(&lock(&self.state)?.snapshot()).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
+    fn popup(&self) -> fdo::Result<String> {
+        serde_json::to_string(&lock(&self.state)?.popup_snapshot()).map_err(|error| fdo::Error::Failed(error.to_string()))
+    }
+    fn set_dnd(&self, instance: String, enabled: bool) -> fdo::Result<()> {
+        let mut state = lock(&self.state)?;
+        if !state.matches_instance(&instance) { return Err(fdo::Error::Failed("Notification daemon changed".into())); }
+        state.set_dnd(enabled); Ok(())
+    }
     async fn dismiss(&self, instance: String, id: u32, #[zbus(connection)] connection: &zbus::Connection) -> fdo::Result<()> {
         {
             let mut state = lock(&self.state)?;
@@ -94,11 +102,19 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode] if mode == "daemon" => daemon(),
-        [mode] if mode == "list" || mode == "clear-history" => {
+        [mode] if mode == "list" || mode == "popup" || mode == "clear-history" => {
             let connection = Connection::session()?;
             let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
             if mode == "list" { let snapshot: String = proxy.call("List", &())?; println!("{snapshot}"); }
+            else if mode == "popup" { let snapshot: String = proxy.call("Popup", &())?; println!("{snapshot}"); }
             else { let _: () = proxy.call("ClearHistory", &())?; }
+            Ok(())
+        }
+        [mode, instance, value] if mode == "dnd" => {
+            let enabled = match value.as_str() { "on" => true, "off" => false, _ => bail!("expected on or off") };
+            let connection = Connection::session()?;
+            let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
+            let _: () = proxy.call("SetDnd", &(instance.as_str(), enabled))?;
             Ok(())
         }
         [mode, instance, id] if mode == "dismiss" => {
@@ -115,7 +131,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | clear-history [INSTANCE] | dismiss INSTANCE ID\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),
