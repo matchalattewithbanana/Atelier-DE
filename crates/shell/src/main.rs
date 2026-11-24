@@ -9,13 +9,36 @@ mod panel;
 mod workspace_backend;
 
 fn main() -> glib::ExitCode {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("atelier-shell [--panel | --launcher]\nThe panel is optional; external desktops use launcher mode by default.");
+        return glib::ExitCode::SUCCESS;
+    }
+    if arguments.len() > 1 || arguments.iter().any(|arg| arg != "--panel" && arg != "--launcher") {
+        eprintln!("Use --panel or --launcher, not both.");
+        return glib::ExitCode::FAILURE;
+    }
+    let requested_panel = arguments.first().is_some_and(|arg| arg == "--panel");
+    let requested_launcher = arguments.first().is_some_and(|arg| arg == "--launcher");
+    #[cfg(not(feature = "layer-panel"))]
+    if requested_panel {
+        eprintln!("Panel support requires the layer-panel build feature.");
+        return glib::ExitCode::FAILURE;
+    }
+    // External rices own their existing bar. Only native sessions auto-start
+    // the panel; other products opt in explicitly with --panel.
+    let use_panel = requested_panel || (!requested_launcher && std::env::var("WAYLAND_DISPLAY").ok().is_some_and(|display| {
+        display.starts_with("wayland-atelier-") ||
+            atelier_config::workspace_paths(&display).ok().is_some_and(|(command, _)| command.exists())
+    }));
     let app = gtk::Application::builder().application_id("org.atelier.Shell").flags(gio::ApplicationFlags::NON_UNIQUE).build();
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
         #[cfg(feature = "layer-panel")]
-        if gtk4_layer_shell::is_supported() { panel::build(app); return; }
+        if use_panel && gtk4_layer_shell::is_supported() { panel::build(app); return; }
+        let _ = use_panel;
         build_shell(app);
     });
-    app.run()
+    app.run_with_args(&["atelier-shell"])
 }
 
 fn build_shell(app: &gtk::Application) {
