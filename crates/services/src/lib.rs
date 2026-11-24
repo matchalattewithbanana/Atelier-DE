@@ -1,4 +1,5 @@
-//! Compositor-independent, read-only power inventory.
+//! Compositor-independent desktop service providers.
+pub mod media;
 use serde::Serialize;
 use std::{fs, io, path::Path};
 
