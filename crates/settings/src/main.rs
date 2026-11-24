@@ -3,14 +3,15 @@ use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
 mod audio_page;
+mod bluetooth_page;
 
 fn main() -> glib::ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let initial_page = match args.as_slice() {
         [] => "appearance".to_owned(),
-        [flag, id] if flag == "--page" && ["appearance", "applications", "session", "power", "audio", "about"].contains(&id.as_str()) => id.clone(),
+        [flag, id] if flag == "--page" && ["appearance", "applications", "session", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("atelier-settings [--page appearance|applications|session|power|audio|about]");
+            println!("atelier-settings [--page appearance|applications|session|power|audio|bluetooth|about]");
             return glib::ExitCode::SUCCESS;
         }
         _ => { eprintln!("Invalid settings page; use --help."); return glib::ExitCode::FAILURE; }
@@ -140,6 +141,9 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
 
     let audio = page(&stack, "audio", "Audio", "Choose input and output devices and adjust volume or mute.");
     audio_page::build(&audio);
+
+    let bluetooth = page(&stack, "bluetooth", "Bluetooth", "Manage the Bluetooth adapter and already-paired devices.");
+    bluetooth_page::build(&bluetooth);
 
     let about = page(&stack, "about", "About", "Atelier Settings is an independent application. It does not require a running Atelier compositor.");
     for (name, value) in [
