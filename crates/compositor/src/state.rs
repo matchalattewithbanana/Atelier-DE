@@ -46,13 +46,17 @@ pub struct Atelier {
 
 impl Atelier {
     pub fn new(display: &DisplayHandle, layout: atelier_config::Layout) -> anyhow::Result<Self> {
+        Self::new_for_output(display, layout, "ATELIER-NESTED-1", "Nested display")
+    }
+
+    pub fn new_for_output(display: &DisplayHandle, layout: atelier_config::Layout, name: &str, model: &str) -> anyhow::Result<Self> {
         let mut seats = SeatState::new();
         let mut seat = seats.new_wl_seat(display, "atelier-seat");
         seat.add_keyboard(Default::default(), 200, 25)?;
         seat.add_pointer();
-        let output = Output::new("ATELIER-NESTED-1".into(), PhysicalProperties {
+        let output = Output::new(name.into(), PhysicalProperties {
             size: (0, 0).into(), subpixel: Subpixel::Unknown,
-            make: "Atelier".into(), model: "Nested display".into(),
+            make: "Atelier".into(), model: model.into(),
         });
         output.create_global::<Self>(display);
         let mut space = Space::default();
@@ -71,7 +75,11 @@ impl Atelier {
     pub fn take_scene_dirty(&mut self) -> bool { std::mem::take(&mut self.scene_dirty) }
 
     pub fn resize(&mut self, width: i32, height: i32) {
-        let mode = Mode { size: (width, height).into(), refresh: 60_000 };
+        self.resize_with_refresh(width, height, 60_000);
+    }
+
+    pub fn resize_with_refresh(&mut self, width: i32, height: i32, refresh: i32) {
+        let mode = Mode { size: (width, height).into(), refresh };
         if self.output.current_mode() != Some(mode) {
             self.scene_dirty = true;
             let previous = self.output.current_mode();
