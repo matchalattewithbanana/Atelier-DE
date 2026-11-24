@@ -5,21 +5,16 @@ use atelier_config::{component, config_path, Config};
 use std::{env, fs, os::unix::{fs::FileTypeExt, net::UnixStream}, path::PathBuf, process::{Child, Command}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::{Duration, Instant}};
 
 fn main() -> Result<()> {
-    let mut start_shell = true;
-    let mut nested = false;
-    for arg in env::args().skip(1) {
-        match arg.as_str() {
-            "--nested" => nested = true,
-            "--no-shell" => start_shell = false,
-            "--help" | "-h" => {
-                println!("atelier-session --nested [--no-shell]\nStarts and supervises the native Atelier development session.");
-                return Ok(());
-            }
-            other => bail!("unknown argument {other}"),
-        }
+    let mut args = env::args().skip(1).peekable();
+    if args.peek().is_some_and(|arg| arg == "--help" || arg == "-h") {
+        println!("atelier-session (--nested | --native) [--no-shell | --shell-command PROGRAM [--shell-arg ARG]...]\nStarts an Atelier session with the default shell, no shell, or an explicitly selected external shell. Native mode is experimental and requires a spare local TTY.");
+        return Ok(());
     }
-    if !nested { bail!("native DRM session is not implemented yet; use --nested"); }
+    let options = Options::parse(args)?;
     let config = Config::load(&config_path()?)?;
+    let shell = options.shell.or_else(|| {
+        if !options.no_shell && config.start_shell { Some(Shell { program: "atelier-shell".into(), args: Vec::new() }) } else { None }
+    });
     let running = Arc::new(AtomicBool::new(true));
     let signal_flag = Arc::clone(&running);
     ctrlc::set_handler(move || signal_flag.store(false, Ordering::SeqCst))?;
@@ -30,7 +25,7 @@ fn main() -> Result<()> {
     if fs::symlink_metadata(&path).is_ok() { bail!("session socket already exists: {}", path.display()); }
 
     let mut children = Children::default();
-    children.compositor = Some(component("atelier-compositor").args(["--nested", "--socket", &socket]).spawn().context("start atelier-compositor (build the workspace first)")?);
+    children.compositor = Some(component("atelier-compositor").args([options.backend, "--socket", &socket]).spawn().context("start atelier-compositor (build the workspace first)")?);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if !running.load(Ordering::SeqCst) { return Ok(()); }
@@ -41,8 +36,8 @@ fn main() -> Result<()> {
     }
 
     println!("Atelier session ready; WAYLAND_DISPLAY={socket}");
-    if start_shell && config.start_shell {
-        children.shell = Some(wayland_child("atelier-shell", &socket).spawn().context("start atelier-shell")?);
+    if let Some(profile) = &shell {
+        children.shell = Some(wayland_child(profile, &socket).spawn().context("start selected shell")?);
     }
     let mut restart_times = Vec::new();
     while running.load(Ordering::SeqCst) {
@@ -57,7 +52,7 @@ fn main() -> Result<()> {
                 if restart_times.len() < 3 {
                     restart_times.push(Instant::now());
                     eprintln!("Atelier shell exited ({status}); restarting ({}/3)", restart_times.len());
-                    children.shell = Some(wayland_child("atelier-shell", &socket).spawn().context("restart atelier-shell")?);
+                    children.shell = Some(wayland_child(shell.as_ref().context("missing shell profile")?, &socket).spawn().context("restart selected shell")?);
                 } else {
                     eprintln!("Shell restart limit reached; compositor remains active");
                 }
@@ -68,11 +63,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn wayland_child(name: &str, socket: &str) -> Command {
-    let mut command = component(name);
+fn wayland_child(profile: &Shell, socket: &str) -> Command {
+    let mut command = component(&profile.program);
+    command.args(&profile.args);
     command.env("WAYLAND_DISPLAY", socket).env("GDK_BACKEND", "wayland")
         .env("XDG_SESSION_TYPE", "wayland").env("XDG_CURRENT_DESKTOP", "Atelier")
-        .env_remove("WAYLAND_SOCKET").env_remove("DISPLAY");
+        .env_remove("WAYLAND_SOCKET").env_remove("DISPLAY")
+        .env_remove("MANGO_INSTANCE_SIGNATURE").env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+        .env_remove("NIRI_SOCKET").env_remove("ATELIER_COMPOSITOR")
+        .env("XDG_SESSION_DESKTOP", "Atelier");
     command
 }
 
@@ -90,6 +89,65 @@ impl Drop for Children {
                 if child.try_wait().ok().flatten().is_none() { let _ = child.kill(); }
             }
             let _ = child.wait();
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Shell { program: String, args: Vec<String> }
+
+#[derive(Debug)]
+struct Options { backend: &'static str, no_shell: bool, shell: Option<Shell> }
+
+impl Options {
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
+        let mut backend = None;
+        let mut no_shell = false;
+        let mut shell = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--nested" | "--native" => {
+                    if backend.is_some() { bail!("select exactly one backend"); }
+                    backend = Some(if arg == "--nested" { "--nested" } else { "--native" });
+                }
+                "--no-shell" => {
+                    if no_shell || shell.is_some() { bail!("select exactly one shell profile"); }
+                    no_shell = true;
+                }
+                "--shell-command" => {
+                    if no_shell || shell.is_some() { bail!("select exactly one shell profile"); }
+                    let program = args.next().context("--shell-command requires an executable")?;
+                    if program.trim().is_empty() || program.starts_with('-') { bail!("invalid shell executable"); }
+                    shell = Some(Shell { program, args: Vec::new() });
+                }
+                "--shell-arg" => {
+                    let profile = shell.as_mut().context("--shell-arg requires a preceding --shell-command")?;
+                    profile.args.push(args.next().context("--shell-arg requires a value")?);
+                }
+                other => bail!("unknown argument {other}"),
+            }
+        }
+        Ok(Self { backend: backend.context("select --nested or --native")?, no_shell, shell })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn parse(args: &[&str]) -> Result<Options> { Options::parse(args.iter().map(|s| s.to_string())) }
+
+    #[test]
+    fn profiles_are_explicit_and_arguments_are_literal() {
+        let opts = parse(&["--nested", "--shell-command", "quickshell", "--shell-arg", "-c", "--shell-arg", "my profile"]).unwrap();
+        assert_eq!(opts.backend, "--nested");
+        assert_eq!(opts.shell.unwrap(), Shell { program: "quickshell".into(), args: vec!["-c".into(), "my profile".into()] });
+        assert!(parse(&["--native", "--no-shell"]).unwrap().no_shell);
+    }
+
+    #[test]
+    fn rejects_conflicting_or_incomplete_options() {
+        for args in [vec!["--nested", "--native"], vec!["--nested", "--no-shell", "--shell-command", "foo"], vec!["--nested", "--shell-arg", "foo"], vec!["--nested", "--shell-command"], vec![]] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
         }
     }
 }
