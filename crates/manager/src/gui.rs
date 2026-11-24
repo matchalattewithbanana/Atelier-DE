@@ -12,6 +12,7 @@ mod snapshots;
 mod live_preview;
 mod studio;
 mod wallpapers;
+mod layout_studio;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -254,6 +255,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     stack.add_titled(&live_preview::build(), Some("live-preview"), "Live rice preview");
     stack.add_titled(&studio::build(), Some("studio"), "Appearance Studio");
     stack.add_titled(&wallpapers::build(), Some("wallpapers"), "Wallpapers");
+    stack.add_titled(&layout_studio::build(), Some("layout-studio"), "Panel, dock & widgets");
     window.set_child(Some(&layout));
     window
 }
