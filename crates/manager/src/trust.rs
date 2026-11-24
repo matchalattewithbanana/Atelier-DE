@@ -8,7 +8,7 @@ use crate::release::{self, ReleaseManifest};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Key { public: String, revoked: bool }
+pub(super) struct Key { public: String, pub revoked: bool }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,9 +16,9 @@ struct Accepted { sequence: u64, version: String, revision: String, sha256: Stri
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct State {
+pub(super) struct State {
     schema: u32,
-    keys: BTreeMap<String, Key>,
+    pub keys: BTreeMap<String, Key>,
     accepted: BTreeMap<String, Accepted>,
 }
 impl Default for State {
@@ -111,8 +111,9 @@ fn active_key<'a>(state: &'a State, id: &str) -> Result<&'a str> {
     if key.revoked { bail!("publisher key is revoked"); }
     Ok(&key.public)
 }
+pub(super) fn snapshot() -> Result<State> { load(&root()?) }
 pub fn list() -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&load(&root()?)?)?);
+    println!("{}", serde_json::to_string_pretty(&snapshot()?)?);
     Ok(())
 }
 pub fn pin(path: &Path) -> Result<()> {

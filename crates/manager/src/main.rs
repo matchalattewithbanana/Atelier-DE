@@ -11,6 +11,8 @@ mod release;
 mod trust;
 mod discovery;
 mod acquire;
+#[cfg(feature = "gui")]
+mod gui;
 use serde::Serialize;
 use std::{env, fs, io::{self, BufRead, IsTerminal, Read, Write}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -211,6 +213,12 @@ fn installer_menu() -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [flag] if flag == "--gui" => {
+            #[cfg(feature = "gui")]
+            { gui::run()?; }
+            #[cfg(not(feature = "gui"))]
+            bail!("graphical manager requires a build with --features gui");
+        }
         [mode, id, flag] if mode == "deployment-remove" && flag == "--offline" => selection::remove_offline(id)?,
         [mode, product, rest @ ..] if mode == "run-product" => selection::run_product(product, rest)?,
         [mode] if mode == "release-cache" => acquire::list_cache()?,
@@ -318,7 +326,7 @@ fn main() -> Result<()> {
         [mode, id, flag] if mode == "activate" && flag == "--historical" => selection::activate(Some(id), true)?,
         [mode] if mode == "rollback" => selection::activate(None, false)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager (update-plan | update) --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID [--historical] | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager run-product PRODUCT [ARG...]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\natelier-manager release-trust [pin PUBLIC_KEY | revoke KEY_ID]\natelier-manager release-discover native [--prerelease]\natelier-manager release-fetch native RELEASE_ID --key-id KEY_ID [--prerelease]\natelier-manager release-stage CACHE_ID --key-id KEY_ID\natelier-manager release-update CACHE_ID --key-id KEY_ID\natelier-manager release-cache [remove CACHE_ID]\natelier-manager deployment-cleanup-plan\natelier-manager deployment-remove ID --offline\natelier-manager release-accept MANIFEST --signature SIG --key-id KEY_ID --from BUILD_DIR\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA --sequence N PRODUCT [PRODUCT...]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager --gui (GTK build)\natelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager (update-plan | update) --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID [--historical] | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager run-product PRODUCT [ARG...]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\natelier-manager release-trust [pin PUBLIC_KEY | revoke KEY_ID]\natelier-manager release-discover native [--prerelease]\natelier-manager release-fetch native RELEASE_ID --key-id KEY_ID [--prerelease]\natelier-manager release-stage CACHE_ID --key-id KEY_ID\natelier-manager release-update CACHE_ID --key-id KEY_ID\natelier-manager release-cache [remove CACHE_ID]\natelier-manager deployment-cleanup-plan\natelier-manager deployment-remove ID --offline\natelier-manager release-accept MANIFEST --signature SIG --key-id KEY_ID --from BUILD_DIR\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA --sequence N PRODUCT [PRODUCT...]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())

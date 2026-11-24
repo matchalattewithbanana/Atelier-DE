@@ -211,11 +211,11 @@ fn reusable(root: &Path, bytes: &[u8], sig: &[u8], key: &str) -> Result<Option<P
     Ok(None)
 }
 #[derive(Serialize)]
-struct CacheEntry {
-    id: String,
-    status: &'static str,
-    bytes: Option<u64>,
-    error: Option<String>,
+pub(super) struct CacheEntry {
+    pub id: String,
+    pub status: &'static str,
+    pub bytes: Option<u64>,
+    pub error: Option<String>,
 }
 fn inspect_cache(path: &Path) -> Result<u64> {
     let (bytes, sig) = cached_metadata(path)?;
@@ -238,14 +238,17 @@ fn inspect_cache(path: &Path) -> Result<u64> {
     }
     Ok(total)
 }
-pub fn list_cache() -> Result<()> {
+pub(super) fn cache_snapshot() -> Result<Vec<CacheEntry>> {
     let root = cache_root()?;
-    let entries: Vec<_> = cache_ids(&root)?.into_iter().map(|id| {
+    Ok(cache_ids(&root)?.into_iter().map(|id| {
         match inspect_cache(&root.join(&id)) {
             Ok(bytes) => CacheEntry { id, status: "structural-check-passed", bytes: Some(bytes), error: None },
             Err(error) => CacheEntry { id, status: "invalid-or-incomplete", bytes: None, error: Some(format!("{error:#}")) },
         }
-    }).collect();
+    }).collect())
+}
+pub fn list_cache() -> Result<()> {
+    let entries = cache_snapshot()?;
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
         "schema":1,"entries":entries,"note":"Sizes are logical artifact and metadata bytes, not disk allocation. No signature or hash verification."
     }))?);

@@ -254,13 +254,13 @@ fn checkpoint_text(path: &Path) -> Result<Option<String>> {
 }
 #[derive(Debug, Serialize)]
 pub(super) struct HistoryEntry {
-    id: String,
-    status: &'static str,
-    targets: Vec<String>,
-    before_inventory: bool,
-    after_inventory: bool,
+    pub id: String,
+    pub status: &'static str,
+    pub targets: Vec<String>,
+    pub before_inventory: bool,
+    pub after_inventory: bool,
     outcome: Option<String>,
-    error: Option<String>,
+    pub error: Option<String>,
 }
 fn read_transaction(root: &Path, id: &str) -> Result<HistoryEntry> {
     let dir = root.join(id);
