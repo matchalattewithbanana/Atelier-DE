@@ -23,13 +23,13 @@ Linux, a recent stable Rust toolchain, Cargo, EGL/OpenGL ES, Wayland/XKB librari
 On Arch/CachyOS, install the development dependencies using your package manager if they are missing (one-time, explicit sudo):
 
 ```sh
-sudo pacman -S --needed rust base-devel pkgconf wayland libxkbcommon mesa gtk4
+sudo pacman -S --needed rust base-devel pkgconf wayland libxkbcommon libxkbcommon-x11 mesa gtk4
 ```
 
 On Debian/Ubuntu, use a current stable Rust toolchain and these development packages:
 
 ```sh
-sudo apt install build-essential pkg-config libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev
+sudo apt install build-essential pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev
 ```
 
 ```sh
@@ -57,6 +57,8 @@ Close the nested host window or interrupt the supervisor to end the test. Use `-
 ## Settings
 
 Preferences are stored under `${XDG_CONFIG_HOME:-$HOME/.config}/atelier-de/settings.toml`. A missing file uses defaults; unreadable or malformed settings are reported and are not silently overwritten. Settings applies changes after the relevant component is restarted.
+
+Choose Floating windows or Grid tiling in Settings (or set `layout = "grid"` in the preferences file). Grid placement is recalculated when windows map/unmap or the nested output resizes. Client size constraints and workspace switching remain future work.
 
 `atelier-shell` and `atelier-settings` also work as standalone GTK windows, so work on them does not have to wait for the compositor's hardware backend.
 

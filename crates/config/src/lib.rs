@@ -41,11 +41,20 @@ pub struct Config {
     pub theme: Theme,
     pub terminal: String,
     pub start_shell: bool,
+    pub layout: Layout,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    #[default]
+    Floating,
+    Grid,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { version: 1, theme: Theme::Midnight, terminal: "foot".into(), start_shell: true }
+        Self { version: 1, theme: Theme::Midnight, terminal: "foot".into(), start_shell: true, layout: Layout::Floating }
     }
 }
 

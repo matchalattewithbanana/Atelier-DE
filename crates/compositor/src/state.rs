@@ -36,10 +36,12 @@ pub struct Atelier {
     pub pointer_position: Point<f64, Logical>,
     cascade: usize,
     pending: Vec<ToplevelSurface>,
+    layout: atelier_config::Layout,
+    windows: Vec<Window>,
 }
 
 impl Atelier {
-    pub fn new(display: &DisplayHandle) -> anyhow::Result<Self> {
+    pub fn new(display: &DisplayHandle, layout: atelier_config::Layout) -> anyhow::Result<Self> {
         let mut seats = SeatState::new();
         let mut seat = seats.new_wl_seat(display, "atelier-seat");
         seat.add_keyboard(Default::default(), 200, 25)?;
@@ -56,18 +58,34 @@ impl Atelier {
             compositor: CompositorState::new::<Self>(display), shell: XdgShellState::new::<Self>(display),
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(),
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(),
         })
     }
 
-    pub fn resize(&self, width: i32, height: i32) {
+    pub fn resize(&mut self, width: i32, height: i32) {
         let mode = Mode { size: (width, height).into(), refresh: 60_000 };
         if self.output.current_mode() != Some(mode) {
             let previous = self.output.current_mode();
             self.output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(1)), Some((0, 0).into()));
             self.output.set_preferred(mode);
             if let Some(previous) = previous { self.output.delete_mode(previous); }
+            self.reflow();
         }
+    }
+
+    fn reflow(&mut self) {
+        if self.layout != atelier_config::Layout::Grid { return; }
+        let Some(mode) = self.output.current_mode() else { return; };
+        let Some(tiles) = crate::layout::grid(mode.size.w, mode.size.h, self.windows.len()) else { return; };
+        let top = self.space.elements().next_back().cloned();
+        for (window, tile) in self.windows.iter().zip(tiles) {
+            self.space.map_element(window.clone(), (tile.x, tile.y), false);
+            if let Some(surface) = window.toplevel() {
+                surface.with_pending_state(|state| state.size = Some((tile.width, tile.height).into()));
+                surface.send_pending_configure();
+            }
+        }
+        if let Some(top) = top { self.space.raise_element(&top, false); }
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
@@ -96,12 +114,16 @@ impl Atelier {
         let window = Window::new_wayland_window(surface);
         window.on_commit();
         self.space.map_element(window.clone(), (offset, offset), true);
+        self.windows.push(window.clone());
+        self.reflow();
         self.focus(Some(window), SERIAL_COUNTER.next_serial());
     }
 
     fn unmap(&mut self, window: &Window) {
         let was_top = self.space.elements().next_back() == Some(window);
         self.space.unmap_elem(window);
+        self.windows.retain(|candidate| candidate != window);
+        self.reflow();
         if was_top {
             let next = self.space.elements().next_back().cloned();
             self.focus(next, SERIAL_COUNTER.next_serial());

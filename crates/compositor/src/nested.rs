@@ -14,9 +14,9 @@ use smithay::{
 };
 use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}};
 
-pub fn run(socket: &str, color: [f32; 4]) -> Result<()> {
+pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Result<()> {
     let mut display = Display::<Atelier>::new()?;
-    let mut state = Atelier::new(&display.handle())?;
+    let mut state = Atelier::new(&display.handle(), layout)?;
     let (mut backend, mut events) = winit::init::<GlesRenderer>()
         .map_err(|error| anyhow::anyhow!("initialize nested GLES backend: {error}"))?;
     let size = backend.window_size();

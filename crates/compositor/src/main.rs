@@ -2,6 +2,7 @@
 
 mod nested;
 mod state;
+mod layout;
 
 use anyhow::{bail, Context, Result};
 use atelier_config::{config_path, Config};
@@ -28,5 +29,5 @@ fn main() -> Result<()> {
         bail!("invalid Wayland socket name");
     }
     let config = Config::load(&config_path()?)?;
-    nested::run(&socket, config.theme.background())
+    nested::run(&socket, config.theme.background(), config.layout)
 }
