@@ -290,27 +290,75 @@ fn remove_entry(root: &Path, id: &str) -> Result<()> {
     File::open(root)?.sync_all()?;
     Ok(())
 }
-pub fn remove_cache(id: &str) -> Result<()> {
+/// Keep the reviewed directory inode alive until confirmation; a replacement
+/// directory cannot reuse that inode while this descriptor exists.
+pub(super) struct CacheRemoval {
+    root: PathBuf,
+    id: String,
+    directory: File,
+    detail: String,
+}
+impl CacheRemoval {
+    pub(super) fn detail(&self) -> &str { &self.detail }
+    pub(super) fn apply(self) -> Result<String> {
+        if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+        let _lock = cache_lock(&self.root)?;
+        check_removal_identity(&self.root.join(&self.id), &self.directory)?;
+        remove_entry(&self.root, &self.id)?;
+        Ok(format!("Cache {} removed.", self.id))
+    }
+}
+fn reviewed_directory(path: &Path) -> Result<File> {
+    cache_directory(path)?;
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path)?;
+    check_removal_identity(path, &file)?;
+    Ok(file)
+}
+fn check_removal_identity(path: &Path, file: &File) -> Result<()> {
+    cache_directory(path)?;
+    let actual = fs::symlink_metadata(path)?;
+    let reviewed = file.metadata()?;
+    if actual.dev() != reviewed.dev() || actual.ino() != reviewed.ino() {
+        bail!("cache directory changed since review; review again");
+    }
+    Ok(())
+}
+pub(super) fn review_remove_cache(id: &str) -> Result<CacheRemoval> {
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive cache removal requires a terminal"); }
     if !valid_cache_id(id) { bail!("invalid cache ID"); }
     let root = cache_root()?;
     let _lock = cache_lock(&root)?;
     let path = root.join(id);
-    cache_directory(&path)?;
-    println!("Remove cached release {id}? Installed deployments and trust records remain untouched.");
+    let directory = reviewed_directory(&path)?;
+    let size = inspect_cache(&path).map(|n| format!("{n} logical bytes")).unwrap_or_else(|_| "Size unknown; invalid or incomplete cache".into());
+    let detail = format!("Remove cached release {id}?\n{}\n{size}\nInstalled deployments and trust records remain untouched.", path.display());
+    Ok(CacheRemoval { root, id: id.into(), directory, detail })
+}
+pub fn remove_cache(id: &str) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive cache removal requires a terminal"); }
+    let review = review_remove_cache(id)?;
+    println!("{}", review.detail());
     print!("Type 'remove cache' to proceed: "); io::stdout().flush()?;
     let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
     if answer.trim() != "remove cache" { println!("Cancelled."); return Ok(()); }
-    remove_entry(&root, id)?;
-    println!("Cache removed.");
+    println!("{}", review.apply()?);
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removal_review_rejects_replaced_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("release-A");
+        fs::create_dir(&path).unwrap();
+        let reviewed = reviewed_directory(&path).unwrap();
+        fs::rename(&path, root.path().join("old")).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(check_removal_identity(&path, &reviewed).is_err());
+        assert!(path.is_dir());
+    }
     fn fixture(bytes: &[u8]) -> (ReleaseManifest, Vec<(String, Asset)>) {
         let hash = format!("{:x}", Sha256::digest(bytes));
         let release: ReleaseManifest = serde_json::from_value(serde_json::json!({

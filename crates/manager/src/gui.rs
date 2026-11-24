@@ -6,6 +6,7 @@ use crate::{acquire, catalog, packages, selection, trust};
 mod setup;
 mod deployment;
 mod updates;
+mod maintenance;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -212,6 +213,9 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
         content.append(&scroll);
         if matches!(page, Page::Deployments | Page::Recovery) {
             content.append(&deployment::controls(&window, &button, matches!(page, Page::Recovery)));
+        }
+        if matches!(page, Page::Security | Page::Storage) {
+            content.append(&maintenance::controls(&window, &button, matches!(page, Page::Security)));
         }
         let (list_copy, status_copy) = (list.clone(), status.clone());
         button.connect_clicked(move |button| refresh(page, &list_copy, &status_copy, button));
