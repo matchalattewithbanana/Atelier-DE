@@ -116,6 +116,16 @@ cargo run -p atelier-compositor --features native-kms -- --check-atomic
 
 This selects one connector, compatible CRTC and XRGB8888 primary plane, allocates a bounded linear GBM scanout buffer, registers a temporary framebuffer and mode blob, then submits an atomic **TEST_ONLY** request. The framebuffer and blob are released on all normal result paths. No physical monitor mode is changed. Driver rejection is an explicit diagnostic; retries, modifier negotiation, multiple outputs, display restoration and real presentation are later stages.
 
+### Experimental physical presentation (not production-ready)
+
+Only after running the earlier hardware diagnostics successfully on a spare local text login, an explicit preview can attempt one synchronous atomic framebuffer swap:
+
+```sh
+cargo run -p atelier-compositor --features native-kms -- --present-test
+```
+
+This refuses inactive, scaled or mirrored routes, validates the swap and original framebuffer with TEST_ONLY, renders a static frame using EGL/GLES and attempts to restore the original framebuffer after one second or on Ctrl-C/SIGTERM. It never allows a modeset. A seat loss, driver failure or forced process termination can prevent restoration; use a spare TTY and be prepared to switch VTs if necessary. Do not use on a daily desktop or with sudo. Continuous page flips, inactive output activation and production display restoration remain pending.
+
 ## Verification
 
 ```sh
