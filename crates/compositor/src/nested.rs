@@ -1,16 +1,14 @@
 //! Winit/GLES backend. Keep backend-specific presentation/input separate from desktop state.
 
-use crate::state::{Atelier, ClientState};
+use crate::{input_router::handle_input, state::{Atelier, ClientState}};
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
-        input::{AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputEvent, KeyboardKeyEvent, KeyState, PointerAxisEvent, PointerButtonEvent},
         renderer::{gles::GlesRenderer, utils::draw_render_elements, Color32F, Frame, Renderer},
-        winit::{self, WinitEvent, WinitInput},
+        winit::{self, WinitEvent},
     },
-    input::{keyboard::FilterResult, pointer::{AxisFrame, ButtonEvent, MotionEvent}},
     reexports::wayland_server::{Display, ListeningSocket},
-    utils::{Rectangle, Transform, SERIAL_COUNTER},
+    utils::{Rectangle, Transform},
 };
 use std::{collections::HashSet, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}};
 
@@ -72,72 +70,3 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
     Ok(())
 }
 
-fn handle_input(state: &mut Atelier, input: InputEvent<WinitInput>, intercepted: &mut HashSet<smithay::input::keyboard::Keycode>) {
-    let serial = SERIAL_COUNTER.next_serial();
-    match input {
-        InputEvent::Keyboard { event } => {
-            if let Some(keyboard) = state.seat.get_keyboard() {
-                let code = event.key_code();
-                let pressed = event.state() == KeyState::Pressed;
-                let grabbed = keyboard.is_grabbed();
-                let action = keyboard.input(state, code, event.state(), serial, event.time_msec(), |_, modifiers, key| {
-                    if !pressed && intercepted.remove(&code) { return FilterResult::Intercept(None); }
-                    if pressed && intercepted.contains(&code) { return FilterResult::Intercept(None); }
-                    if !pressed || grabbed || !modifiers.alt || modifiers.ctrl || modifiers.logo { return FilterResult::Forward; }
-                    let Some(sym) = key.raw_syms().first().map(|sym| sym.raw()) else { return FilterResult::Forward; };
-                    use smithay::input::keyboard::keysyms::*;
-                    let target = match sym { KEY_1 => 0, KEY_2 => 1, KEY_3 => 2, KEY_4 => 3, _ => return FilterResult::Forward };
-                    intercepted.insert(code);
-                    FilterResult::Intercept(Some((target, modifiers.shift)))
-                });
-                if let Some(Some((target, move_focused))) = action {
-                    state.select_workspace(target, move_focused, serial);
-                    if let Some(pointer) = state.seat.get_pointer() {
-                        let focus = state.surface_under_pointer();
-                        let location = state.pointer_position;
-                        pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
-                        pointer.frame(state);
-                    }
-                }
-            }
-        }
-        InputEvent::PointerMotionAbsolute { event } => {
-            if let Some(region) = state.space.output_geometry(&state.output) {
-                state.pointer_position = event.position_transformed(region.size);
-                let focus = state.surface_under_pointer();
-                let location = state.pointer_position;
-                if let Some(pointer) = state.seat.get_pointer() {
-                    pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
-                    pointer.frame(state);
-                }
-            }
-        }
-        InputEvent::PointerButton { event } => {
-            if let Some(pointer) = state.seat.get_pointer() {
-                if event.state() == ButtonState::Pressed && !pointer.is_grabbed() {
-                    let window = state.space.element_under(state.pointer_position).map(|(w, _)| w.clone());
-                    state.focus(window, serial);
-                }
-                pointer.button(state, &ButtonEvent { button: event.button_code(), state: event.state(), serial, time: event.time_msec() });
-                pointer.frame(state);
-            }
-        }
-        InputEvent::PointerAxis { event } => {
-            if let Some(pointer) = state.seat.get_pointer() {
-                let source = event.source();
-                let mut frame = AxisFrame::new(event.time_msec()).source(source);
-                for axis in [Axis::Horizontal, Axis::Vertical] {
-                    let steps = event.amount_v120(axis);
-                    if let Some(steps) = steps { frame = frame.v120(axis, steps.round() as i32); }
-                    let value = event.amount(axis).or_else(|| steps.map(|steps| steps * 15.0 / 120.0)).unwrap_or(0.0);
-                    frame = frame.relative_direction(axis, event.relative_direction(axis));
-                    if value != 0.0 { frame = frame.value(axis, value); }
-                    else if source == AxisSource::Finger { frame = frame.stop(axis); }
-                }
-                pointer.axis(state, frame);
-                pointer.frame(state);
-            }
-        }
-        _ => {}
-    }
-}
