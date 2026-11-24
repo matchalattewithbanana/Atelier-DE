@@ -4,6 +4,7 @@ use gtk::{gio, glib, prelude::*};
 use std::{sync::mpsc, thread, time::Duration};
 use crate::{acquire, catalog, packages, selection, trust};
 mod setup;
+mod deployment;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -130,6 +131,20 @@ fn display_rows(list: &gtk::ListBox, rows: Vec<Row>) {
     }
 }
 
+pub(super) fn background<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    mut finish: impl FnMut(anyhow::Result<T>) + 'static) {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || { let _ = tx.send(work()); });
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(result) => finish(result),
+            Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => finish(Err(anyhow::anyhow!("setup worker stopped unexpectedly"))),
+        }
+        glib::ControlFlow::Break
+    });
+}
+
 fn refresh(page: Page, list: &gtk::ListBox, status: &gtk::Label, button: &gtk::Button) {
     button.set_sensitive(false);
     status.set_text("Checking local state…");
@@ -194,6 +209,9 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
         list.set_selection_mode(gtk::SelectionMode::None);
         let scroll = gtk::ScrolledWindow::builder().child(&list).vexpand(true).build();
         content.append(&scroll);
+        if matches!(page, Page::Deployments | Page::Recovery) {
+            content.append(&deployment::controls(&window, &button, matches!(page, Page::Recovery)));
+        }
         let (list_copy, status_copy) = (list.clone(), status.clone());
         button.connect_clicked(move |button| refresh(page, &list_copy, &status_copy, button));
         stack.add_titled(&content, Some(id), name);

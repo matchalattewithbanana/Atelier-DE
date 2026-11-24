@@ -117,12 +117,19 @@ fn check_activation(state: &Selection, target: &str, manifest: &Manifest, histor
     Ok(())
 }
 
+#[cfg(test)]
 fn switch(root: &Path, reviewed: &Selection, target: &str, historical: bool) -> Result<()> {
+    switch_reviewed(root, reviewed, target, historical, None)
+}
+fn switch_reviewed(root: &Path, reviewed: &Selection, target: &str, historical: bool, identity: Option<&[u8]>) -> Result<()> {
     ensure_root(root)?;
     let _lock = selection_lock(root)?;
     let current = load_selection(root)?;
     if &current != reviewed { bail!("selection changed during review; retry"); }
     let target_manifest = manifest(root, target, true)?;
+    if let Some(expected) = identity {
+        if serde_json::to_vec(&target_manifest)?.as_slice() != expected { bail!("target manifest changed during review; retry"); }
+    }
     check_activation(&current, target, &target_manifest, historical)?;
     if current.current.as_deref() == Some(target) { return Ok(()); }
     write_selection(root, &Selection { schema: 1, current: Some(target.to_owned()), previous: current.current })
@@ -443,8 +450,12 @@ pub(super) fn require_current(root: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn verify(id: &str) -> Result<()> {
+pub(super) fn verify_identity(id: &str) -> Result<()> {
     manifest(&data_root()?, id, true)?;
+    Ok(())
+}
+pub fn verify(id: &str) -> Result<()> {
+    verify_identity(id)?;
     println!("Deployment {id}: all recorded artifacts verified.");
     Ok(())
 }
@@ -474,21 +485,50 @@ pub fn active_path() -> Result<()> {
     manifest(&root, &id, false)?;
     println!("{}", root.join(id).join("bin").display()); Ok(())
 }
-pub fn activate(id: Option<&str>, historical: bool) -> Result<()> {
-    if nix::unistd::Uid::effective().is_root() { bail!("run activation as your desktop user, not root"); }
-    let root = data_root()?; directory(&root)?;
+/// An opaque, single-use review of the precise target and selection snapshot.
+pub(super) struct ActivationReview {
+    root: PathBuf,
+    selected: Selection,
+    target: String,
+    historical: bool,
+    identity: Vec<u8>,
+    detail: String,
+}
+impl ActivationReview {
+    pub(super) fn detail(&self) -> &str { &self.detail }
+    pub(super) fn apply(self) -> Result<String> {
+        if nix::unistd::Uid::effective().is_root() { bail!("run activation as your desktop user, not root"); }
+        switch_reviewed(&self.root, &self.selected, &self.target, self.historical, Some(&self.identity))?;
+        Ok(self.target)
+    }
+}
+
+fn review_at(root: PathBuf, id: Option<&str>, historical: bool) -> Result<ActivationReview> {
+    directory(&root)?;
     let selected = load_selection(&root)?;
-    let target = match id { Some(id) => id, None => selected.previous.as_deref().context("no previous deployment to roll back to")? };
-    let manifest = manifest(&root, target, false)?;
-    let intentional_history = historical || id.is_none();
-    check_activation(&selected, target, &manifest, intentional_history)?;
-    println!("Select deployment {target} ({})? Current: {}.", manifest.products.join(", "), selected.current.as_deref().unwrap_or("none"));
-    println!("Only Atelier's selection record changes. No running processes, PATH, settings or system packages are modified.");
-    if intentional_history { println!("Historical selection may restore older components. This is local rollback, not remote release acceptance."); }
+    let target = match id { Some(id) => id.to_owned(), None => selected.previous.clone().context("no previous deployment to roll back to")? };
+    let target_manifest = manifest(&root, &target, true)?;
+    let historical = historical || id.is_none();
+    check_activation(&selected, &target, &target_manifest, historical)?;
+    let identity = serde_json::to_vec(&target_manifest)?;
+    let mut detail = format!("Target: {target}\nCurrent: {}\nProducts: {}\nAll recorded artifact hashes verified.\nOnly the selection record changes; running sessions, PATH, settings and system packages are not modified.",
+        selected.current.as_deref().unwrap_or("none"), target_manifest.products.join(", "));
+    if historical { detail.push_str("\nHistorical selection may restore older components. This is local recovery, not remote release acceptance."); }
+    Ok(ActivationReview { root, selected, target, historical, identity, detail })
+}
+
+pub(super) fn review_activation(id: Option<&str>, historical: bool) -> Result<ActivationReview> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run activation as your desktop user, not root"); }
+    review_at(data_root()?, id, historical)
+}
+
+pub fn activate(id: Option<&str>, historical: bool) -> Result<()> {
+    let review = review_activation(id, historical)?;
+    println!("{}", review.detail());
     print!("Confirm selection? [y/N] "); io::stdout().flush()?;
     let mut reply = String::new(); io::stdin().read_line(&mut reply)?;
     if !matches!(reply.trim().to_ascii_lowercase().as_str(), "y" | "yes") { println!("Cancelled."); return Ok(()); }
-    switch(&root, &selected, target, intentional_history)?;
+    let target = review.apply()?;
     println!("Selected {target}. Use atelier-manager active-path for its bin directory.");
     Ok(())
 }
@@ -556,6 +596,31 @@ mod tests {
         assert!(launchable_product("desktop").is_err());
         assert!(launchable_product("session").is_err());
         assert!(launchable_product("../bin/sh").is_err());
+    }
+    #[test]
+    fn activation_review_rejects_changed_manifest_even_if_new_hashes_are_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fixture(root,"deployment-A",b"first");
+        fixture(root,"deployment-B",b"second");
+        switch(root,&Selection::default(),"deployment-A",false).unwrap();
+        let review = review_at(root.to_owned(),Some("deployment-B"),false).unwrap();
+        // A complete replacement with its own consistent manifest must still be rejected.
+        fixture(root,"deployment-B",b"replacement");
+        assert!(switch_reviewed(root,&review.selected,&review.target,review.historical,Some(&review.identity)).is_err());
+        assert_eq!(load_selection(root).unwrap().current.as_deref(),Some("deployment-A"));
+    }
+    #[test]
+    fn rollback_review_is_bound_to_the_exact_previous_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for id in ["deployment-A","deployment-B","deployment-C"] { fixture(root,id,b"test"); }
+        switch(root,&Selection::default(),"deployment-A",false).unwrap();
+        switch(root,&load_selection(root).unwrap(),"deployment-B",false).unwrap();
+        let review = review_at(root.to_owned(),None,false).unwrap();
+        assert_eq!(review.target,"deployment-A");
+        switch(root,&load_selection(root).unwrap(),"deployment-C",false).unwrap();
+        assert!(switch_reviewed(root,&review.selected,&review.target,review.historical,Some(&review.identity)).is_err());
     }
     #[test]
     fn stale_update_requires_explicit_historical_selection() {
