@@ -71,8 +71,7 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
         InputEvent::PointerButton { event } => {
             if let Some(pointer) = state.seat.get_pointer() {
                 if event.state() == ButtonState::Pressed && !pointer.is_grabbed() {
-                    let window = state.space.element_under(state.pointer_position).map(|(w, _)| w.clone());
-                    state.focus(window, serial);
+                    state.focus_pointer(serial);
                 }
                 pointer.button(state, &ButtonEvent { button: event.button_code(), state: event.state(), serial, time: event.time_msec() });
                 pointer.frame(state);
