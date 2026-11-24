@@ -181,3 +181,5 @@ Installation review can open the existing interactive package transaction in a s
 ## Optional Rice Manager
 
 See [Mango integration](MANGO_INTEGRATION.md) for the Rices page, explicit checkout trust, per-compositor catalog, community discovery, snapshot inventory and confirmed next-login selection. Native products do not require a Mango Atelier checkout.
+
+The optional Rice backups page uses the Mango snapshot backend for list, inspect, create, import/export, rename, offline restore and delete. See [Mango integration](MANGO_INTEGRATION.md) for its confirmation and offline limitations. These are per-rice settings archives, not system snapshots or native deployment rollback.
