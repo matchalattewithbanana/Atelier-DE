@@ -50,6 +50,22 @@ impl History {
     fn list(&self) -> fdo::Result<String> {
         serde_json::to_string(&lock(&self.state)?.snapshot()).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
+    async fn dismiss(&self, instance: String, id: u32, #[zbus(connection)] connection: &zbus::Connection) -> fdo::Result<()> {
+        {
+            let mut state = lock(&self.state)?;
+            if !state.matches_instance(&instance) || !state.close(id, 2) {
+                return Err(fdo::Error::Failed("Notification changed or no longer exists".into()));
+            }
+        }
+        connection.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(id, 2u32)).await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        Ok(())
+    }
+    fn clear_history_for(&self, instance: String) -> fdo::Result<()> {
+        let mut state = lock(&self.state)?;
+        if !state.matches_instance(&instance) { return Err(fdo::Error::Failed("Notification daemon changed".into())); }
+        state.clear_history(); Ok(())
+    }
     fn clear_history(&self) -> fdo::Result<()> {
         lock(&self.state)?.clear_history(); Ok(())
     }
@@ -85,8 +101,21 @@ fn main() -> Result<()> {
             else { let _: () = proxy.call("ClearHistory", &())?; }
             Ok(())
         }
+        [mode, instance, id] if mode == "dismiss" => {
+            let id: u32 = id.parse().context("invalid notification ID")?;
+            let connection = Connection::session()?;
+            let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
+            let _: () = proxy.call("Dismiss", &(instance.as_str(), id))?;
+            Ok(())
+        }
+        [mode, instance] if mode == "clear-history" => {
+            let connection = Connection::session()?;
+            let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
+            let _: () = proxy.call("ClearHistoryFor", &(instance.as_str(),))?;
+            Ok(())
+        }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | clear-history\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | clear-history [INSTANCE] | dismiss INSTANCE ID\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),

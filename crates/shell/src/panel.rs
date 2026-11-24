@@ -62,6 +62,10 @@ pub fn build(app: &gtk::Application) {
     let app_ref = app.downgrade();
     media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::media_controls::show(&app); } });
     bar.append(&media);
+    let notifications = gtk::Button::with_label("Notifications");
+    let app_ref = app.downgrade();
+    notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::notification_centre::show(&app); } });
+    bar.append(&notifications);
     let audio = gtk::Button::with_label("Audio");
     audio.connect_clicked(move |_| { let mut command = component("atelier-settings"); command.args(["--page", "audio"]); spawn(command); });
     bar.append(&audio);
