@@ -17,7 +17,8 @@ use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}
 pub fn run(socket: &str, color: [f32; 4]) -> Result<()> {
     let mut display = Display::<Atelier>::new()?;
     let mut state = Atelier::new(&display.handle())?;
-    let (mut backend, mut events) = winit::init::<GlesRenderer>().context("initialize nested GLES backend")?;
+    let (mut backend, mut events) = winit::init::<GlesRenderer>()
+        .map_err(|error| anyhow::anyhow!("initialize nested GLES backend: {error}"))?;
     let size = backend.window_size();
     state.resize(size.w.max(1), size.h.max(1));
     let running = Arc::new(AtomicBool::new(true));
