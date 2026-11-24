@@ -5,6 +5,7 @@ mod wizard;
 mod packages;
 mod deploy;
 mod selection;
+mod session;
 mod mango;
 use serde::Serialize;
 use std::{env, fs, io::{self, BufRead, IsTerminal, Read, Write}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
@@ -206,6 +207,9 @@ fn installer_menu() -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [mode] if mode == "session-check" => session::check()?,
+        [mode, backend] if mode == "session-launch" && backend == "--nested" => session::launch(false)?,
+        [mode, backend, flag] if mode == "session-launch" && backend == "--nested" && flag == "--no-shell" => session::launch(true)?,
         [mode] if mode == "doctor" => {
             let report = report();
             println!("Atelier ecosystem diagnostics — read-only");
@@ -273,12 +277,14 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => { deploy::run(Path::new(source), products)?; }
-        [mode] if mode == "deployments" => selection::list()?,
+        [mode] if mode == "deployments" => selection::list(false)?,
+        [mode, flag] if mode == "deployments" && flag == "--json" => selection::list(true)?,
+        [mode, id] if mode == "deployment-info" => selection::info(id)?,
         [mode, id] if mode == "verify" => selection::verify(id)?,
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
