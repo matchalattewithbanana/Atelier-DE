@@ -446,10 +446,7 @@ pub fn run_native(
                     queue.completed();
                     pending_since = None;
                     let state = state.borrow();
-                    let output = &state.output;
-                    for window in state.space.elements_for_output(output) {
-                        window.send_frame(output, started.elapsed(), None, |_, _| Some(output.clone()));
-                    }
+                    state.send_frames(started.elapsed());
                 }
                 if pending_since.is_some_and(|since| since.elapsed() > Duration::from_secs(1)) {
                     bail!("timed out waiting for native page flip");
@@ -487,10 +484,9 @@ pub fn run_native(
                 let Some(next) = queue.next() else { continue; };
                 {
                     let state = state.borrow();
-                    let region = state.space.output_geometry(&state.output).context("native output geometry")?;
                     let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
                     let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
-                    let elements = state.space.render_elements_for_region(&mut renderer, &region, 1.0, 1.0);
+                    let elements = state.space.render_elements_for_output(&mut renderer, &state.output, 1.0).map_err(|error| anyhow::anyhow!("render native output: {error:?}"))?;
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
