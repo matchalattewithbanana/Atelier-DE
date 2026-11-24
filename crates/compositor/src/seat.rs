@@ -20,6 +20,8 @@ pub enum Check {
     Render,
     #[cfg(feature = "native-kms")]
     Kms,
+    #[cfg(feature = "native-kms")]
+    Atomic,
 }
 
 pub fn check(kind: Check) -> Result<()> {
@@ -63,6 +65,8 @@ pub fn check(kind: Check) -> Result<()> {
         Check::Render => crate::gbm_check::check(&fd, true),
         #[cfg(feature = "native-kms")]
         Check::Kms => crate::kms_check::check(&fd),
+        #[cfg(feature = "native-kms")]
+        Check::Atomic => crate::kms_check::check_atomic(&fd),
     };
     // Always release the seat descriptor, including after allocation/export failure.
     let release_result = session.close(fd).map_err(|error| anyhow::anyhow!("release {}: {error}", device.display()));
