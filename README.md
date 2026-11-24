@@ -58,7 +58,16 @@ Close the nested host window or interrupt the supervisor to end the test. Use `-
 
 Preferences are stored under `${XDG_CONFIG_HOME:-$HOME/.config}/atelier-de/settings.toml`. A missing file uses defaults; unreadable or malformed settings are reported and are not silently overwritten. Settings applies changes after the relevant component is restarted.
 
-Choose Floating windows or Grid tiling in Settings (or set `layout = "grid"` in the preferences file). Grid placement is recalculated when windows map/unmap or the nested output resizes. Client size constraints and workspace switching remain future work.
+Choose Floating windows or Grid tiling in Settings (or set `layout = "grid"` in the preferences file). Grid placement is recalculated when windows map/unmap or the nested output resizes. Client size constraints remain future work.
+
+### Nested workspace controls
+
+Four virtual workspaces are available. With the nested window focused:
+
+- `Alt+1` through `Alt+4`: switch workspace.
+- `Alt+Shift+1` through `Alt+Shift+4`: move the focused window to another workspace without switching.
+
+Hidden windows are removed from the rendered scene and restored when their workspace is selected. The host desktop may intercept these shortcuts; change its conflicting bindings for nested testing. Workspace persistence, per-output workspace sets and a shell workspace indicator are not implemented yet.
 
 `atelier-shell` and `atelier-settings` also work as standalone GTK windows, so work on them does not have to wait for the compositor's hardware backend.
 
