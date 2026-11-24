@@ -1,6 +1,6 @@
 # Atelier Manager
 
-The independent manager provides local inventory, planning and explicit user-local deployment staging and selection. It has no Smithay, GTK or Mango Atelier dependency. System package installation and login integration are not implemented.
+The independent manager provides local inventory, planning and explicit user-local deployment staging and selection. It has no Smithay, GTK or Mango Atelier dependency. Experimental Arch-family package installation is available through explicitly confirmed commands; login integration is not implemented.
 
 ```sh
 cargo run -p atelier-manager -- doctor
@@ -24,9 +24,17 @@ atelier-manager plan mango-atelier hyprland
 
 The catalog separates native Atelier components, the Mango Atelier distribution, external compositors and the native desktop aggregate. Selection expands only explicit dependencies and deduplicates them. A standalone shell/settings plan never silently installs a compositor; a session requires the native compositor. The preview reports detected and missing executable names per product. Missing is not a package transaction or package availability claim. The JSON contract marks `apply_supported: false`; planning performs no installation, sudo, network or file modification. Installer backends and interactive setup will build on this catalog.
 
+## Interactive ecosystem installer
+
+```sh
+atelier-manager setup --install
+```
+
+This interactive menu offers system dependency installation, native build staging/selection, and [Mango Atelier setup or preview](MANGO_INTEGRATION.md). Choose each operation independently; the menu returns after it completes or is declined, and exits on a backend error. No other backend is started automatically. Native builds and Mango checkouts must already exist locally and be trusted. Enter their actual directory paths, without shell expansion. Package and deployment approvals remain separate; the Mango wizard owns its own selections and confirmations. This is an orchestrating menu, not an all-or-nothing multi-backend transaction or a downloader. Plain `setup` and `setup --json` remain preview-only.
+
 ## Guided setup preview
 
-Run `atelier-manager setup` (or `setup --json` to send prompts to stderr and obtain an accepted preview or null on stdout). Choose Express, Custom or Minimal, then select native products or external compositors, per-compositor rice choices where Mango Atelier is selected, a native shell preference, optional service providers, and first session preference. The final review is explicitly non-mutating, including no sudo, package changes, backups or recovery operations. A confirmation accepts only the preview; it does not persist preferences or enable installation. Type q or end input to cancel. Custom rice/profile IDs are planning preferences, not proof of installation or compatibility. With `atelier-manager setup --from BUILD_DIR`, accepting the preview offers a separate native staging review and confirmation, followed on success by an independent deployment-selection confirmation. Mixed or external product selections are rejected before writes. Rice, provider and first-session choices remain preview-only. System package transactions remain future work.
+Run `atelier-manager setup` (or `setup --json` to send prompts to stderr and obtain an accepted preview or null on stdout). Choose Express, Custom or Minimal, then select native products or external compositors, per-compositor rice choices where Mango Atelier is selected, a native shell preference, optional service providers, and first session preference. The final review is explicitly non-mutating, including no sudo, package changes, backups or recovery operations. A confirmation accepts only the preview; it does not persist preferences or enable installation. Type q or end input to cancel. Custom rice/profile IDs are planning preferences, not proof of installation or compatibility. With `atelier-manager setup --from BUILD_DIR`, accepting the preview offers a separate native staging review and confirmation, followed on success by an independent deployment-selection confirmation. Mixed or external product selections are rejected before writes. Rice, provider and first-session choices remain preview-only. Use `atelier-manager setup --packages` for an independently confirmed system package transaction including selected optional providers. The accepted preview is not a package transaction approval. Neither setup mode installs rices or changes login sessions.
 
 ## Arch-family package preview
 
@@ -37,6 +45,18 @@ atelier-manager packages shell settings --json
 
 On Arch-family systems, missing source-build products expand into conservative package candidates, with deduplicated reasons. The wizard also includes selected optional provider packages. A bounded, read-only `pacman -T` query checks the local dependency database when pacman and coreutils timeout are detected; unexpected results are unknown, not marked installed. No package database refresh, repository query, sudo or installation occurs. Candidates do not guarantee runtime compatibility or repository availability; native hardware remains experimental, and Mango Atelier's own setup preview is authoritative for rice/app groups. Other distributions currently report that package mapping is unavailable. The initial doctor command remains subprocess-free.
 
+## Arch-family package installation (experimental)
+
+Run as your regular desktop user in an interactive terminal:
+
+```sh
+atelier-manager install-packages shell settings
+```
+
+This separate command recomputes catalog targets, checks missing dependencies with fixed system executables, and requires typing `upgrade and install` before invoking sudo. It uses `pacman -Syu --needed` rather than a standalone database refresh or partial upgrade. **This may upgrade the whole system.** Pacman's own transaction confirmation remains enabled. Repository availability and additional dependency changes are determined by pacman, not by the initial candidate list. No AUR helper is invoked. For guided selection, use `atelier-manager setup --packages`; the separate package review includes explicitly selected optional providers. Rice-specific groups are not applied by either command.
+
+Before invoking sudo, the manager stores the installed-package inventory and requested targets in a new private transaction directory under `${XDG_STATE_HOME:-$HOME/.local/state}/atelier-manager/package-transactions/`. It records the exit outcome and attempts a post-transaction inventory. These files are diagnostic checkpoints, not backups of packages, databases or configuration. Create a separate system snapshot before upgrading if recovery is needed. On failure, inspect pacman's output and use the distribution's recovery process; Atelier does not automatically downgrade or remove system packages. Native binary staging and login changes remain separate.
+
 ## Native build staging (experimental)
 
 After building the selected native components from a trusted local checkout, run as your normal desktop user:
@@ -45,7 +65,7 @@ After building the selected native components from a trusted local checkout, run
 atelier-manager stage --from target/debug shell settings
 ```
 
-`stage` resolves native product dependencies and verifies each selected artifact before showing an explicit confirmation. It creates a new private deployment under `${XDG_DATA_HOME:-$HOME/.local/share}/atelier-manager/deployments/`, copies only allowlisted native executable filenames, and records sizes and SHA-256 hashes in a completion manifest. The hash detects later corruption; it is not a signature or proof of provenance. Source builds must be trusted. No binaries are run, existing deployments overwritten, system packages installed, login sessions changed or PATH modified. A failed copy removes its own temporary staging directory; an interrupted directory without the completion manifest is not a valid deployment. A complete deployment can be launched directly from its `bin` folder for testing. Package transactions and Mango integration are follow-up work. Plain `setup` ends at preview; `setup --from BUILD_DIR` offers explicit native staging after preview acceptance. After successful staging, guided setup offers a separate activation confirmation using the newly created deployment ID. Declining activation leaves the deployment staged and the current selection unchanged. Standalone `stage` never activates.
+`stage` resolves native product dependencies and verifies each selected artifact before showing an explicit confirmation. It creates a new private deployment under `${XDG_DATA_HOME:-$HOME/.local/share}/atelier-manager/deployments/`, copies only allowlisted native executable filenames, and records sizes and SHA-256 hashes in a completion manifest. The hash detects later corruption; it is not a signature or proof of provenance. Source builds must be trusted. No binaries are run, existing deployments overwritten, system packages installed, login sessions changed or PATH modified. A failed copy removes its own temporary staging directory; an interrupted directory without the completion manifest is not a valid deployment. A complete deployment can be launched directly from its `bin` folder for testing. Package transactions are separate; Mango Atelier uses its own delegated installer. Plain `setup` ends at preview; `setup --from BUILD_DIR` offers explicit native staging after preview acceptance. After successful staging, guided setup offers a separate activation confirmation using the newly created deployment ID. Declining activation leaves the deployment staged and the current selection unchanged. Standalone `stage` never activates.
 
 ## Select or roll back staged deployments
 
