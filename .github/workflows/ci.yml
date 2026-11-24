@@ -33,3 +33,6 @@ jobs:
 
       - name: Compile native-seat, native-gbm and native-kms features
         run: cargo +stable test -p atelier-compositor --features native-kms
+
+      - name: Compile native-input feature
+        run: cargo +stable test -p atelier-compositor --features native-input
