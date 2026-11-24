@@ -6,8 +6,9 @@ mod packages;
 mod deploy;
 mod selection;
 mod session;
+mod mango;
 use serde::Serialize;
-use std::{env, fs, io::{self, Read}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
+use std::{env, fs, io::{self, BufRead, IsTerminal, Read, Write}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
 struct Distribution {
@@ -110,6 +111,99 @@ fn show_group(title: &str, entries: &[Executable]) {
         }
     }
 }
+
+fn guided_packages() -> Result<()> {
+    let report = report();
+    let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report)?;
+    if let Some(preview) = result {
+        println!("Preview accepted. Package changes require separate confirmation.");
+        println!("This mode does not build or stage Atelier binaries, install rices or configure sessions.");
+        preview.install_packages(&report)?;
+    } else {
+        println!("Setup cancelled. No changes made.");
+    }
+    Ok(())
+}
+
+fn guided_native(source: &Path) -> Result<()> {
+    let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
+    if let Some(preview) = result {
+        println!("Preview accepted. Staging requires a separate confirmation.");
+        println!("Only native binaries are staged; package, provider, rice and session preferences are not applied.");
+        if let Some(id) = deploy::run(source, preview.requested_products())? {
+            println!("Staging complete. Select this deployment or keep your current selection.");
+            println!("If selection is declined, the new deployment remains staged.");
+            selection::activate(Some(&id))?;
+        }
+    } else {
+        println!("Setup cancelled. No changes made.");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InstallAction { Packages, Native, Mango, MangoPlan }
+
+fn installer_choice(input: &mut impl BufRead, out: &mut impl Write) -> Result<Option<InstallAction>> {
+    loop {
+        writeln!(out, "\nAtelier ecosystem installer (experimental)")?;
+        writeln!(out, "  1. Install system package dependencies (Arch-family; may upgrade the system)")?;
+        writeln!(out, "  2. Stage and select trusted native Atelier build binaries")?;
+        writeln!(out, "  3. Mango Atelier setup (MangoWM, Hyprland, Niri and rices)")?;
+        writeln!(out, "  4. Preview Mango Atelier setup")?;
+        writeln!(out, "  q. Exit")?;
+        write!(out, "Choose an independent operation [q]: ")?;
+        out.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 { return Ok(None); }
+        match line.trim() {
+            "1" => return Ok(Some(InstallAction::Packages)),
+            "2" => return Ok(Some(InstallAction::Native)),
+            "3" => return Ok(Some(InstallAction::Mango)),
+            "4" => return Ok(Some(InstallAction::MangoPlan)),
+            "" | "q" | "Q" => return Ok(None),
+            _ => writeln!(out, "Choose 1, 2, 3, 4 or q.")?,
+        }
+    }
+}
+
+fn installer_path(prompt: &str) -> Result<Option<String>> {
+    print!("{prompt} (blank cancels; no shell expansion): ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let path = line.trim_end_matches(['\r', '\n']);
+    Ok((!path.trim().is_empty()).then(|| path.to_owned()))
+}
+
+fn installer_menu() -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!("the ecosystem installer requires an interactive terminal");
+    }
+    loop {
+        // Release terminal locks before invoking a backend or child process.
+        let action = installer_choice(&mut io::stdin().lock(), &mut io::stdout().lock())?;
+        match action {
+            None => return Ok(()),
+            Some(InstallAction::Packages) => guided_packages()?,
+            Some(InstallAction::Native) => {
+                if let Some(source) = installer_path("Trusted local build directory")? {
+                    guided_native(Path::new(&source))?;
+                }
+            }
+            Some(action @ (InstallAction::Mango | InstallAction::MangoPlan)) => {
+                if let Some(source) = installer_path("Trusted Mango Atelier checkout directory")? {
+                    let mut args = vec!["--from".to_owned(), source];
+                    if action == InstallAction::MangoPlan { args.push("--plan".to_owned()); }
+                    mango::run(&args)?;
+                }
+            }
+        }
+        println!("Operation ended. No other backend will run without another selection.");
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
@@ -170,35 +264,14 @@ fn main() -> Result<()> {
             let plan = catalog::plan(products, &report)?;
             packages::install(&plan, &report, &[])?;
         }
-        [mode, flag] if mode == "setup" && flag == "--packages" => {
-            let report = report();
-            let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report)?;
-            if let Some(preview) = result {
-                println!("Preview accepted. Package changes require separate confirmation.");
-                println!("This mode does not build or stage Atelier binaries, install rices or configure sessions.");
-                preview.install_packages(&report)?;
-            } else {
-                println!("Setup cancelled. No changes made.");
-            }
-        }
+        [mode, flag] if mode == "setup" && flag == "--packages" => guided_packages()?,
+        [mode, flag] if mode == "setup" && flag == "--install" => installer_menu()?,
+        [mode, rest @ ..] if mode == "mango-setup" => mango::run(rest)?,
         [mode] if mode == "setup" => {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
             println!("{}", if result.is_some() { "Preview accepted. No changes made." } else { "Setup cancelled. No changes made." });
         }
-        [mode, flag, source] if mode == "setup" && flag == "--from" => {
-            let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
-            if let Some(preview) = result {
-                println!("Preview accepted. Staging requires a separate confirmation.");
-                println!("Only native binaries are staged; package, provider, rice and session preferences are not applied.");
-                if let Some(id) = deploy::run(Path::new(source), preview.requested_products())? {
-                    println!("Staging complete. Select this deployment or keep your current selection.");
-                    println!("If selection is declined, the new deployment remains staged.");
-                    selection::activate(Some(&id))?;
-                }
-            } else {
-                println!("Setup cancelled. No changes made.");
-            }
-        }
+        [mode, flag, source] if mode == "setup" && flag == "--from" => guided_native(Path::new(source))?,
         [mode, flag] if mode == "setup" && flag == "--json" => {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -209,7 +282,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\nPlain setup is preview-only; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
@@ -217,6 +290,16 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installer_menu_requires_explicit_backend_selection() {
+        for (answer, expected) in [
+            ("1\n", Some(InstallAction::Packages)), ("2\n", Some(InstallAction::Native)),
+            ("3\n", Some(InstallAction::Mango)), ("4\n", Some(InstallAction::MangoPlan)),
+            ("invalid\nq\n", None), ("\n", None), ("", None),
+        ] {
+            assert_eq!(installer_choice(&mut io::Cursor::new(answer), &mut Vec::new()).unwrap(), expected);
+        }
+    }
     #[test]
     fn os_release_is_parsed_without_shell_expansion() {
         let distro = parse_os_release("ID=cachyos\nID_LIKE=\"arch linux\"\nVERSION_ID='2026.11'\nPRETTY_NAME=$(touch file)\n");
