@@ -1,5 +1,6 @@
 //! Compositor-independent desktop service providers.
 pub mod media;
+pub mod audio;
 use serde::Serialize;
 use std::{fs, io, path::Path};
 
