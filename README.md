@@ -106,6 +106,16 @@ cargo run -p atelier-compositor --features native-kms -- --check-kms
 
 The seat-owned DRM device is queried for cached connected connectors, advertised display modes, encoder-compatible CRTCs and candidate routes. Mode ranking prefers a display's advertised preferred mode, then resolution and refresh rate. No modesetting or atomic commit is performed; a candidate route does not establish scanout compatibility or exclusive ownership. Continue with real hardware validation before enabling monitor presentation.
 
+### Atomic scanout validation
+
+From a spare local TTY, run:
+
+```sh
+cargo run -p atelier-compositor --features native-kms -- --check-atomic
+```
+
+This selects one connector, compatible CRTC and XRGB8888 primary plane, allocates a bounded linear GBM scanout buffer, registers a temporary framebuffer and mode blob, then submits an atomic **TEST_ONLY** request. The framebuffer and blob are released on all normal result paths. No physical monitor mode is changed. Driver rejection is an explicit diagnostic; retries, modifier negotiation, multiple outputs, display restoration and real presentation are later stages.
+
 ## Verification
 
 ```sh
