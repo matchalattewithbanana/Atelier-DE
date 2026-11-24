@@ -4,11 +4,11 @@ use serde::Serialize;
 use std::io::{BufRead, Write};
 use crate::{catalog::{self, Plan}, Report};
 
-const EXTERNAL: &[&str] = &["mangowm", "hyprland", "niri"];
-const PROVIDERS: &[&str] = &["media", "audio", "network", "bluetooth"];
+pub(super) const EXTERNAL: &[&str] = &["mangowm", "hyprland", "niri"];
+pub(super) const PROVIDERS: &[&str] = &["media", "audio", "network", "bluetooth"];
 
 #[derive(Debug, Serialize)]
-pub struct RiceChoice { compositor: String, rice: String }
+pub struct RiceChoice { pub compositor: String, pub rice: String }
 #[derive(Debug, Serialize)]
 pub struct Preview {
     schema: u32,
@@ -139,22 +139,74 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
         }
     };
 
-    let plan = catalog::plan(&ids, report)?;
-    let packages = crate::packages::preview(&plan, report, &optional_providers);
-    writeln!(out, "\n6. Review — no changes will be applied")?;
-    for step in &plan.steps { writeln!(out, "  {}: {} · {}", step.name, step.status, step.source)?; }
-    for rice in &rices { writeln!(out, "  Rice for {}: {}", rice.compositor, rice.rice)?; }
-    if let Some(shell) = &native_shell { writeln!(out, "  Native shell: {shell}")?; }
-    writeln!(out, "  Optional providers: {}", if optional_providers.is_empty() { "none".into() } else { optional_providers.join(", ") })?;
-    if let Some(session) = &first_session { writeln!(out, "  First session: {session}")?; }
-    for warning in &plan.warnings { writeln!(out, "  Note: {warning}")?; }
-    for candidate in &packages.candidates { writeln!(out, "  Package {}: {} ({})", candidate.package, candidate.state, candidate.reasons.join(", "))?; }
-    for note in &packages.notes { writeln!(out, "  Package note: {note}")?; }
-    writeln!(out, "  Package changes: none\n  User files/backups: none\n  sudo: not used\n  Recovery: not needed; apply is not implemented")?;
+    let preview = build_preview(Choices { mode: mode.into(), ids, rices, native_shell, optional_providers, first_session }, report)?;
+    preview.write_review(out)?;
     let Some(answer) = ask(input, out, "Accept this preview? [y/N]:")? else { return Ok(None); };
     if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") { return Ok(None); }
-    if plan.steps.is_empty() { bail!("empty installation plan"); }
-    Ok(Some(Preview { schema: 1, mode: mode.into(), plan, packages, rices, native_shell, optional_providers, first_session, apply_supported: false }))
+    Ok(Some(preview))
+}
+
+/// Shared setup choices; frontends supply intent, not precomputed dependencies.
+pub(super) struct Choices {
+    pub mode: String,
+    pub ids: Vec<String>,
+    pub rices: Vec<RiceChoice>,
+    pub native_shell: Option<String>,
+    pub optional_providers: Vec<String>,
+    pub first_session: Option<String>,
+}
+
+pub(super) fn build_preview(choices: Choices, report: &Report) -> Result<Preview> {
+    let Choices { mode, ids, rices, native_shell, optional_providers, first_session } = choices;
+    if !matches!(mode.as_str(), "express" | "custom" | "minimal") { bail!("invalid setup mode"); }
+    let resolved = catalog::resolve(&ids)?;
+    let external: std::collections::BTreeSet<_> = ids.iter().filter(|id| EXTERNAL.contains(&id.as_str())).map(String::as_str).collect();
+    let mango = ids.iter().any(|id| id == "mango-atelier");
+    if mango && external.is_empty() { bail!("Mango Atelier requires at least one explicitly selected external compositor"); }
+    let rice_targets: std::collections::BTreeSet<_> = rices.iter().map(|rice| rice.compositor.as_str()).collect();
+    if rice_targets.len() != rices.len() || (mango && rice_targets != external) || (!mango && !rices.is_empty()) {
+        bail!("choose exactly one rice for each selected Mango Atelier compositor");
+    }
+    for rice in &rices {
+        if !valid_rice(&rice.rice) || (rice.compositor == "niri" && rice.rice == "sekaipop") {
+            bail!("invalid or unsupported rice for {}", rice.compositor);
+        }
+    }
+    let has_session = resolved.iter().any(|p| p.id == "session");
+    match (&native_shell, has_session) {
+        (Some(value), true) if matches!(value.as_str(), "default" | "none")
+            || value.strip_prefix("profile:").is_some_and(|name| !name.is_empty() && name.len() <= 48 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) => {},
+        (None, false) => {},
+        _ => bail!("choose default, none, or profile:NAME for a native session"),
+    }
+    if optional_providers.iter().any(|id| !PROVIDERS.contains(&id.as_str())) { bail!("unsupported optional provider"); }
+    let has_sessions = has_session || !external.is_empty();
+    match first_session.as_deref() {
+        Some("keep") if has_sessions => {},
+        Some("atelier") if has_session => {},
+        Some(id) if external.contains(id) => {},
+        None if !has_sessions => {},
+        _ => bail!("first session must be selected or keep"),
+    }
+    let plan = catalog::plan(&ids, report)?;
+    let packages = crate::packages::preview(&plan, report, &optional_providers);
+    Ok(Preview { schema: 1, mode, plan, packages, rices, native_shell, optional_providers, first_session, apply_supported: false })
+}
+
+impl Preview {
+    pub(super) fn write_review(&self, out: &mut impl Write) -> Result<()> {
+        writeln!(out, "\n6. Review — no changes will be applied")?;
+        for step in &self.plan.steps { writeln!(out, "  {}: {} · {}", step.name, step.status, step.source)?; }
+        for rice in &self.rices { writeln!(out, "  Rice for {}: {}", rice.compositor, rice.rice)?; }
+        if let Some(shell) = &self.native_shell { writeln!(out, "  Native shell: {shell}")?; }
+        writeln!(out, "  Optional providers: {}", if self.optional_providers.is_empty() { "none".into() } else { self.optional_providers.join(", ") })?;
+        if let Some(session) = &self.first_session { writeln!(out, "  First session: {session}")?; }
+        for warning in &self.plan.warnings { writeln!(out, "  Note: {warning}")?; }
+        for candidate in &self.packages.candidates { writeln!(out, "  Package {}: {} ({})", candidate.package, candidate.state, candidate.reasons.join(", "))?; }
+        for note in &self.packages.notes { writeln!(out, "  Package note: {note}")?; }
+        writeln!(out, "  Package changes: none\n  User files/backups: none\n  sudo: not used\n  Recovery: no transaction performed")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
