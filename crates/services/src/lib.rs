@@ -2,6 +2,7 @@
 pub mod media;
 pub mod audio;
 pub mod network;
+pub mod bluetooth;
 use serde::Serialize;
 use std::{fs, io, path::Path};
 
