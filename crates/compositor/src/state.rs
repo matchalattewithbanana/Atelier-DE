@@ -126,6 +126,8 @@ impl Atelier {
         if let Some(keyboard) = self.seat.get_keyboard() { keyboard.set_focus(self, target, serial); }
     }
 
+    pub fn active_workspace(&self) -> usize { self.active_workspace }
+
     pub fn select_workspace(&mut self, target: usize, move_focused: bool, serial: Serial) {
         if target >= self.parked.len() || target == self.active_workspace { return; }
         if self.seat.get_pointer().is_some_and(|p| p.is_grabbed()) || self.seat.get_keyboard().is_some_and(|k| k.is_grabbed()) { return; }
