@@ -3,7 +3,7 @@ use atelier_config::{component, config_path, Config};
 use crate::workspace_backend::{installed_helper, WorkspaceBackend};
 use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::{fs, rc::Rc, process::Command, time::Duration};
+use std::{rc::Rc, process::Command, time::Duration};
 
 pub fn build(app: &gtk::Application) {
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
@@ -66,13 +66,17 @@ pub fn build(app: &gtk::Application) {
     settings.connect_clicked(move |_| spawn(component("atelier-settings")));
     bar.append(&settings);
 
+    update_power(&battery);
+    let battery_weak = battery.downgrade();
+    glib::timeout_add_local(Duration::from_secs(5), move || {
+        let Some(label) = battery_weak.upgrade() else { return glib::ControlFlow::Break; };
+        update_power(&label);
+        glib::ControlFlow::Continue
+    });
     let tick = move || {
         if let Ok(now) = glib::DateTime::now_local() {
             if let Ok(text) = now.format("%a %d %b · %H:%M") { clock.set_text(&text); }
         }
-        let power = battery_percent();
-        battery.set_visible(power.is_some());
-        if let Some(power) = power { battery.set_text(&format!("Battery {power}%")); }
         let snapshot = backend.snapshot();
         for (index, button) in workspaces.iter().enumerate() {
             button.set_sensitive(snapshot.is_some());
@@ -104,15 +108,23 @@ fn spawn(mut command: Command) {
     }
 }
 
-fn battery_percent() -> Option<u32> {
-    let entries = fs::read_dir("/sys/class/power_supply").ok()?;
-    for entry in entries.flatten() {
-        if !fs::read_to_string(entry.path().join("type")).is_ok_and(|value| value.trim() == "Battery") { continue; }
-        if let Ok(value) = fs::read_to_string(entry.path().join("capacity")) {
-            if let Ok(percent) = value.trim().parse::<u32>() { if percent <= 100 { return Some(percent); } }
-        }
-    }
-    None
+fn update_power(label: &gtk::Label) {
+    let Ok(power) = atelier_services::system_power_snapshot() else {
+        label.set_text("Power unavailable");
+        label.set_tooltip_text(Some("Could not read system power inventory"));
+        label.set_visible(true);
+        return;
+    };
+    label.set_visible(!power.batteries.is_empty());
+    let summary = power.batteries.iter().map(|battery| {
+        battery.percent.map(|p| format!("{p}%")).unwrap_or_else(|| "?".into())
+    }).collect::<Vec<_>>().join(" / ");
+    label.set_text(&format!("Battery {summary}"));
+    let details = power.batteries.iter().map(|battery| {
+        format!("{}: {}", battery.name, battery.status.as_deref().unwrap_or("Unknown"))
+    }).collect::<Vec<_>>().join("\n");
+    let source = match power.external_power { Some(true) => "External power connected", Some(false) => "External power disconnected", None => "External power unknown" };
+    label.set_tooltip_text(Some(&format!("{details}\n{source}")));
 }
 
 fn show_rices(app: &gtk::Application) {
