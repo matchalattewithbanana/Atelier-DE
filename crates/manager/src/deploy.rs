@@ -103,6 +103,8 @@ fn stage(plan: StagePlan) -> Result<PathBuf> {
 
 fn stage_with(plan: StagePlan, before_complete: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
     ensure_root(&plan.root)?;
+    let _lifecycle = crate::selection::selection_lock(&plan.root)?;
+    if let Some(base) = &plan.base_deployment { crate::selection::require_current(&plan.root, base)?; }
     let pending = tempfile::Builder::new().prefix("deployment-").tempdir_in(&plan.root)?;
     let bin = pending.path().join("bin");
     fs::create_dir(&bin)?;
@@ -340,6 +342,7 @@ mod tests {
         let ids = vec!["shell".into(), "settings".into()];
         let old_path = stage(StagePlan::prepare(original.path(), root.path().to_owned(), &ids).unwrap()).unwrap();
         let id = old_path.file_name().unwrap().to_str().unwrap().to_owned();
+        crate::selection::select_for_test(root.path(), &id);
         let base = || serde_json::from_reader::<_, Manifest>(File::open(old_path.join("manifest.json")).unwrap()).unwrap();
         artifact(candidate.path(), "atelier-shell");
         let (_, unchanged) = update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &["shell".into()]).unwrap();
@@ -354,7 +357,7 @@ mod tests {
         let (plan, _) = update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &["shell".into()]).unwrap();
         fs::write(candidate.path().join("atelier-shell"), b"changed after review").unwrap();
         assert!(stage(plan).is_err());
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(root.path()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("deployment-")).count(), 2);
         assert!(update_plan(candidate.path(), root.path().to_owned(), id, base(), &["session".into()]).is_err());
     }
     #[test]
@@ -365,6 +368,7 @@ mod tests {
         for name in ["atelier-shell", "atelier-settings"] { artifact(original.path(), name); }
         let base_path = stage(StagePlan::prepare(original.path(), root.path().to_owned(), &["shell".into(),"settings".into()]).unwrap()).unwrap();
         let id = base_path.file_name().unwrap().to_str().unwrap().to_owned();
+        crate::selection::select_for_test(root.path(), &id);
         let base = || serde_json::from_reader::<_, Manifest>(File::open(base_path.join("manifest.json")).unwrap()).unwrap();
         artifact(candidate.path(), "atelier-shell");
         fs::write(candidate.path().join("atelier-shell"), b"signed new shell").unwrap();
@@ -396,13 +400,13 @@ mod tests {
             "artifacts":[{"name":"atelier-shell","bytes":b"fixture not executed".len(),"sha256":hash}]
         })).unwrap();
         assert!(stage_release_at(source.path(), root.path().to_owned(), &release, "key", |_| bail!("policy failure")).is_err());
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(root.path()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("deployment-")).count(), 0);
         let path = stage_release_at(source.path(), root.path().to_owned(), &release, "key", |_| Ok(())).unwrap();
         let manifest: Manifest = serde_json::from_reader(File::open(path.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest.release.unwrap().sequence, 7);
         fs::write(source.path().join("atelier-shell"), b"corrupt").unwrap();
         assert!(stage_release_at(source.path(), root.path().to_owned(), &release, "key", |_| Ok(())).is_err());
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(root.path()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("deployment-")).count(), 1);
     }
     #[test]
     fn symlink_artifact_is_refused() {

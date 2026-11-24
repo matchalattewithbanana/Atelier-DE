@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::{fd::AsRawFd, unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt}}, path::{Path, PathBuf}, process::Command};
+use std::{collections::BTreeSet, fs::{self, File, OpenOptions}, io::{self, IsTerminal, Read, Write}, os::{fd::AsRawFd, unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt}}, path::{Path, PathBuf}, process::Command};
 use crate::{catalog, deploy::{data_root, ensure_root, Manifest}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,7 @@ fn manifest(root: &Path, id: &str, hashes: bool) -> Result<Manifest> {
     let bin = path.join("bin"); directory(&bin)?;
     let manifest: Manifest = read_json(&path.join("manifest.json"))?.context("deployment has no completion manifest")?;
     if manifest.schema != 1 { bail!("unsupported deployment manifest schema"); }
+    if manifest.base_deployment.as_deref().is_some_and(|base| !valid_id(base) || base == id) { bail!("invalid deployment base identity"); }
     let products = catalog::resolve(&manifest.products)?;
     if products.iter().any(|product| !matches!(product.source, "atelier-de" | "aggregate")) { bail!("non-native deployment product"); }
     let expected: BTreeSet<_> = products.iter().flat_map(|product| product.binaries.iter().copied()).collect();
@@ -94,12 +95,12 @@ fn write_selection(root: &Path, state: &Selection) -> Result<()> {
     File::open(root)?.sync_all()?;
     Ok(())
 }
-fn selection_lock(root: &Path) -> Result<File> {
+pub(super) fn selection_lock(root: &Path) -> Result<File> {
     directory(root)?;
     let lock = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(root.join("selection.lock"))?;
     let metadata = lock.metadata()?;
-    if !metadata.is_file() || !owned(&metadata) { bail!("invalid deployment selection lock"); }
+    if !metadata.is_file() || !owned(&metadata) || metadata.nlink() != 1 { bail!("invalid deployment selection lock"); }
     FileExt::lock_exclusive(&lock)?;
     Ok(lock)
 }
@@ -280,13 +281,104 @@ fn cleanup_report(root: &Path) -> Result<serde_json::Value> {
             else if referenced.contains(entry.id.as_str()) { "referenced-base" }
             else if runtime == "managed-in-use" { "managed-runtime-lease" }
             else if uncertain { "inventory-incomplete" }
-            else { "unreferenced-runtime-unknown" };
+            else if runtime == "unknown" { "runtime-status-unknown" }
+            else { "offline-confirmation-required" };
         let bytes = entry.manifest.as_ref().map(|m| m.artifacts.iter().map(|a| a.bytes).sum::<u64>());
-        serde_json::json!({"id":entry.id,"role":entry.role,"bytes":bytes,"protection":reason,"runtime":runtime,"removable":false})
+        serde_json::json!({"id":entry.id,"role":entry.role,"bytes":bytes,"protection":reason,"runtime":runtime,"removable":false,"offline_candidate":reason == "offline-confirmation-required"})
     }).collect();
     Ok(serde_json::json!({"schema":1,"deployments":entries,
-        "note":"Read-only planning. Managed leases are tracked, but unmanaged and older launches may still use any bundle; deletion remains disabled."}))
+        "note":"Read-only planning. Offline candidates require explicit confirmation and fresh validation; unmanaged runtime use is not detectable."}))
 }
+
+/// Under the lifecycle lock, validate a complete, unreferenced bundle. Incomplete
+/// inventory fails closed because a missing manifest might conceal lineage.
+fn removal_candidate(root: &Path, id: &str) -> Result<Manifest> {
+    if !valid_id(id) { bail!("invalid deployment ID"); }
+    let report = inventory(root)?;
+    if report.current.as_deref() == Some(id) || report.previous.as_deref() == Some(id) {
+        bail!("cannot remove current or rollback deployment");
+    }
+    if report.deployments.iter().any(|entry| entry.manifest.is_none()) {
+        bail!("deployment inventory is incomplete; no removal attempted");
+    }
+    if report.deployments.iter().any(|entry| entry.manifest.as_ref().and_then(|m| m.base_deployment.as_deref()) == Some(id)) {
+        bail!("deployment is referenced as an update base");
+    }
+    manifest(root, id, true)
+}
+
+/// Only known flat files may be removed. Never recursively traverse a deployment
+/// or delete unrecognized user data. A late error leaves a quarantine directory.
+fn removal_files(bundle: &Path, m: &Manifest) -> Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = m.artifacts.iter().map(|a| PathBuf::from("bin").join(&a.name)).collect();
+    let mut top = BTreeSet::from(["bin", "manifest.json", "runtime.lock"]);
+    if m.release.is_some() { top.extend(["release-manifest.json", "release-manifest.sig"]); }
+    for entry in fs::read_dir(bundle)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid deployment filename"))?;
+        if !top.contains(name.as_str()) { bail!("unexpected deployment entry: {name}"); }
+        if name != "bin" {
+            open_regular(&entry.path())?;
+            paths.push(PathBuf::from(name));
+        }
+    }
+    if m.release.is_some() {
+        for name in ["release-manifest.json", "release-manifest.sig"] {
+            open_regular(&bundle.join(name)).context("missing release provenance")?;
+        }
+    }
+    Ok(paths)
+}
+
+fn remove_at(root: &Path, id: &str) -> Result<()> {
+    let _lifecycle = selection_lock(root)?;
+    let m = removal_candidate(root, id)?;
+    let bundle = root.join(id);
+    if std::env::current_exe()?.canonicalize()?.starts_with(bundle.canonicalize()?) {
+        bail!("cannot remove the deployment containing the running manager");
+    }
+    let lease = lease_file(&bundle, true)?;
+    FileExt::try_lock_exclusive(&lease).context("deployment has a managed runtime lease or lock is unavailable")?;
+    let files = removal_files(&bundle, &m)?;
+    // Keep the quarantine even on a late failure; never let TempDir recursively
+    // delete files we have not explicitly reviewed.
+    let quarantine = tempfile::Builder::new().prefix("removed-deployment-").tempdir_in(root)?;
+    let moved = quarantine.path().join("bundle");
+    fs::rename(&bundle, &moved)?;
+    let quarantine = quarantine.keep();
+    File::open(root)?.sync_all()?;
+    let result = (|| -> Result<()> {
+        for file in files { fs::remove_file(moved.join(file))?; }
+        fs::remove_dir(moved.join("bin"))?;
+        fs::remove_dir(&moved)?;
+        fs::remove_dir(&quarantine)?;
+        File::open(root)?.sync_all()?;
+        Ok(())
+    })();
+    result.with_context(|| format!("removal interrupted; inspect quarantine {}", quarantine.display()))
+}
+
+pub fn remove_offline(id: &str) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive offline removal requires a terminal"); }
+    let root = data_root()?;
+    let m = removal_candidate(&root, id)?;
+    println!("Permanently remove deployment {id} ({})?", m.products.join(", "));
+    println!("Close ALL Atelier sessions and applications using this bundle, including direct launches. Use a separate manager executable and do not run older managers concurrently.");
+    println!("Current selection, rollback target, referenced bases, packages, configuration and release trust will not be removed.");
+    print!("Type 'remove offline {id}' to confirm the bundle is not in use: "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    if answer.trim() != format!("remove offline {id}") { println!("Cancelled."); return Ok(()); }
+    remove_at(&root, id)?;
+    println!("Deployment {id} removed.");
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn select_for_test(root: &Path, id: &str) {
+    switch(root, &load_selection(root).unwrap(), id).unwrap();
+}
+
 pub fn cleanup_plan() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&cleanup_report(&data_root()?)?)?);
     Ok(())
@@ -444,6 +536,36 @@ mod tests {
         assert!(launchable_product("desktop").is_err());
         assert!(launchable_product("session").is_err());
         assert!(launchable_product("../bin/sh").is_err());
+    }
+    #[test]
+    fn offline_removal_protects_selection_lineage_leases_and_unknown_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for id in ["deployment-A","deployment-B","deployment-C","deployment-D"] { fixture(root,id,b"test"); }
+        switch(root,&Selection::default(),"deployment-A").unwrap();
+        switch(root,&load_selection(root).unwrap(),"deployment-B").unwrap();
+        assert!(remove_at(root,"deployment-A").is_err());
+        assert!(remove_at(root,"deployment-B").is_err());
+        let file = root.join("deployment-D/manifest.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        value["base_deployment"] = serde_json::json!("deployment-C");
+        fs::write(&file,serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(remove_at(root,"deployment-C").is_err());
+        let lease = lease_file(&root.join("deployment-D"),true).unwrap();
+        FileExt::lock_shared(&lease).unwrap();
+        assert!(remove_at(root,"deployment-D").is_err());
+        drop(lease);
+        fs::write(root.join("deployment-D/keep"),b"user data").unwrap();
+        assert!(remove_at(root,"deployment-D").is_err());
+        fs::remove_file(root.join("deployment-D/keep")).unwrap();
+        fs::create_dir(root.join("deployment-E")).unwrap();
+        assert!(remove_at(root,"deployment-D").is_err());
+        fs::remove_dir(root.join("deployment-E")).unwrap();
+        remove_at(root,"deployment-D").unwrap();
+        assert!(!root.join("deployment-D").exists());
+        assert_eq!(load_selection(root).unwrap().current.as_deref(),Some("deployment-B"));
+        remove_at(root,"deployment-C").unwrap();
+        assert!(root.join("deployment-A").exists());
     }
     #[test]
     fn cleanup_report_protects_selection_and_referenced_bases() {

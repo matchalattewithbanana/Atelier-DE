@@ -107,7 +107,7 @@ atelier-manager deployments
 atelier-manager activate DEPLOYMENT_ID
 ```
 
-The update plan verifies the currently selected bundle and hashes candidate binaries without running them. It reports replacement, unchanged and retained artifacts. Selected products expand through their catalog dependencies and must already exist in the selected bundle. The confirmed update copies all artifacts into a new private deployment, rechecks each copied hash against the review and records the base deployment ID. A changed candidate or retained file aborts staging. An identical candidate creates no new bundle. The original remains selected; activation is a separate operation. The selection is rechecked before staging, but staging does not hold a selection lock or change the current selection. Mixed build runtime compatibility is not established by hashes; test nested before relying on the update. No network, packages, settings or live session changes occur. This is local build comparison, not semantic-version ordering or remote release discovery.
+The update plan verifies the currently selected bundle and hashes candidate binaries without running them. It reports replacement, unchanged and retained artifacts. Selected products expand through their catalog dependencies and must already exist in the selected bundle. The confirmed update copies all artifacts into a new private deployment, rechecks each copied hash against the review and records the base deployment ID. A changed candidate or retained file aborts staging. An identical candidate creates no new bundle. The original remains selected; activation is a separate operation. The selection is rechecked under the lifecycle lock during staging, which does not change the current selection. Mixed build runtime compatibility is not established by hashes; test nested before relying on the update. No network, packages, settings or live session changes occur. This is local build comparison, not semantic-version ordering or remote release discovery.
 
 ## Transaction history and recovery diagnostics
 
@@ -125,7 +125,7 @@ See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generat
 
 ## Deployment storage planning
 
-`atelier-manager deployment-cleanup-plan` reports logical artifact sizes and protection reasons for selected/rollback bundles, referenced bases, and incomplete inventories. It never deletes deployments: running processes may still rely on an older bundle even if it is no longer selected. Runtime-use tracking and explicit removal are separate future work.
+`atelier-manager deployment-cleanup-plan` reports logical artifact sizes and protection reasons for selected/rollback bundles, referenced bases, and incomplete inventories. It never deletes deployments: running processes may still rely on an older bundle even if it is no longer selected. See the offline removal procedure below.
 
 ## Managed runtime leases
 
@@ -136,4 +136,13 @@ atelier-manager run-product shell
 atelier-manager deployment-cleanup-plan
 ```
 
-Manager-mediated nested sessions and independent shell/settings/services/notifications launches verify the selected deployment and acquire a shared per-deployment runtime lock under the selection lock. The descriptor survives exec and may be inherited by children, conservatively protecting the bundle until the last holder closes it. No PID files or stale-PID heuristics are used. The report distinguishes managed-in-use, no-managed-lease, untracked and unknown. Do not unlink runtime.lock files. Older binaries, direct executable launches and applications that close inherited descriptors are not covered. No managed lease is not proof that a bundle is unused; deployment removal remains disabled pending an explicit offline removal design. Arguments to run-product are passed literally to the catalog-selected native executable. No session registration, package change or activation occurs.
+Manager-mediated nested sessions and independent shell/settings/services/notifications launches verify the selected deployment and acquire a shared per-deployment runtime lock under the selection lock. The descriptor survives exec and may be inherited by children, conservatively protecting the bundle until the last holder closes it. No PID files or stale-PID heuristics are used. The report distinguishes managed-in-use, no-managed-lease, untracked and unknown. Do not unlink runtime.lock files. Older binaries, direct executable launches and applications that close inherited descriptors are not covered. No managed lease is not proof that a bundle is unused; deployment removal requires explicit offline confirmation. Arguments to run-product are passed literally to the catalog-selected native executable. No session registration, package change or activation occurs.
+
+## Offline deployment removal
+
+```sh
+atelier-manager deployment-cleanup-plan
+atelier-manager deployment-remove DEPLOYMENT_ID --offline
+```
+
+Close all applications and sessions using the target bundle, including direct/legacy launches. Use a manager from another deployment or an independent build. Do not run older managers concurrently. Offline means the user confirms no target runtime use, not a network disconnection or a verified system-wide logout. The command requires a terminal and an exact ID-specific confirmation. It rechecks selection, all inventory records, base references, artifact hashes, and an exclusive runtime lease while holding the lifecycle lock shared with staging and activation. It refuses the current or previous deployment, referenced bases, incomplete inventory, the running manager's own bundle, managed runtime use, and unknown files. It renames the bundle into a private quarantine and removes only known flat files and empty directories; interrupted removal can leave a quarantine for manual inspection. No recursive deployment deletion, automatic cleanup, package changes, trust changes, or settings deletion. Runtime locks cannot detect unmanaged processes or older software, and users must keep the target offline throughout removal.
