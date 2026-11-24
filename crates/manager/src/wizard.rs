@@ -14,6 +14,7 @@ pub struct Preview {
     schema: u32,
     mode: String,
     plan: Plan,
+    packages: crate::packages::PackagePreview,
     rices: Vec<RiceChoice>,
     native_shell: Option<String>,
     optional_providers: Vec<String>,
@@ -132,6 +133,7 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
     };
 
     let plan = catalog::plan(&ids, report)?;
+    let packages = crate::packages::preview(&plan, report, &optional_providers);
     writeln!(out, "\n6. Review — no changes will be applied")?;
     for step in &plan.steps { writeln!(out, "  {}: {} · {}", step.name, step.status, step.source)?; }
     for rice in &rices { writeln!(out, "  Rice for {}: {}", rice.compositor, rice.rice)?; }
@@ -139,11 +141,13 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
     writeln!(out, "  Optional providers: {}", if optional_providers.is_empty() { "none".into() } else { optional_providers.join(", ") })?;
     if let Some(session) = &first_session { writeln!(out, "  First session: {session}")?; }
     for warning in &plan.warnings { writeln!(out, "  Note: {warning}")?; }
+    for candidate in &packages.candidates { writeln!(out, "  Package {}: {} ({})", candidate.package, candidate.state, candidate.reasons.join(", "))?; }
+    for note in &packages.notes { writeln!(out, "  Package note: {note}")?; }
     writeln!(out, "  Package changes: none\n  User files/backups: none\n  sudo: not used\n  Recovery: not needed; apply is not implemented")?;
     let Some(answer) = ask(input, out, "Accept this preview? [y/N]:")? else { return Ok(None); };
     if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") { return Ok(None); }
     if plan.steps.is_empty() { bail!("empty installation plan"); }
-    Ok(Some(Preview { schema: 1, mode: mode.into(), plan, rices, native_shell, optional_providers, first_session, apply_supported: false }))
+    Ok(Some(Preview { schema: 1, mode: mode.into(), plan, packages, rices, native_shell, optional_providers, first_session, apply_supported: false }))
 }
 
 #[cfg(test)]
