@@ -36,7 +36,7 @@ if ! [[ -S "$test_runtime/$socket" ]]; then
     exit 1
 fi
 env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$test_runtime" WAYLAND_DISPLAY="$socket" timeout 10s wayland-info >"$test_runtime/protocols.txt"
-for global in wl_compositor wl_shm xdg_wm_base wl_seat wl_output; do
+for global in wl_compositor wl_shm xdg_wm_base wl_seat wl_output zwlr_layer_shell_v1; do
     if ! grep -q "interface: '$global'" "$test_runtime/protocols.txt"; then
         echo "Missing protocol: $global" >&2
         exit 1
