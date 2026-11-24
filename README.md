@@ -156,6 +156,10 @@ Launch a native Wayland client with that socket from another terminal in the sam
 
 Both compositors expose `zwlr_layer_shell_v1`, arrange layer surfaces with anchor/margin/exclusive-zone information, render background/bottom/top/overlay layers around ordinary windows, and deliver frame callbacks. Grid tiling uses the non-exclusive output region. Layer surfaces may receive keyboard focus on click when requested; automatic exclusive keyboard grabs and secure session locking are not implemented. The native GTK shell remains an ordinary application until its layer-shell client integration lands.
 
+### Optional Atelier desktop panel
+
+Build `atelier-shell` with `--features layer-panel` (install GTK4 layer-shell library, `gtk4-layer-shell` on Arch/CachyOS). In a supported Wayland session the shell opens an anchored top panel with exclusive space, searchable launcher access, workspace selection, clock, battery and terminal/settings shortcuts. Without the feature or layer-shell protocol it opens the normal launcher. Workspace control is local to Atelier's own display via a user-only command socket; no cross-compositor automation is used.
+
 ## Verification
 
 ```sh

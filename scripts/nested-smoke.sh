@@ -10,12 +10,17 @@ test -x target/debug/atelier-compositor
 
 test_runtime="$(mktemp -d)"
 supervisor=''
+panel_pid=''
 cleanup() {
+    if [[ -n "$panel_pid" ]]; then
+        kill -TERM "$panel_pid" 2>/dev/null || true
+        wait "$panel_pid" || true
+    fi
     if [[ -n "$supervisor" ]]; then
         kill -TERM "$supervisor" 2>/dev/null || true
         wait "$supervisor" || true
     fi
-    rm -f -- "$test_runtime/session.log" "$test_runtime/protocols.txt"
+    rm -f -- "$test_runtime/session.log" "$test_runtime/protocols.txt" "$test_runtime/panel.log"
     rmdir -- "$test_runtime" 2>/dev/null || echo "Review remaining test runtime: $test_runtime" >&2
 }
 trap cleanup EXIT
@@ -42,6 +47,42 @@ for global in wl_compositor wl_shm xdg_wm_base wl_seat wl_output zwlr_layer_shel
         exit 1
     fi
 done
+# Verify an actual workspace command and state transition.
+python3 - "$test_runtime/$socket.workspace" "$test_runtime/$socket.workspace-state" <<'PY'
+import pathlib, socket, sys, time
+command, state = sys.argv[1:]
+with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+    for _ in range(100):
+        if pathlib.Path(command).exists() and pathlib.Path(state).exists():
+            break
+        time.sleep(0.05)
+    client.sendto(bytes([3]), command)
+    for _ in range(100):
+        if pathlib.Path(state).read_bytes() == bytes([3]):
+            break
+        time.sleep(0.05)
+    else:
+        raise SystemExit("workspace command did not change active workspace")
+print("Workspace IPC smoke passed")
+PY
+if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
+    env -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" WAYLAND_DISPLAY="$socket" GDK_BACKEND=wayland GSK_RENDERER=cairo target/debug/atelier-shell >"$test_runtime/panel.log" 2>&1 &
+    panel_pid=$!
+    for _ in {1..100}; do
+        if ! kill -0 "$panel_pid" 2>/dev/null; then
+            cat "$test_runtime/panel.log" >&2
+            exit 1
+        fi
+        if grep -q 'Atelier layer panel mapped' "$test_runtime/panel.log"; then break; fi
+        sleep 0.1
+    done
+    grep -q 'Atelier layer panel mapped' "$test_runtime/panel.log" || { cat "$test_runtime/panel.log" >&2; exit 1; }
+    sleep 1
+    kill -0 "$panel_pid"
+    kill -TERM "$panel_pid"
+    wait "$panel_pid" || true
+    panel_pid=''
+fi
 kill -TERM "$supervisor"
 wait "$supervisor"
 supervisor=''
@@ -49,4 +90,5 @@ if [[ -S "$test_runtime/$socket" ]]; then
     echo 'Supervisor exited but compositor socket remains' >&2
     exit 1
 fi
-echo 'Atelier nested protocol smoke passed'
+[[ ! -e "$test_runtime/$socket.workspace" && ! -e "$test_runtime/$socket.workspace-state" ]]
+echo 'Atelier nested protocol and workspace smoke passed'
