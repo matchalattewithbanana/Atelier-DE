@@ -37,7 +37,18 @@ fn main() -> Result<()> {
             };
             network_action(action)?;
         }
-        [arg] if arg == "--help" || arg == "-h" => println!("atelier-services power | media | audio | network | wifi [--rescan]\natelier-services media-action PLAYER play|pause|play-pause|next|previous\natelier-services audio-action output|input DEVICE volume PERCENT|mute on|off|default\natelier-services network-action wifi on|off | activate UUID | deactivate UUID\nVersioned snapshots and explicit controls; optional providers require their respective tools."),
+        [arg] if arg == "bluetooth" => println!("{}", serde_json::to_string(&atelier_services::bluetooth::bluetooth_snapshot()?)?),
+        [mode, action, value] if mode == "bluetooth-action" => {
+            use atelier_services::bluetooth::{bluetooth_action, BluetoothAction};
+            let action = match action.as_str() {
+                "power" if value == "on" || value == "off" => BluetoothAction::Power(value == "on"),
+                "connect" => BluetoothAction::Connect(value.clone()),
+                "disconnect" => BluetoothAction::Disconnect(value.clone()),
+                _ => bail!("expected power on|off, connect ADDRESS, or disconnect ADDRESS"),
+            };
+            bluetooth_action(action)?;
+        }
+        [arg] if arg == "--help" || arg == "-h" => println!("atelier-services power | media | audio | network | wifi [--rescan] | bluetooth\natelier-services media-action PLAYER play|pause|play-pause|next|previous\natelier-services audio-action output|input DEVICE volume PERCENT|mute on|off|default\natelier-services network-action wifi on|off | activate UUID | deactivate UUID\natelier-services bluetooth-action power on|off | connect ADDRESS | disconnect ADDRESS\nVersioned snapshots and explicit controls; optional providers require their respective tools."),
         _ => bail!("usage: atelier-services --help"),
     }
     Ok(())
