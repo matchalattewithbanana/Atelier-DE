@@ -27,3 +27,6 @@ jobs:
         run: cargo +stable build -p atelier-compositor -p atelier-session
       - name: Nested Wayland smoke
         run: xvfb-run -a bash scripts/nested-smoke.sh
+
+      - name: Read-only hardware inventory
+        run: target/debug/atelier-compositor --probe-hardware
