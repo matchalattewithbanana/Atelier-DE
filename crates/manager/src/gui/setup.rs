@@ -1,8 +1,8 @@
 //! Graphical setup review. Mutation is restricted to explicitly approved local staging.
-use gtk::{glib, prelude::*};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::mpsc, thread, time::Duration};
+use gtk::prelude::*;
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use crate::{catalog, deploy, wizard};
-use super::label;
+use super::{label, background};
 
 struct Fields {
     products: Vec<(&'static str, gtk::CheckButton)>,
@@ -69,21 +69,6 @@ fn entry(container: &gtk::Box, name: &str, value: &str) -> gtk::Entry {
     field
 }
 
-// Only data is moved between threads. Weak references keep closed windows
-// from being retained by outstanding inspections or copy operations.
-fn background<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-    mut finish: impl FnMut(anyhow::Result<T>) + 'static) {
-    let (tx, rx) = mpsc::sync_channel(1);
-    thread::spawn(move || { let _ = tx.send(work()); });
-    glib::timeout_add_local(Duration::from_millis(50), move || {
-        match rx.try_recv() {
-            Ok(result) => finish(result),
-            Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-            Err(mpsc::TryRecvError::Disconnected) => finish(Err(anyhow::anyhow!("setup worker stopped unexpectedly"))),
-        }
-        glib::ControlFlow::Break
-    });
-}
 
 pub(super) fn build() -> gtk::Box {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 12);
