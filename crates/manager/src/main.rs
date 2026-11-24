@@ -5,6 +5,7 @@ mod wizard;
 mod packages;
 mod deploy;
 mod selection;
+mod mango;
 use serde::Serialize;
 use std::{env, fs, io::{self, Read}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -112,6 +113,7 @@ fn show_group(title: &str, entries: &[Executable]) {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, rest @ ..] if mode == "mango-setup" => mango::run(rest)?,
         [mode] if mode == "doctor" => {
             let report = report();
             println!("Atelier ecosystem diagnostics — read-only");
@@ -189,8 +191,8 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nSetup without --from is preview-only; setup --from offers separate staging and selection confirmations."),
-        _ => bail!("usage: atelier-manager --help"),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nSetup without --from is preview-only; setup --from offers separate staging and selection confirmations."),
+        _ => bail!("usage: atelier-manager --help; mango-setup --from CHECKOUT [--plan|--rollback]"),
     }
     Ok(())
 }
