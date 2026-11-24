@@ -1,4 +1,5 @@
 //! Native settings application. Writes shared user preferences only.
+mod network_page;
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
@@ -127,6 +128,9 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     session_page.append(&description("Window layout"));
     session_page.append(&layout);
     session_page.append(&description("Explicit shell profiles supplied to atelier-session override the default startup choice."));
+
+    let network = page(&stack, "network", "Network", "Manage existing network connections and inspect nearby Wi-Fi.");
+    network_page::build(&network);
 
     let power_page = page(&stack, "power", "Power", "Read-only system battery and external power information.");
     let power_status = description("");
