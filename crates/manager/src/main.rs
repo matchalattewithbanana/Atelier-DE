@@ -9,6 +9,8 @@ mod session;
 mod mango;
 #[cfg(feature = "gui")]
 mod rice;
+#[cfg(feature = "gui")]
+mod live_rice;
 mod release;
 mod trust;
 mod discovery;
