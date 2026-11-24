@@ -36,3 +36,12 @@ atelier-manager release-trust revoke KEY_ID
 ```
 
 Key IDs are lowercase SHA-256 of the normalized public-key text (not OpenSSH fingerprints). Pin only after independently authenticating the full key. Pin and revoke require typed confirmation; rotation means pinning the independently authenticated replacement and revoking the old key. Revoked keys remain tombstoned. Acceptance verifies the signature and local artifact hashes, then atomically records per-architecture, per-executable high-water marks shared across all pinned keys. Lower sequences and conflicting identities at equal sequence are rejected; identical repeats are accepted. No install or deployment selection occurs. State is stored in `${XDG_STATE_HOME:-$HOME/.local/state}/atelier-manager/release-trust/`. A first acceptance cannot detect older releases, and deleting or restoring old local state defeats replay protection. No expiry, remote revocation, channel separation, official root key, or protection against a compromised currently trusted signer is provided. Stateless verification and trusted local staging remain separate workflows and do not enforce these marks. Never treat this experimental local policy as a complete secure remote updater.
+
+## Remote release discovery (experimental)
+
+```sh
+atelier-manager release-discover native
+atelier-manager release-discover native --prerelease
+```
+
+This explicit read-only network operation queries the first 20 GitHub release records of `matchalattewithbanana/Atelier-DE` through system `gh` and `timeout`. For private repositories authenticate GitHub CLI separately. No token is requested or printed by Atelier. Drafts are excluded; prereleases are opt-in. The v1 discovery naming convention is `atelier-release-linux-ARCH.json` and `atelier-release-linux-ARCH.json.sig`, where ARCH matches Rust's host architecture. Both metadata files must appear exactly once as uploaded assets within their size limits. The JSON output reports candidates in API order, not semantic version or authenticated sequence order. All candidates remain unverified; no assets are downloaded and no release is selected or installed. An empty page or no matching assets is not proof that no release exists. Mango Atelier's distribution has a different installer contract and is intentionally not included yet. Future acquisition must authenticate manifest bytes and enforce pinned-key policy before trusting any release artifact metadata.
