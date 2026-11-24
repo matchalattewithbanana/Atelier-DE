@@ -71,7 +71,7 @@ impl WorkspaceBackend {
         let desktop = format!("{}:{}", env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(), env::var("XDG_SESSION_DESKTOP").unwrap_or_default());
         let Some(name) = external_name(&marked, assigned.as_deref(), &desktop) else { return Self::Unavailable; };
         let Some(helper) = installed_helper("atelier-workspace") else { return Self::Unavailable; };
-        let (requests, receiver) = mpsc::sync_channel(4);
+        let (requests, receiver) = mpsc::sync_channel::<u8>(4);
         let snapshot = Arc::new(Mutex::new(None));
         let target = Arc::clone(&snapshot);
         // One worker, no overlapping queries and no blocking GTK main thread.
