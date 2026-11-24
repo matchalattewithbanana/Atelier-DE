@@ -104,12 +104,26 @@ pub(super) fn selection_lock(root: &Path) -> Result<File> {
     FileExt::lock_exclusive(&lock)?;
     Ok(lock)
 }
-fn switch(root: &Path, reviewed: &Selection, target: &str) -> Result<()> {
+/// An ordinary activation of an update must still be based on the selected
+/// bundle. Explicit historical selection and rollback intentionally bypass
+/// this ancestry check, but never bypass artifact verification.
+fn check_activation(state: &Selection, target: &str, manifest: &Manifest, historical: bool) -> Result<()> {
+    if historical || state.current.as_deref() == Some(target) { return Ok(()); }
+    if let Some(base) = &manifest.base_deployment {
+        if state.current.as_deref() != Some(base.as_str()) {
+            bail!("update was staged from {base}, not the current deployment; restage against the current bundle, or explicitly select it with activate ID --historical");
+        }
+    }
+    Ok(())
+}
+
+fn switch(root: &Path, reviewed: &Selection, target: &str, historical: bool) -> Result<()> {
     ensure_root(root)?;
     let _lock = selection_lock(root)?;
     let current = load_selection(root)?;
     if &current != reviewed { bail!("selection changed during review; retry"); }
-    manifest(root, target, true)?;
+    let target_manifest = manifest(root, target, true)?;
+    check_activation(&current, target, &target_manifest, historical)?;
     if current.current.as_deref() == Some(target) { return Ok(()); }
     write_selection(root, &Selection { schema: 1, current: Some(target.to_owned()), previous: current.current })
 }
@@ -346,6 +360,7 @@ fn remove_at(root: &Path, id: &str) -> Result<()> {
     let moved = quarantine.path().join("bundle");
     fs::rename(&bundle, &moved)?;
     let quarantine = quarantine.keep();
+    File::open(&quarantine)?.sync_all()?;
     File::open(root)?.sync_all()?;
     let result = (|| -> Result<()> {
         for file in files { fs::remove_file(moved.join(file))?; }
@@ -376,7 +391,7 @@ pub fn remove_offline(id: &str) -> Result<()> {
 
 #[cfg(test)]
 pub(super) fn select_for_test(root: &Path, id: &str) {
-    switch(root, &load_selection(root).unwrap(), id).unwrap();
+    switch(root, &load_selection(root).unwrap(), id, false).unwrap();
 }
 
 pub fn cleanup_plan() -> Result<()> {
@@ -457,18 +472,21 @@ pub fn active_path() -> Result<()> {
     manifest(&root, &id, false)?;
     println!("{}", root.join(id).join("bin").display()); Ok(())
 }
-pub fn activate(id: Option<&str>) -> Result<()> {
+pub fn activate(id: Option<&str>, historical: bool) -> Result<()> {
     if nix::unistd::Uid::effective().is_root() { bail!("run activation as your desktop user, not root"); }
     let root = data_root()?; directory(&root)?;
     let selected = load_selection(&root)?;
     let target = match id { Some(id) => id, None => selected.previous.as_deref().context("no previous deployment to roll back to")? };
     let manifest = manifest(&root, target, false)?;
+    let intentional_history = historical || id.is_none();
+    check_activation(&selected, target, &manifest, intentional_history)?;
     println!("Select deployment {target} ({})? Current: {}.", manifest.products.join(", "), selected.current.as_deref().unwrap_or("none"));
     println!("Only Atelier's selection record changes. No running processes, PATH, settings or system packages are modified.");
+    if intentional_history { println!("Historical selection may restore older components. This is local rollback, not remote release acceptance."); }
     print!("Confirm selection? [y/N] "); io::stdout().flush()?;
     let mut reply = String::new(); io::stdin().read_line(&mut reply)?;
     if !matches!(reply.trim().to_ascii_lowercase().as_str(), "y" | "yes") { println!("Cancelled."); return Ok(()); }
-    switch(&root, &selected, target)?;
+    switch(&root, &selected, target, intentional_history)?;
     println!("Selected {target}. Use atelier-manager active-path for its bin directory.");
     Ok(())
 }
@@ -488,13 +506,13 @@ mod tests {
     fn selection_is_atomic_and_previous_can_be_restored() {
         let root = tempfile::tempdir().unwrap(); let root = root.path();
         fixture(root, "deployment-A", b"first"); fixture(root, "deployment-B", b"second");
-        switch(root, &Selection::default(), "deployment-A").unwrap();
+        switch(root, &Selection::default(), "deployment-A", false).unwrap();
         let first = load_selection(root).unwrap();
-        switch(root, &first, "deployment-B").unwrap();
+        switch(root, &first, "deployment-B", false).unwrap();
         let second = load_selection(root).unwrap();
         assert_eq!(second.previous.as_deref(), Some("deployment-A"));
-        assert!(switch(root, &first, "deployment-A").is_err());
-        switch(root, &second, "deployment-A").unwrap();
+        assert!(switch(root, &first, "deployment-A", false).is_err());
+        switch(root, &second, "deployment-A", false).unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
     }
@@ -504,11 +522,11 @@ mod tests {
         let root = temp.path();
         fixture(root,"deployment-A",b"one");
         fixture(root,"deployment-B",b"two");
-        switch(root,&Selection::default(),"deployment-A").unwrap();
+        switch(root,&Selection::default(), "deployment-A", false).unwrap();
         assert_eq!(runtime_status(&root.join("deployment-A")),"untracked");
         let first = lease_selected(root,&["atelier-shell"]).unwrap();
         let second = lease_selected(root,&["atelier-shell"]).unwrap();
-        switch(root,&load_selection(root).unwrap(),"deployment-B").unwrap();
+        switch(root,&load_selection(root).unwrap(), "deployment-B", false).unwrap();
         assert_eq!(runtime_status(&root.join("deployment-A")),"managed-in-use");
         drop(first);
         assert_eq!(runtime_status(&root.join("deployment-A")),"managed-in-use");
@@ -538,12 +556,32 @@ mod tests {
         assert!(launchable_product("../bin/sh").is_err());
     }
     #[test]
+    fn stale_update_requires_explicit_historical_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for id in ["deployment-A", "deployment-B", "deployment-C"] { fixture(root,id,b"test"); }
+        let path = root.join("deployment-C/manifest.json");
+        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        m["base_deployment"] = serde_json::json!("deployment-A");
+        fs::write(&path,serde_json::to_vec(&m).unwrap()).unwrap();
+        switch(root,&Selection::default(),"deployment-A",false).unwrap();
+        switch(root,&load_selection(root).unwrap(),"deployment-C",false).unwrap();
+        switch(root,&load_selection(root).unwrap(),"deployment-B",false).unwrap();
+        let before = load_selection(root).unwrap();
+        assert!(switch(root,&before,"deployment-C",false).is_err());
+        assert_eq!(load_selection(root).unwrap(),before);
+        switch(root,&before,"deployment-C",true).unwrap();
+        assert_eq!(load_selection(root).unwrap().current.as_deref(),Some("deployment-C"));
+        fs::write(root.join("deployment-C/bin/atelier-shell"),b"evil").unwrap();
+        assert!(switch(root,&load_selection(root).unwrap(),"deployment-C",true).is_err());
+    }
+    #[test]
     fn offline_removal_protects_selection_lineage_leases_and_unknown_files() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         for id in ["deployment-A","deployment-B","deployment-C","deployment-D"] { fixture(root,id,b"test"); }
-        switch(root,&Selection::default(),"deployment-A").unwrap();
-        switch(root,&load_selection(root).unwrap(),"deployment-B").unwrap();
+        switch(root,&Selection::default(), "deployment-A", false).unwrap();
+        switch(root,&load_selection(root).unwrap(), "deployment-B", false).unwrap();
         assert!(remove_at(root,"deployment-A").is_err());
         assert!(remove_at(root,"deployment-B").is_err());
         let file = root.join("deployment-D/manifest.json");
@@ -576,7 +614,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         value["base_deployment"] = serde_json::json!("deployment-A");
         fs::write(&file,serde_json::to_vec(&value).unwrap()).unwrap();
-        switch(root,&Selection::default(),"deployment-B").unwrap();
+        switch(root,&Selection::default(), "deployment-B", false).unwrap();
         let report = cleanup_report(root).unwrap();
         assert_eq!(report["deployments"][0]["protection"],"referenced-base");
         assert_eq!(report["deployments"][1]["protection"],"selected-or-rollback");
@@ -588,8 +626,8 @@ mod tests {
         let root = root.path();
         fixture(root, "deployment-A", b"first");
         fixture(root, "deployment-B", b"second");
-        switch(root, &Selection::default(), "deployment-A").unwrap();
-        switch(root, &load_selection(root).unwrap(), "deployment-B").unwrap();
+        switch(root, &Selection::default(), "deployment-A", false).unwrap();
+        switch(root, &load_selection(root).unwrap(), "deployment-B", false).unwrap();
         fs::write(root.join("deployment-B/bin/atelier-shell"), b"broken").unwrap();
         let report = recovery_at(root).unwrap();
         assert_eq!(report["current"]["status"], "invalid");
@@ -605,8 +643,8 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fixture(&root, "deployment-A", b"one");
         fixture(&root, "deployment-B", b"two");
-        switch(&root, &Selection::default(), "deployment-A").unwrap();
-        switch(&root, &load_selection(&root).unwrap(), "deployment-B").unwrap();
+        switch(&root, &Selection::default(), "deployment-A", false).unwrap();
+        switch(&root, &load_selection(&root).unwrap(), "deployment-B", false).unwrap();
         fs::remove_dir_all(root.join("deployment-A")).unwrap();
         let report = inventory(&root).unwrap();
         assert_eq!(report.current.as_deref(), Some("deployment-B"));
@@ -623,7 +661,7 @@ mod tests {
         let root = root.path();
         assert!(session_bin(root, false).is_err());
         fixture(root, "deployment-A", b"shell only");
-        switch(root, &Selection::default(), "deployment-A").unwrap();
+        switch(root, &Selection::default(), "deployment-A", false).unwrap();
         assert!(session_bin(root, false).is_err());
         assert!(session_bin(root, true).is_err());
 
@@ -643,7 +681,7 @@ mod tests {
             "products":["session","shell"],"artifacts":artifacts
         })).unwrap()).unwrap();
         let old = load_selection(root).unwrap();
-        switch(root, &old, id).unwrap();
+        switch(root, &old, id, false).unwrap();
         assert_eq!(session_bin(root, false).unwrap(), bin);
         assert_eq!(session_bin(root, true).unwrap(), bin);
         fs::write(bin.join("atelier-compositor"), b"altered").unwrap();
@@ -654,7 +692,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap(); let root = root.path();
         fixture(root, "deployment-A", b"first");
         fs::write(root.join("deployment-A/bin/atelier-shell"), b"other").unwrap();
-        assert!(switch(root, &Selection::default(), "deployment-A").is_err());
+        assert!(switch(root, &Selection::default(), "deployment-A", false).is_err());
         assert_eq!(load_selection(root).unwrap(), Selection::default());
         assert!(manifest(root, "../invalid", false).is_err());
     }

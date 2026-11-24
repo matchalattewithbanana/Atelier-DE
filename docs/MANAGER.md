@@ -77,7 +77,7 @@ atelier-manager active-path
 atelier-manager rollback
 ```
 
-Activation and rollback confirm the exact target, verify the manifest and every artifact hash, and atomically update a single selection record with current and previous IDs under an exclusive lock. A stale review or corrupt deployment is rejected without switching. Previous deployment files remain intact. `active-path` prints the selected bin directory after structural and size checks; use `verify` for a full hash check. This is a manager-local selection, not a display-manager change or system-wide install. To test a selected bundle, explicitly launch the desired binary from that directory or add it to PATH for the current shell yourself. Running sessions and shell startup files are not modified. A rollback switches the record back to the previous complete deployment, not system packages or user settings. Hashes detect corruption, not authenticity.
+Activation and rollback confirm the exact target, verify the manifest and every artifact hash, and atomically update a single selection record with current and previous IDs under an exclusive lock. A stale review or corrupt deployment is rejected without switching. Ordinary activation also rejects a selective update whose recorded base is no longer selected. Restage against the current deployment or use `activate ID --historical` with explicit confirmation. `rollback` intentionally selects the previous complete deployment regardless of ancestry. Historical selection never bypasses hash checks. Previous deployment files remain intact. `active-path` prints the selected bin directory after structural and size checks; use `verify` for a full hash check. This is a manager-local selection, not a display-manager change or system-wide install. To test a selected bundle, explicitly launch the desired binary from that directory or add it to PATH for the current shell yourself. Running sessions and shell startup files are not modified. A rollback switches the record back to the previous complete deployment, not system packages or user settings. Hashes detect corruption, not authenticity.
 
 ## Verified nested session launch
 
@@ -121,7 +121,7 @@ Package history reads existing checkpoints without creating directories or runni
 
 ## Native release metadata
 
-See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generation, detached publisher signature authentication and artifact verification. These commands do not download, install or activate releases.
+See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generation, detached publisher signature authentication and artifact verification. Local manifest commands do not download or activate releases; the separate discovery, fetch and stage workflows are documented there.
 
 ## Deployment storage planning
 
