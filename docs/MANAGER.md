@@ -122,3 +122,7 @@ Package history reads existing checkpoints without creating directories or runni
 ## Native release metadata
 
 See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generation, detached publisher signature authentication and artifact verification. These commands do not download, install or activate releases.
+
+## Deployment storage planning
+
+`atelier-manager deployment-cleanup-plan` reports logical artifact sizes and protection reasons for selected/rollback bundles, referenced bases, and incomplete inventories. It never deletes deployments: running processes may still rely on an older bundle even if it is no longer selected. Runtime-use tracking and explicit removal are separate future work.
