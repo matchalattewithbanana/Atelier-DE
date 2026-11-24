@@ -95,6 +95,16 @@ cargo run -p atelier-compositor --features native-gbm -- --check-gbm
 
 The check acquires the current seat, opens a seat-assigned DRM card, allocates a small XRGB8888 rendering buffer, exports it as a DMA-BUF and releases every resource. It does not verify EGL import, scanout compatibility, rendering or KMS presentation. Do not run from a graphical session or with sudo.
 
+### Experimental off-screen rendering
+
+On the same spare local text login, the next diagnostic initializes EGL/GLES on a seat-owned DRM device, negotiates renderable XRGB8888 modifiers, allocates a GBM buffer and exports it as a DMA-BUF. It clears the framebuffer, synchronizes and reads all pixels back to verify the expected color.
+
+```sh
+cargo run -p atelier-compositor --features native-gbm -- --check-render
+```
+
+This is an off-screen diagnostic, not a monitor presentation test. No modesetting, client composition or input dispatch is performed. CI compiles the feature and tests the pixel verifier; hardware execution requires a real local seat.
+
 ## Verification
 
 ```sh
