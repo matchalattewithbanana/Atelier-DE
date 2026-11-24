@@ -116,32 +116,56 @@ pub fn list() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&snapshot()?)?);
     Ok(())
 }
-pub fn pin(path: &Path) -> Result<()> {
+enum TrustAction { Pin(String), Revoke(String) }
+pub(super) struct TrustReview {
+    root: PathBuf,
+    action: TrustAction,
+    detail: String,
+}
+impl TrustReview {
+    pub(super) fn detail(&self) -> &str { &self.detail }
+    pub(super) fn phrase(&self) -> &'static str {
+        match &self.action { TrustAction::Pin(_) => "trust publisher", TrustAction::Revoke(_) => "revoke publisher" }
+    }
+    pub(super) fn apply(self) -> Result<String> {
+        if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+        let _lock = locked(&self.root)?;
+        let mut state = load(&self.root)?;
+        let result = match self.action {
+            TrustAction::Pin(public) => format!("Pinned publisher key {}.", pin_key(&mut state, public)?),
+            TrustAction::Revoke(id) => {
+                revoke_key(&mut state, &id)?;
+                format!("Publisher key {id} revoked.")
+            }
+        };
+        save(&self.root, &state)?;
+        Ok(result)
+    }
+}
+pub(super) fn review_pin(path: &Path) -> Result<TrustReview> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
     let public = release::canonical_key(&release::bounded_file(path, 8 * 1024)?)?;
     let id = key_id(&public);
-    if !confirm(&format!("Pin publisher key ID {id}\n{public}\nVerify this exact key independently. It can authenticate releases for all native products."), "trust publisher")? {
-        println!("Cancelled."); return Ok(());
-    }
     let root = root()?;
-    let _lock = locked(&root)?;
-    let mut state = load(&root)?;
-    pin_key(&mut state, public)?;
-    save(&root, &state)?;
-    println!("Pinned publisher key {id}.");
+    // Check policy without saving; apply rechecks against current state.
+    pin_key(&mut load(&root)?, public.clone())?;
+    let detail = format!("Pin publisher key ID {id}\n{public}\nVerify this exact key independently. It can authenticate releases for all native products. Never trust a key merely because a release supplies it.");
+    Ok(TrustReview { root, action: TrustAction::Pin(public), detail })
+}
+pub(super) fn review_revoke(id: &str) -> Result<TrustReview> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    let root = root()?;
+    active_key(&load(&root)?, id)?;
+    let detail = format!("Permanently revoke local publisher key {id}. Future remote acceptance using this key is blocked. Existing deployments and sequence records are unchanged.");
+    Ok(TrustReview { root, action: TrustAction::Revoke(id.into()), detail })
+}
+fn apply_confirmed(review: TrustReview) -> Result<()> {
+    if !confirm(review.detail(), review.phrase())? { println!("Cancelled."); return Ok(()); }
+    println!("{}", review.apply()?);
     Ok(())
 }
-pub fn revoke(id: &str) -> Result<()> {
-    if !confirm(&format!("Permanently revoke local publisher key {id}. Existing deployments are unchanged."), "revoke publisher")? {
-        println!("Cancelled."); return Ok(());
-    }
-    let root = root()?;
-    let _lock = locked(&root)?;
-    let mut state = load(&root)?;
-    revoke_key(&mut state, id)?;
-    save(&root, &state)?;
-    println!("Publisher key revoked.");
-    Ok(())
-}
+pub fn pin(path: &Path) -> Result<()> { apply_confirmed(review_pin(path)?) }
+pub fn revoke(id: &str) -> Result<()> { apply_confirmed(review_revoke(id)?) }
 fn advance(state: &mut State, release: &ReleaseManifest) -> Result<()> {
     let sequence = release.sequence.context("persistent trust requires a schema-2 release sequence")?;
     let mut next = state.accepted.clone();

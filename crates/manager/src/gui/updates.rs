@@ -8,7 +8,7 @@ fn active_keys() -> anyhow::Result<Vec<String>> {
     Ok(trust::snapshot()?.keys.into_iter().filter(|(_, key)| !key.revoked).map(|(id, _)| id).collect())
 }
 fn selected_key(combo: &gtk::ComboBoxText) -> anyhow::Result<String> {
-    combo.active_id().map(|id| id.to_string()).ok_or_else(|| anyhow::anyhow!("Select an independently pinned publisher key. Use the CLI to pin keys first."))
+    combo.active_id().map(|id| id.to_string()).ok_or_else(|| anyhow::anyhow!("Select an independently pinned publisher key. Pin a verified key in Publisher trust first."))
 }
 fn fill_keys(combo: &gtk::ComboBoxText, keys: Vec<String>) {
     let old = combo.active_id();
@@ -103,7 +103,7 @@ pub(super) fn build() -> gtk::Box {
             background(active_keys, move |result| {
                 let (Some(form), Some(status), Some(keys)) = (form.upgrade(), status.upgrade(), keys.upgrade()) else { return; };
                 match result {
-                    Ok(ids) => { status.set_text(if ids.is_empty() { "No active pinned keys. Pin a verified key with the CLI first." } else { "Select a pinned key explicitly." }); fill_keys(&keys, ids); }
+                    Ok(ids) => { status.set_text(if ids.is_empty() { "No active pinned keys. Pin a verified key in Publisher trust first." } else { "Select a pinned key explicitly." }); fill_keys(&keys, ids); }
                     Err(e) => { keys.remove_all(); status.set_text(&format!("Trust unavailable: {e:#}")); }
                 }
                 form.set_sensitive(true);
