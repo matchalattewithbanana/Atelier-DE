@@ -625,9 +625,78 @@ pub(super) fn wallpaper_palettes(path:&Path,target:&str,image:&str)->Result<Wall
     parse_wallpaper_palettes(&checkout.run(target,&["wallpaper-review","palette",image],"30s")?)
 }
 
+#[derive(Clone,Copy)]
+pub(super) enum RegistryAction { Register, Remove }
+impl RegistryAction {
+    fn command(self)->&'static str{match self{Self::Register=>"register",Self::Remove=>"remove"}}
+    fn validate(self,value:&str)->Result<()>{
+        match self{
+            Self::Register if Path::new(value).is_absolute() && Path::new(value).extension().and_then(|s|s.to_str())==Some("json") && !value.chars().any(char::is_control)=>Ok(()),
+            Self::Remove if valid_id(value) && !matches!(value,"atelier"|"sekaipop"|"serpantinum")=>Ok(()),
+            _=>bail!("enter an absolute JSON manifest path or a non-built-in rice ID"),
+        }
+    }
+}
+#[derive(Deserialize)]
+struct RegistryResponse{schema:u32,sha256:String,manifest:serde_json::Value}
+pub(super) struct RegistryReview{
+    path:PathBuf,
+    action:RegistryAction,
+    value:String,
+    response:RegistryResponse,
+    id:String,
+}
+fn parse_registry(bytes:&[u8],action:RegistryAction,value:&str)->Result<RegistryResponse>{
+    let response:RegistryResponse=serde_json::from_slice(bytes)?;
+    let id=response.manifest["id"].as_str().context("missing rice ID")?;
+    if response.schema!=1 || response.sha256.len()!=64 || !response.sha256.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))
+        || !valid_id(id) || matches!(id,"atelier"|"sekaipop"|"serpantinum")
+        || matches!(action,RegistryAction::Remove) && id!=value
+        || !matches!(response.manifest["kind"].as_str(),Some("quickshell"|"command")){
+        bail!("invalid custom registry review");
+    }
+    Ok(response)
+}
+pub(super) fn review_registry(path:&Path,action:RegistryAction,value:&str)->Result<RegistryReview>{
+    action.validate(value)?;
+    if live_desktop_present(){bail!("close all Mango Atelier sessions before registry changes");}
+    let checkout=Checkout::open(path)?;
+    let bytes=checkout.run("mango",&["registry-review",action.command(),value],"180s")?;
+    let response=parse_registry(&bytes,action,value)?;
+    let id=response.manifest["id"].as_str().context("missing ID")?.to_owned();
+    Ok(RegistryReview{path:checkout.root,action,value:value.into(),response,id})
+}
+impl RegistryReview{
+    pub(super) fn detail(&self)->Result<String>{
+        Ok(format!("Operation: {}\nManifest SHA-256: {}\n{}\nRegistration does not launch code. Later activation runs this program/QML with your user privileges. Unregistering preserves files; export custom snapshots first.",
+            self.action.command(),self.response.sha256,serde_json::to_string_pretty(&self.response.manifest)?))
+    }
+    pub(super) fn phrase(&self)->String{format!("{} {}",self.action.command(),self.id)}
+    pub(super) fn apply(self,typed:&str)->Result<String>{
+        if typed!=self.phrase(){bail!("confirmation does not match reviewed rice");}
+        if live_desktop_present(){bail!("close all Mango Atelier sessions before registry changes");}
+        let checkout=Checkout::open(&self.path)?;
+        let hash=format!("--expected-sha256={}",self.response.sha256);
+        let result:serde_json::Value=serde_json::from_slice(&checkout.run("mango",&["registry-review",self.action.command(),&self.value,&hash],"180s")?)?;
+        let expected=match self.action{RegistryAction::Register=>"registered",RegistryAction::Remove=>"unregistered"};
+        if result["status"].as_str()!=Some(expected)||result["id"].as_str()!=Some(self.id.as_str()){bail!("unknown registry result; refresh catalog before retrying");}
+        Ok(format!("{} {expected}. No rice launched or source files deleted. Refresh the local catalog.",self.id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_review_rejects_builtin_and_mismatched_ids(){
+        assert!(RegistryAction::Remove.validate("atelier").is_err());
+        assert!(RegistryAction::Remove.validate("../custom").is_err());
+        assert!(RegistryAction::Register.validate("relative.json").is_err());
+        let data=serde_json::json!({"schema":1,"sha256":"a".repeat(64),"manifest":{"id":"custom","kind":"command","argv":["example"]}});
+        let bytes=serde_json::to_vec(&data).unwrap();
+        assert!(parse_registry(&bytes,RegistryAction::Remove,"custom").is_ok());
+        assert!(parse_registry(&bytes,RegistryAction::Remove,"other").is_err());
+    }
     #[test]
     fn generated_palette_requires_all_color_roles_and_no_other_keys(){
         let palette:std::collections::BTreeMap<_,_>=APPEARANCE_FIELDS.iter().filter(|(key,_,_,range)|range.is_none()&&*key!="fontFamily").map(|(key,_,_,_)|(*key,"#123456")).collect();

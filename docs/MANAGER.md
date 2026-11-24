@@ -197,3 +197,5 @@ The optional Wallpapers page provides local gallery browsing, bounded thumbnail 
 The optional Panel, dock & widgets page edits Classic layout toggles and ordered dock pins using the reviewed snapshot backend. See [Mango integration](MANGO_INTEGRATION.md).
 
 Appearance Studio supports wallpaper-derived dark and light color drafts via the reviewed Classic integration. Color generation never applies settings automatically.
+
+The optional Custom rices page reviews and registers trusted local manifests, or unregisters unselected custom profiles without deleting their files. See [Mango integration](MANGO_INTEGRATION.md).

@@ -13,6 +13,7 @@ mod live_preview;
 mod studio;
 mod wallpapers;
 mod layout_studio;
+mod registry;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -251,6 +252,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     stack.add_titled(&setup::build(), Some("setup"), "Installation");
     stack.add_titled(&updates::build(), Some("updates"), "Updates");
     stack.add_titled(&rices::build(), Some("rices"), "Rices");
+    stack.add_titled(&registry::build(), Some("registry"), "Custom rices");
     stack.add_titled(&snapshots::build(), Some("snapshots"), "Rice backups");
     stack.add_titled(&live_preview::build(), Some("live-preview"), "Live rice preview");
     stack.add_titled(&studio::build(), Some("studio"), "Appearance Studio");
