@@ -49,19 +49,15 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         }
         state.resize(size.w, size.h);
         let damage = Rectangle::from_size(size);
-        let region = state.space.output_geometry(&state.output).context("nested output geometry")?;
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
-            let elements = state.space.render_elements_for_region(renderer, &region, 1.0, 1.0);
+            let elements = state.space.render_elements_for_output(renderer, &state.output, 1.0).map_err(|error| anyhow::anyhow!("render nested output: {error:?}"))?;
             let mut frame = renderer.render(&mut target, size, Transform::Flipped180)?;
             frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
             let _sync = frame.finish()?;
         }
-        let output = &state.output;
-        for window in state.space.elements_for_output(output) {
-            window.send_frame(output, started.elapsed(), None, |_, _| Some(output.clone()));
-        }
+        state.send_frames(started.elapsed());
         display.flush_clients()?;
         backend.submit(Some(&[damage])).context("present nested framebuffer")?;
         // Bound idle polling; production backend will use calloop and damage-driven scheduling.

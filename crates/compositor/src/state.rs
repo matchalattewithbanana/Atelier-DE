@@ -1,11 +1,11 @@
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, RendererSurfaceStateUserData},
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
-    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType},
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_layer_shell,
+    desktop::{layer_map_for_output, LayerSurface as DesktopLayer, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+        protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface},
         Client, DisplayHandle,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
@@ -17,6 +17,7 @@ use smithay::{
         selection::{data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler}, SelectionHandler},
         shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         shm::{ShmHandler, ShmState},
+        shell::wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
     },
 };
 use std::os::fd::OwnedFd;
@@ -25,6 +26,8 @@ pub struct Atelier {
     display: DisplayHandle,
     compositor: CompositorState,
     shell: XdgShellState,
+    layer_shell: WlrLayerShellState,
+    focused_layer: Option<WlSurface>,
     shm: ShmState,
     seats: SeatState<Self>,
     data_device: DataDeviceState,
@@ -64,6 +67,7 @@ impl Atelier {
         Ok(Self {
             display: display.clone(),
             compositor: CompositorState::new::<Self>(display), shell: XdgShellState::new::<Self>(display),
+            layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(),
@@ -86,17 +90,19 @@ impl Atelier {
             self.output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(1)), Some((0, 0).into()));
             self.output.set_preferred(mode);
             if let Some(previous) = previous { self.output.delete_mode(previous); }
+            layer_map_for_output(&self.output).arrange();
             self.reflow();
         }
     }
 
     fn reflow(&mut self) {
         if self.layout != atelier_config::Layout::Grid { return; }
-        let Some(mode) = self.output.current_mode() else { return; };
-        let Some(tiles) = crate::layout::grid(mode.size.w, mode.size.h, self.windows.len()) else { return; };
+        let Some(_) = self.output.current_mode() else { return; };
+        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+        let Some(tiles) = crate::layout::grid(zone.size.w, zone.size.h, self.windows.len()) else { return; };
         let top = self.space.elements().next_back().cloned();
         for (window, tile) in self.windows.iter().zip(tiles) {
-            self.space.map_element(window.clone(), (tile.x, tile.y), false);
+            self.space.map_element(window.clone(), (zone.loc.x + tile.x, zone.loc.y + tile.y), false);
             if let Some(surface) = window.toplevel() {
                 surface.with_pending_state(|state| state.size = Some((tile.width, tile.height).into()));
                 surface.send_pending_configure();
@@ -107,6 +113,7 @@ impl Atelier {
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
         self.scene_dirty = true;
+        self.focused_layer = None;
         self.focused = window.clone();
         if let Some(window) = &window { self.space.raise_element(window, true); }
         for candidate in self.space.elements() {
@@ -154,12 +161,61 @@ impl Atelier {
             .find(|w| w.toplevel().is_some_and(|s| s.wl_surface() == surface)).cloned()
     }
 
-    pub fn surface_under_pointer(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
+    fn layer_hit(&self, layers: &[Layer]) -> Option<(DesktopLayer, WlSurface, Point<f64, Logical>)> {
         let p = self.pointer_position;
-        let (window, origin) = self.space.element_under(p)?;
-        let local = (p.x - f64::from(origin.x), p.y - f64::from(origin.y));
-        let (surface, offset) = window.surface_under(local, WindowSurfaceType::ALL)?;
-        Some((surface, (f64::from(origin.x + offset.x), f64::from(origin.y + offset.y)).into()))
+        let map = layer_map_for_output(&self.output);
+        for &level in layers {
+            for layer in map.layers_on(level).rev() {
+                let Some(geometry) = map.layer_geometry(layer) else { continue; };
+                let origin = geometry.loc - layer.bbox().loc;
+                let local = (p.x - f64::from(origin.x), p.y - f64::from(origin.y));
+                if let Some((surface, offset)) = layer.surface_under(local, WindowSurfaceType::ALL) {
+                    return Some((layer.clone(), surface, (f64::from(origin.x + offset.x), f64::from(origin.y + offset.y)).into()));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn surface_under_pointer(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if let Some((_, surface, origin)) = self.layer_hit(&[Layer::Overlay, Layer::Top]) {
+            return Some((surface, origin));
+        }
+        let p = self.pointer_position;
+        if let Some((window, origin)) = self.space.element_under(p) {
+            let local = (p.x - f64::from(origin.x), p.y - f64::from(origin.y));
+            if let Some((surface, offset)) = window.surface_under(local, WindowSurfaceType::ALL) {
+                return Some((surface, (f64::from(origin.x + offset.x), f64::from(origin.y + offset.y)).into()));
+            }
+        }
+        self.layer_hit(&[Layer::Bottom, Layer::Background]).map(|(_, surface, origin)| (surface, origin))
+    }
+
+    pub fn focus_pointer(&mut self, serial: Serial) {
+        let layer = self.layer_hit(&[Layer::Overlay, Layer::Top]).map(|(layer, _, _)| layer);
+        let window = self.space.element_under(self.pointer_position).map(|(window, _)| window.clone());
+        let layer = layer.or_else(|| if window.is_none() { self.layer_hit(&[Layer::Bottom, Layer::Background]).map(|(layer, _, _)| layer) } else { None });
+        if let Some(layer) = layer {
+            // Non-interactive layer clicks never focus the application behind them.
+            if layer.can_receive_keyboard_focus() {
+                self.focus(None, serial);
+                let surface = layer.wl_surface().clone();
+                self.focused_layer = Some(surface.clone());
+                if let Some(keyboard) = self.seat.get_keyboard() { keyboard.set_focus(self, Some(surface), serial); }
+            }
+        } else {
+            self.focus(window, serial);
+        }
+    }
+
+    pub fn send_frames(&self, time: std::time::Duration) {
+        for window in self.space.elements_for_output(&self.output) {
+            window.send_frame(&self.output, time, None, |_, _| Some(self.output.clone()));
+        }
+        let map = layer_map_for_output(&self.output);
+        for layer in map.layers() {
+            layer.send_frame(&self.output, time, None, |_, _| Some(self.output.clone()));
+        }
     }
 
     fn map_toplevel(&mut self, surface: ToplevelSurface) {
@@ -206,6 +262,13 @@ impl CompositorHandler for Atelier {
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) { root = parent; }
+            let layer = { layer_map_for_output(&self.output).layer_for_surface(&root, WindowSurfaceType::TOPLEVEL).cloned() };
+            if let Some(layer) = layer {
+                let changed = layer_map_for_output(&self.output).arrange();
+                layer.layer_surface().send_pending_configure();
+                if changed { self.reflow(); }
+                return;
+            }
             let mapped = with_states(&root, |states| {
                 states.data_map.get::<RendererSurfaceStateUserData>().is_some_and(|state| state.lock().unwrap().buffer().is_some())
             });
@@ -274,6 +337,44 @@ impl XdgShellHandler for Atelier {
     }
 }
 
+impl WlrLayerShellHandler for Atelier {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState { &mut self.layer_shell }
+
+    fn new_layer_surface(&mut self, surface: LayerSurface, _: Option<WlOutput>, _: Layer, namespace: String) {
+        // There is exactly one output in this milestone. LayerMap handles anchors,
+        // margins and exclusive zones; initial configure is sent on first commit.
+        let layer = DesktopLayer::new(surface.clone(), namespace);
+        let result = layer_map_for_output(&self.output).map_layer(&layer);
+        if let Err(error) = result {
+            tracing::warn!(?error, "could not map layer surface");
+            surface.send_close();
+        } else {
+            self.scene_dirty = true;
+            self.reflow();
+        }
+    }
+
+    fn new_popup(&mut self, _: LayerSurface, popup: PopupSurface) {
+        // The xdg-shell handler tracks popups; layer-shell assigns their parent.
+        // Tracking again is unnecessary and may reject a duplicate registration.
+        let _ = popup;
+    }
+
+    fn layer_destroyed(&mut self, surface: LayerSurface) {
+        let mapped = { layer_map_for_output(&self.output).layer_for_surface(surface.wl_surface(), WindowSurfaceType::TOPLEVEL).cloned() };
+        if let Some(layer) = mapped {
+            layer_map_for_output(&self.output).unmap_layer(&layer);
+        }
+        self.scene_dirty = true;
+        self.reflow();
+        if self.focused_layer.as_ref() == Some(surface.wl_surface()) {
+            let next = self.space.elements().next_back().cloned();
+            self.focus(next, SERIAL_COUNTER.next_serial());
+        }
+    }
+}
+
+delegate_layer_shell!(Atelier);
 delegate_compositor!(Atelier);
 delegate_xdg_shell!(Atelier);
 delegate_shm!(Atelier);
