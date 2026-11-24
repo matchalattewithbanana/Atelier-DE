@@ -31,5 +31,5 @@ jobs:
       - name: Read-only hardware inventory
         run: target/debug/atelier-compositor --probe-hardware
 
-      - name: Compile native-seat and native-gbm features
-        run: cargo +stable test -p atelier-compositor --features native-gbm
+      - name: Compile native-seat, native-gbm and native-kms features
+        run: cargo +stable test -p atelier-compositor --features native-kms
