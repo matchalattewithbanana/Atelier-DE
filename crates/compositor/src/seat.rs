@@ -14,12 +14,20 @@ fn tty_allowed(tty: bool, session: Option<&str>, graphical: bool) -> bool {
 
 pub enum Check {
     Seat,
+    #[cfg(feature = "native-input")]
+    Input,
+    #[cfg(feature = "native-session")]
+    Native { socket: String, config: atelier_config::Config },
     #[cfg(feature = "native-gbm")]
     Gbm,
     #[cfg(feature = "native-gbm")]
     Render,
     #[cfg(feature = "native-kms")]
     Kms,
+    #[cfg(feature = "native-kms")]
+    Atomic,
+    #[cfg(feature = "native-kms")]
+    Present,
 }
 
 pub fn check(kind: Check) -> Result<()> {
@@ -43,6 +51,9 @@ pub fn check(kind: Check) -> Result<()> {
             .map_err(|error| anyhow::anyhow!("dispatch seat events: {error}"))?;
     }
 
+    #[cfg(feature = "native-input")]
+    if matches!(&kind, Check::Input) { return crate::native_input::check(&session, &mut event_loop); }
+
     let seat = session.seat();
     let udev = UdevBackend::new(&seat)
         .map_err(|error| anyhow::anyhow!("enumerate DRM devices for {seat}: {error}"))?;
@@ -57,12 +68,33 @@ pub fn check(kind: Check) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("seat denied {}: {error}", device.display()))?;
     let diagnostic_result = match kind {
         Check::Seat => Ok(()),
+        #[cfg(feature = "native-input")]
+        Check::Input => unreachable!("input handled before DRM acquisition"),
+        #[cfg(feature = "native-session")]
+        Check::Native { socket, config } => crate::kms_check::run_native(&fd, &session, &mut event_loop, &socket, &config),
         #[cfg(feature = "native-gbm")]
         Check::Gbm => crate::gbm_check::check(&fd, false),
         #[cfg(feature = "native-gbm")]
         Check::Render => crate::gbm_check::check(&fd, true),
         #[cfg(feature = "native-kms")]
         Check::Kms => crate::kms_check::check(&fd),
+        #[cfg(feature = "native-kms")]
+        Check::Atomic => crate::kms_check::check_atomic(&fd),
+        #[cfg(feature = "native-kms")]
+        Check::Present => {
+            use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+            let running = Arc::new(AtomicBool::new(true));
+            let signal = Arc::clone(&running);
+            let setup = ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst));
+            match setup {
+                Err(error) => Err(anyhow::anyhow!("install preview signal handler: {error}")),
+                Ok(()) => crate::kms_check::present_test(&fd, || {
+                    event_loop.dispatch(Duration::from_millis(20), &mut ())
+                        .map_err(|error| anyhow::anyhow!("dispatch seat events: {error}"))?;
+                    Ok(session.is_active() && running.load(Ordering::SeqCst))
+                }),
+            }
+        },
     };
     // Always release the seat descriptor, including after allocation/export failure.
     let release_result = session.close(fd).map_err(|error| anyhow::anyhow!("release {}: {error}", device.display()));
@@ -72,7 +104,7 @@ pub fn check(kind: Check) -> Result<()> {
         (Ok(()), Ok(())) => {}
     }
     println!("Seat-mediated DRM open and close succeeded: {}", device.display());
-    println!("No display mode was changed. KMS presentation and input dispatch remain unimplemented.");
+    println!("DRM device released.");
     Ok(())
 }
 
