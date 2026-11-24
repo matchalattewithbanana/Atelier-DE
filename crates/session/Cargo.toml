@@ -9,3 +9,5 @@ atelier-config.workspace = true
 anyhow.workspace = true
 ctrlc = { version = "3.4", features = ["termination"] }
 nix = { version = "0.29", features = ["signal", "process"] }
+serde.workspace = true
+toml.workspace = true
