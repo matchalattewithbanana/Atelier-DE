@@ -25,6 +25,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
     let listener = ListeningSocket::bind(socket).context("bind Atelier Wayland socket")?;
     println!("Atelier ready: WAYLAND_DISPLAY={socket}");
     let started = Instant::now();
+    let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
     let mut intercepted_keys = HashSet::new();
     while running.load(Ordering::SeqCst) {
         let status = events.dispatch_new_events(|event| {
@@ -37,6 +38,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
                 tracing::warn!(?error, "Wayland client connection failed");
             }
         }
+        workspace_control.poll(&mut state, started.elapsed().as_millis() as u32)?;
         display.dispatch_clients(&mut state)?;
         state.popups.cleanup();
         state.space.refresh();
