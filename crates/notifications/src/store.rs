@@ -16,8 +16,8 @@ pub struct Notice {
     deadline: Option<Instant>,
 }
 
-#[derive(Default)]
 pub struct Store {
+    instance: String,
     next_id: u32,
     active: Vec<Notice>,
     history: VecDeque<Notice>,
@@ -26,8 +26,16 @@ pub struct Store {
 #[derive(Serialize)]
 pub struct Snapshot<'a> {
     schema: u32,
+    instance: &'a str,
     active: &'a [Notice],
     history: &'a VecDeque<Notice>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        Self { instance: format!("{}-{stamp}", std::process::id()), next_id: 0, active: Vec::new(), history: VecDeque::new() }
+    }
 }
 
 fn bounded(text: String, chars: usize) -> String { text.chars().take(chars).collect() }
@@ -64,7 +72,8 @@ impl Store {
         for id in &expired { self.close(*id, 1); }
         expired
     }
-    pub fn snapshot(&self) -> Snapshot<'_> { Snapshot { schema: 1, active: &self.active, history: &self.history } }
+    pub fn snapshot(&self) -> Snapshot<'_> { Snapshot { schema: 1, instance: &self.instance, active: &self.active, history: &self.history } }
+    pub fn matches_instance(&self, instance: &str) -> bool { self.instance == instance }
     pub fn clear_history(&mut self) { self.history.clear(); }
 }
 
