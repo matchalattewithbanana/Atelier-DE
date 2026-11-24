@@ -117,6 +117,16 @@ fn build_settings(app: &gtk::Application) {
     session_page.append(&layout);
     session_page.append(&description("Explicit shell profiles supplied to atelier-session override the default startup choice."));
 
+    let power_page = page(&stack, "power", "Power", "Read-only system battery and external power information.");
+    let power_status = description("");
+    power_status.set_selectable(true);
+    update_power(&power_status);
+    power_page.append(&power_status);
+    let refresh = gtk::Button::with_label("Refresh power status");
+    let target = power_status.clone();
+    refresh.connect_clicked(move |_| update_power(&target));
+    power_page.append(&refresh);
+
     let about = page(&stack, "about", "About", "Atelier Settings is an independent application. It does not require a running Atelier compositor.");
     for (name, value) in [
         ("Version", env!("CARGO_PKG_VERSION").to_string()),
@@ -179,4 +189,22 @@ fn build_settings(app: &gtk::Application) {
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&footer);
     window.set_child(Some(&root)); window.present();
+}
+
+fn update_power(label: &gtk::Label) {
+    let power = match atelier_services::system_power_snapshot() {
+        Ok(power) => power,
+        Err(error) => { label.set_text(&format!("Power information unavailable: {error}")); return; }
+    };
+    let mut lines = vec![match power.external_power {
+        Some(true) => "External power: connected",
+        Some(false) => "External power: disconnected",
+        None => "External power: unknown",
+    }.to_owned()];
+    if power.batteries.is_empty() { lines.push("No system batteries detected.".into()); }
+    for battery in power.batteries {
+        let percent = battery.percent.map(|p| format!("{p}%")).unwrap_or_else(|| "Unknown capacity".into());
+        lines.push(format!("{} · {} · {}", battery.name, percent, battery.status.as_deref().unwrap_or("Unknown status")));
+    }
+    label.set_text(&lines.join("\n"));
 }
