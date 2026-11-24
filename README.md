@@ -85,6 +85,16 @@ cargo run -p atelier-compositor --features native-seat -- --check-seat
 
 This explicitly acquires the current seat and briefly opens a DRM card through the seat provider. Do not run it with sudo or inside your active graphical session. It does not set a mode, present a frame or read input events. The default nested build remains unchanged.
 
+### Experimental GPU allocation
+
+After the seat check succeeds on a spare text login, install GBM/DRM development libraries (`libgbm-dev libdrm-dev` on Debian/Ubuntu; `mesa libdrm` on Arch/CachyOS), then run:
+
+```sh
+cargo run -p atelier-compositor --features native-gbm -- --check-gbm
+```
+
+The check acquires the current seat, opens a seat-assigned DRM card, allocates a small XRGB8888 rendering buffer, exports it as a DMA-BUF and releases every resource. It does not verify EGL import, scanout compatibility, rendering or KMS presentation. Do not run from a graphical session or with sudo.
+
 ## Verification
 
 ```sh
