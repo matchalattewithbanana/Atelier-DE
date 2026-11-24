@@ -97,3 +97,13 @@ atelier-manager deployment-info DEPLOYMENT_ID
 ```
 
 Inventory schema 1 is derived directly from existing completion manifests and the current/previous selection record; it does not maintain a second registry. It includes staged bundles, requested and resolved product IDs, the staging manager version, source directory and artifact sizes/hashes. Missing selected directories are reported as invalid, not silently omitted. Inventory performs structural and size checks only. The individual deployment-info command verifies all hashes before emitting details. The recorded manager version is **not** the version of each copied binary; artifact hashes identify the actual copied bytes. No version probing, remote update check, download, package change or binary execution occurs. Source paths are local information; review JSON before sharing it. Independent product updates will build on these manifests.
+
+## Transaction history and recovery diagnostics
+
+```sh
+atelier-manager package-history
+atelier-manager package-history --json
+atelier-manager recovery-status
+```
+
+Package history reads existing checkpoints without creating directories or running commands. New transactions persist atomic outcome and final dependency-verification markers separately; a missing outcome can indicate interruption, while older records without a verification marker remain unknown rather than assumed successful. A missing after-inventory is reported independently. History is a historical record, not a current package-health check; entries are listed by ID, not chronology. Recovery-status emits schema-1 JSON with full hash checks of current and previous native deployments independently, structural failures of other bundles, and package transaction history. Backend errors are reported separately. No automatic repair, package rollback, native activation, deletion or Mango configuration restoration is performed. Mango recovery remains delegated to its installer. Review local paths and diagnostic data before sharing.

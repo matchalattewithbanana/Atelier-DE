@@ -157,6 +157,28 @@ fn inventory(root: &Path) -> Result<Inventory> {
     Ok(Inventory { schema: 1, current: selection.current, previous: selection.previous, deployments })
 }
 
+/// Full hash checks of current and previous selections, independently of each other.
+pub(super) fn recovery() -> Result<serde_json::Value> {
+    let root = data_root()?;
+    recovery_at(&root)
+}
+fn recovery_at(root: &Path) -> Result<serde_json::Value> {
+    let report = inventory(root)?;
+    let check = |id: &Option<String>| match id {
+        None => serde_json::json!({"id":null,"status":"not-selected"}),
+        Some(id) => match manifest(root, id, true) {
+            Ok(_) => serde_json::json!({"id":id,"status":"hashes-verified"}),
+            Err(error) => serde_json::json!({"id":id,"status":"invalid","error":format!("{error:#}")}),
+        },
+    };
+    Ok(serde_json::json!({
+        "current":check(&report.current),
+        "previous":check(&report.previous),
+        "invalid_or_incomplete":report.deployments.iter().filter(|entry| entry.manifest.is_none())
+            .map(|entry| &entry.id).collect::<Vec<_>>()
+    }))
+}
+
 pub fn list(json: bool) -> Result<()> {
     let inventory = inventory(&data_root()?)?;
     if json {
@@ -255,6 +277,20 @@ mod tests {
         switch(root, &second, "deployment-A").unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
+    }
+    #[test]
+    fn recovery_checks_current_and_previous_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        fixture(root, "deployment-A", b"first");
+        fixture(root, "deployment-B", b"second");
+        switch(root, &Selection::default(), "deployment-A").unwrap();
+        switch(root, &load_selection(root).unwrap(), "deployment-B").unwrap();
+        fs::write(root.join("deployment-B/bin/atelier-shell"), b"broken").unwrap();
+        let report = recovery_at(root).unwrap();
+        assert_eq!(report["current"]["status"], "invalid");
+        assert_eq!(report["previous"]["status"], "hashes-verified");
+        assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-B"));
     }
     #[test]
     fn inventory_tracks_selection_and_missing_deployments_without_mutating() {
