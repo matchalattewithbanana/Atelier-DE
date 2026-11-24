@@ -20,7 +20,7 @@ pub(super) struct ReleaseManifest {
     pub revision: String,
     os: String,
     pub arch: String,
-    products: Vec<String>,
+    pub products: Vec<String>,
     pub artifacts: Vec<ReleaseArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
@@ -70,11 +70,16 @@ impl ReleaseManifest {
         Ok(())
     }
 
-    pub(super) fn verify_local(&self, source: &Path) -> Result<()> {
+    pub(super) fn validate_host(&self) -> Result<()> {
         self.validate()?;
         if self.os != env::consts::OS || self.arch != env::consts::ARCH {
             bail!("manifest target does not match this host");
         }
+        Ok(())
+    }
+
+    pub(super) fn verify_local(&self, source: &Path) -> Result<()> {
+        self.validate_host()?;
         let source = source.canonicalize().context("resolve local artifact directory")?;
         if !source.is_dir() { bail!("artifact source must be a directory"); }
         for expected in &self.artifacts {

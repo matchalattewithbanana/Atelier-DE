@@ -158,6 +158,40 @@ fn advance(state: &mut State, release: &ReleaseManifest) -> Result<()> {
     state.accepted = next;
     Ok(())
 }
+/// Check a candidate against the current local policy without advancing it.
+pub(super) fn check_candidate(bytes: &[u8], signature: &[u8], id: &str) -> Result<ReleaseManifest> {
+    let mut state = load(&root()?)?;
+    release::authenticate(bytes, signature, active_key(&state, id)?.as_bytes())?;
+    let release: ReleaseManifest = serde_json::from_slice(bytes).context("parse authenticated release")?;
+    release.validate_host()?;
+    advance(&mut state, &release)?;
+    Ok(release)
+}
+
+/// Accept and stage in one serialized policy operation. Persist the high-water
+/// marks before publishing a complete deployment, so failure cannot publish
+/// a staged release that was never accepted.
+pub(super) fn stage_authenticated(bytes: &[u8], signature: &[u8], id: &str, source: &Path) -> Result<PathBuf> {
+    let root = root()?;
+    active_key(&load(&root)?, id)?;
+    let _lock = locked(&root)?;
+    let mut state = load(&root)?;
+    release::authenticate(bytes, signature, active_key(&state, id)?.as_bytes())?;
+    let release: ReleaseManifest = serde_json::from_slice(bytes).context("parse authenticated release")?;
+    release.validate_host()?;
+    advance(&mut state, &release)?;
+    crate::deploy::stage_release(source, &release, id, |pending| {
+        for (name, content) in [("release-manifest.json", bytes), ("release-manifest.sig", signature)] {
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(pending.join(name))?;
+            file.write_all(content)?;
+            file.sync_all()?;
+        }
+        File::open(pending)?.sync_all()?;
+        save(&root, &state)?;
+        Ok(())
+    })
+}
+
 pub fn accept(manifest: &Path, signature: &Path, id: &str, source: &Path) -> Result<()> {
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
     let bytes = release::bounded_file(manifest, 64 * 1024)?;
