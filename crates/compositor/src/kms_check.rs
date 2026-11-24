@@ -195,3 +195,142 @@ pub fn check_atomic(fd: &OwnedFd) -> Result<()> {
     println!("No display state was applied; actual scanout remains untested.");
     Ok(())
 }
+
+// The preview deliberately operates on an already active, unscaled primary
+// plane. Only FB_ID changes, so no mode blob or connector reassignment is needed.
+fn active_route(card: &Card<'_>) -> Result<(Route, u64)> {
+    use smithay::backend::allocator::Fourcc;
+    let resources = card.resource_handles()?;
+    let planes = card.plane_handles()?;
+    for &connector in resources.connectors() {
+        let info = card.get_connector(connector, false)?;
+        if info.state() != connector::State::Connected { continue; }
+        let crtc_id = property(card, connector, "CRTC_ID")?.1;
+        let Some(crtc) = u32::try_from(crtc_id).ok().and_then(control::from_u32::<control::crtc::Handle>) else { continue; };
+        let Some(mode) = card.get_crtc(crtc)?.mode() else { continue; };
+        if property(card, crtc, "ACTIVE")?.1 != 1 { continue; }
+        // Refuse mirrored routes to keep this preview limited to one monitor.
+        let mut attached = 0;
+        for &other in resources.connectors() {
+            if property(card, other, "CRTC_ID")?.1 == crtc_id { attached += 1; }
+        }
+        if attached != 1 { continue; }
+        let (width, height) = mode.size();
+        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_777_216 { continue; }
+        for &plane in &planes {
+            let info = card.get_plane(plane)?;
+            if !info.formats().contains(&(Fourcc::Xrgb8888 as u32)) ||
+                property(card, plane, "type")?.1 != 1 ||
+                property(card, plane, "CRTC_ID")?.1 != crtc_id { continue; }
+            let old_fb = property(card, plane, "FB_ID")?.1;
+            if old_fb == 0 { continue; }
+            let expected = [
+                ("SRC_X", 0), ("SRC_Y", 0), ("CRTC_X", 0), ("CRTC_Y", 0),
+                ("SRC_W", u64::from(width) << 16), ("SRC_H", u64::from(height) << 16),
+                ("CRTC_W", u64::from(width)), ("CRTC_H", u64::from(height)),
+            ];
+            let mut matches = true;
+            for (name, value) in expected {
+                if property(card, plane, name)?.1 != value { matches = false; break; }
+            }
+            if matches { return Ok((Route { connector, crtc, plane, mode }, old_fb)); }
+        }
+    }
+    bail!("no active, unscaled, single-monitor primary plane with a restorable framebuffer")
+}
+
+fn framebuffer_request(card: &Card<'_>, plane: control::plane::Handle, fb: u64) -> Result<control::atomic::AtomicModeReq> {
+    let mut request = control::atomic::AtomicModeReq::new();
+    set(card, &mut request, plane, "FB_ID", fb)?;
+    Ok(request)
+}
+
+fn commit_framebuffer(card: &Card<'_>, plane: control::plane::Handle, fb: u64, test: bool) -> Result<()> {
+    let request = framebuffer_request(card, plane, fb)?;
+    // Without ALLOW_MODESET, the kernel must reject any change that needs a modeset.
+    let flags = if test { control::AtomicCommitFlags::TEST_ONLY } else { control::AtomicCommitFlags::empty() };
+    card.atomic_commit(flags, request).context("atomic framebuffer swap")
+}
+
+/// Display a static rendered frame for at most one second of the event loop,
+/// then restore the original primary-plane framebuffer. Never use this for a
+/// production session: an involuntary seat loss can prevent restoration.
+pub fn present_test(fd: &OwnedFd, mut poll_session: impl FnMut() -> Result<bool>) -> Result<()> {
+    use drm::{Device as _, ClientCapability};
+    use drm::buffer::PlanarBuffer;
+    use control::FbCmd2Flags;
+    use smithay::{backend::{
+        allocator::{dmabuf::AsDmabuf, gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}, Allocator, Fourcc, Modifier},
+        egl::{EGLContext, EGLDisplay},
+        renderer::{gles::GlesRenderer, Bind, Color32F, Frame, Renderer},
+    }, utils::{DeviceFd, Rectangle, Transform}};
+    use std::time::{Duration, Instant};
+
+    let card = Card(fd);
+    card.set_client_capability(ClientCapability::UniversalPlanes, true)?;
+    card.set_client_capability(ClientCapability::Atomic, true)?;
+    let (route, old_fb) = active_route(&card)?;
+    let (width, height) = route.mode.size();
+
+    let device = GbmDevice::new(DeviceFd::from(fd.try_clone()?))
+        .map_err(|error| anyhow::anyhow!("create GBM device: {error}"))?;
+    // SAFETY: the native display is an owned GBM device clone, retained by EGL.
+    let display = unsafe { EGLDisplay::new(device.clone()) }
+        .map_err(|error| anyhow::anyhow!("initialize EGL on GBM: {error}"))?;
+    let context = EGLContext::new(&display)
+        .map_err(|error| anyhow::anyhow!("create EGL context: {error}"))?;
+    // SAFETY: the context is new and used only on this thread.
+    let mut renderer = unsafe { GlesRenderer::new(context) }
+        .map_err(|error| anyhow::anyhow!("create GLES renderer: {error}"))?;
+    let mut allocator = GbmAllocator::new(device, GbmBufferFlags::SCANOUT | GbmBufferFlags::RENDERING);
+    let buffer = allocator.create_buffer(u32::from(width), u32::from(height), Fourcc::Xrgb8888, &[Modifier::Linear])
+        .map_err(|error| anyhow::anyhow!("allocate preview buffer: {error}"))?;
+    {
+        let mut dmabuf = buffer.export().map_err(|error| anyhow::anyhow!("export preview buffer: {error}"))?;
+        let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind preview target: {error}"))?;
+        let size = (i32::from(width), i32::from(height)).into();
+        let mut frame = renderer.render(&mut target, size, Transform::Normal)
+            .map_err(|error| anyhow::anyhow!("begin preview frame: {error}"))?;
+        frame.clear(Color32F::new(0.10, 0.20, 0.35, 1.0), &[Rectangle::from_size(size)])
+            .map_err(|error| anyhow::anyhow!("clear preview frame: {error}"))?;
+        frame.finish().map_err(|error| anyhow::anyhow!("finish preview frame: {error}"))?
+            .wait().map_err(|error| anyhow::anyhow!("preview fence: {error:?}"))?;
+    }
+    let flags = if PlanarBuffer::modifier(&*buffer).is_some() { FbCmd2Flags::MODIFIERS } else { FbCmd2Flags::empty() };
+    let fb = card.add_planar_framebuffer(&*buffer, flags).context("register preview framebuffer")?;
+    let fb_id = u64::from(u32::from(fb));
+    let mut presented = false;
+    let outcome = (|| -> Result<()> {
+        commit_framebuffer(&card, route.plane, old_fb, true).context("preflight restoration")?;
+        commit_framebuffer(&card, route.plane, fb_id, true).context("preflight preview")?;
+        if !poll_session()? { bail!("preview cancelled before presentation"); }
+        if property(&card, route.plane, "FB_ID")?.1 != old_fb { bail!("original framebuffer changed before presentation"); }
+        commit_framebuffer(&card, route.plane, fb_id, false)?;
+        presented = true;
+        println!("Presented preview on {:?}: {width}x{height}", route.connector);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if !poll_session()? { break; }
+        }
+        Ok(())
+    })();
+
+    // Always attempt restoration after a successful blocking commit, including
+    // when event dispatch fails or the signal handler requests early exit.
+    if presented {
+        let restore = commit_framebuffer(&card, route.plane, old_fb, false)
+            .and_then(|_| {
+                if property(&card, route.plane, "FB_ID")?.1 != old_fb { bail!("restoration did not restore the original framebuffer"); }
+                Ok(())
+            });
+        if let Err(error) = restore {
+            // Do not explicitly remove a framebuffer that might still be scanned
+            // out. The owning seat will release the DRM descriptor on return.
+            bail!("preview restoration failed; seat release follows: {error:#}");
+        }
+        println!("Original primary-plane framebuffer restored.");
+    }
+    let cleanup = card.destroy_framebuffer(fb).context("destroy preview framebuffer");
+    if let Err(error) = &cleanup { if outcome.is_err() { eprintln!("{error:#}"); } }
+    outcome.and(cleanup)
+}
