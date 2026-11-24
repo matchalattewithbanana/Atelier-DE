@@ -177,3 +177,7 @@ Publisher trust now supports reviewing a public key file at an absolute path and
 Storage now lists deployment protection and managed runtime status alongside cached release inventory. Offline removal uses the shared typed-confirmation review, pins the directory identity and verified manifest, and repeats all selection, lineage, runtime and known-file checks under the lifecycle lock. Unmanaged runtime use cannot be detected; close all target applications before approval. No automatic deletion.
 
 Installation review can open the existing interactive package transaction in a supported fixed system terminal (foot on Wayland, Konsole, kitty or xterm). It passes only catalog product IDs and supported provider IDs, never a shell command. The CLI recomputes dependencies, requires its own typed approval, uses sudo and retains pacman transaction confirmation and diagnostic checkpoints. Terminal exit is not proof of a successful transaction; inspect Recovery and review setup again. A system snapshot is a separate user responsibility. Graphical package handoff remains Arch-family only, and actual package/terminal integration requires physical acceptance. If no supported terminal is available, run the CLI manually. No rice or session changes are applied by this transaction.
+
+## Optional Rice Manager
+
+See [Mango integration](MANGO_INTEGRATION.md) for the Rices page, explicit checkout trust, per-compositor catalog, community discovery, snapshot inventory and confirmed next-login selection. Native products do not require a Mango Atelier checkout.
