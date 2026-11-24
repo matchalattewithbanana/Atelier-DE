@@ -28,4 +28,11 @@ call CloseNotification 1
 "$binary" list | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["active"] and s["history"][0]["closed_reason"]==3'
 "$binary" clear-history
 "$binary" list | python3 -c 'import json,sys; assert not json.load(sys.stdin)["history"]'
+call Notify 'Atelier smoke' 0 '' 'Dismiss me' 'Body' '[]' '{}' 0
+instance="$("$binary" list | python3 -c 'import json,sys; print(json.load(sys.stdin)["instance"])')"
+if "$binary" dismiss wrong-instance 2; then echo 'Stale instance accepted' >&2; exit 1; fi
+"$binary" dismiss "$instance" 2
+"$binary" list | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["active"] and s["history"][0]["closed_reason"]==2'
+"$binary" clear-history "$instance"
+"$binary" list | python3 -c 'import json,sys; assert not json.load(sys.stdin)["history"]'
 echo 'Notification D-Bus smoke passed'
