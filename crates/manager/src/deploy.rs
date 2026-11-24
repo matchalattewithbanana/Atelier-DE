@@ -1,24 +1,24 @@
 //! Explicit user-local deployment staging. Never modifies PATH or an active session.
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, env, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
 use crate::catalog;
 
-#[derive(Debug, Serialize)]
-struct Artifact { name: String, bytes: u64, sha256: String }
-#[derive(Debug, Serialize)]
-struct Manifest {
-    schema: u32,
-    manager_version: &'static str,
-    source: PathBuf,
-    products: Vec<String>,
-    artifacts: Vec<Artifact>,
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct Artifact { pub name: String, pub bytes: u64, pub sha256: String }
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct Manifest {
+    pub schema: u32,
+    pub manager_version: String,
+    pub source: PathBuf,
+    pub products: Vec<String>,
+    pub artifacts: Vec<Artifact>,
 }
 
 pub struct StagePlan { source: PathBuf, root: PathBuf, products: Vec<String>, binaries: Vec<&'static str> }
 
-fn data_root() -> Result<PathBuf> {
+pub(super) fn data_root() -> Result<PathBuf> {
     let base = env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
         .or_else(|| env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()).map(|p| p.join(".local/share")))
         .context("no absolute XDG data directory or home directory")?;
@@ -45,7 +45,7 @@ impl StagePlan {
     }
 }
 
-fn ensure_root(root: &Path) -> Result<()> {
+pub(super) fn ensure_root(root: &Path) -> Result<()> {
     fs::create_dir_all(root)?;
     let metadata = fs::symlink_metadata(root)?;
     if !metadata.is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw() || metadata.permissions().mode() & 0o022 != 0 {
@@ -84,7 +84,7 @@ fn stage(plan: StagePlan) -> Result<PathBuf> {
         artifacts.push(copy_artifact(&plan.source.join(name), &bin.join(name), name)?);
     }
     File::open(&bin)?.sync_all()?;
-    let manifest = Manifest { schema: 1, manager_version: env!("CARGO_PKG_VERSION"), source: plan.source, products: plan.products, artifacts };
+    let manifest = Manifest { schema: 1, manager_version: env!("CARGO_PKG_VERSION").into(), source: plan.source, products: plan.products, artifacts };
     // The manifest is the completion marker; interrupted partial directories
     // without this marker are not considered valid deployments.
     let mut marker = tempfile::NamedTempFile::new_in(pending.path())?;

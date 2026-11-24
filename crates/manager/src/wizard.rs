@@ -22,6 +22,10 @@ pub struct Preview {
     apply_supported: bool,
 }
 
+impl Preview {
+    pub(super) fn requested_products(&self) -> &[String] { &self.plan.requested }
+}
+
 fn ask(input: &mut impl BufRead, out: &mut impl Write, prompt: &str) -> Result<Option<String>> {
     write!(out, "{prompt} ")?; out.flush()?;
     let mut line = String::new();
@@ -143,8 +147,7 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
     for warning in &plan.warnings { writeln!(out, "  Note: {warning}")?; }
     for candidate in &packages.candidates { writeln!(out, "  Package {}: {} ({})", candidate.package, candidate.state, candidate.reasons.join(", "))?; }
     for note in &packages.notes { writeln!(out, "  Package note: {note}")?; }
-    writeln!(out, "  Package changes: none\n  User files/backups: deployment-only if separately confirmed\n  sudo: not used\n  Recovery: incomplete staged copies are removed automatically; previous deployments remain untouched")?;
-    writeln!(out, "  Apply scope: with `setup --from BUILD_DIR`, only selected native Atelier binaries can be staged; package installation, rice changes, provider setup, and login/session changes are not applied")?;
+    writeln!(out, "  Package changes: none\n  User files/backups: none\n  sudo: not used\n  Recovery: not needed; apply is not implemented")?;
     let Some(answer) = ask(input, out, "Accept this preview? [y/N]:")? else { return Ok(None); };
     if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") { return Ok(None); }
     if plan.steps.is_empty() { bail!("empty installation plan"); }
@@ -167,6 +170,7 @@ mod tests {
         let (result, output) = preview("3\nnone\ny\n");
         let result = result.unwrap();
         assert_eq!(result.plan.steps.len(), 2);
+        assert_eq!(result.requested_products(), &["shell".to_owned(), "settings".to_owned()]);
         assert!(!result.apply_supported);
         assert!(result.first_session.is_none());
         assert!(output.contains("sudo: not used"));
