@@ -265,9 +265,102 @@ pub(super) fn snapshots(path: &Path, action: SnapshotAction, id: &str, value: &s
     Ok(vec![Item { title: title.into(), status: status.into(), detail: String::from_utf8_lossy(&output).into_owned() }])
 }
 
+/// The Classic backend owns the palette and its recovery transaction.
+/// Only these documented editable fields may be sent to it.
+pub(super) const APPEARANCE_FIELDS: &[(&str, &str, &str, Option<(u32,u32)>)] = &[
+    ("accent", "--accent", "Accent color (#RRGGBB)", None),
+    ("radius", "--radius", "Corner radius", Some((0,30))),
+    ("innerGap", "--inner-gap", "Inner gap", Some((0,36))),
+    ("outerGap", "--outer-gap", "Outer gap", Some((0,48))),
+    ("barHeight", "--bar-height", "Panel height", Some((32,64))),
+    ("dockHeight", "--dock-height", "Dock height", Some((40,84))),
+    ("panelOpacity", "--panel-opacity", "Panel opacity (%)", Some((60,100))),
+    ("fontSize", "--font-size", "Font size", Some((10,18))),
+    ("fontFamily", "--font-family", "Font family", None),
+];
+#[derive(Deserialize)]
+struct AppearanceResponse { schema: u32, sha256: String, palette: serde_json::Value }
+pub(super) struct AppearanceReview {
+    path: PathBuf,
+    target: String,
+    fingerprint: String,
+    pub palette: serde_json::Value,
+}
+fn appearance_edits(values: &[String], palette: &serde_json::Value) -> Result<Vec<String>> {
+    if values.len() != APPEARANCE_FIELDS.len() { bail!("invalid appearance field set"); }
+    let mut args = Vec::new();
+    for ((key, flag, title, range), value) in APPEARANCE_FIELDS.iter().zip(values) {
+        let value = value.trim();
+        if value.is_empty() { continue; } // An absent optional field remains absent.
+        let candidate = if let Some((min,max)) = range {
+            let number: u32 = value.parse().with_context(|| format!("{title} must be an integer"))?;
+            if number < *min || number > *max { bail!("{title} must be between {min} and {max}"); }
+            serde_json::json!(number)
+        } else {
+            if *key == "accent" && !(value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)) {
+                bail!("accent must be a six-digit hex color");
+            }
+            if *key == "fontFamily" && (value.chars().count() > 80 || value.chars().any(char::is_control)) {
+                bail!("font family must contain 1–80 printable characters");
+            }
+            serde_json::json!(value)
+        };
+        if palette[*key] != candidate {
+            // Equals syntax prevents font names beginning with '-' becoming options.
+            args.push(format!("{flag}={value}"));
+        }
+    }
+    Ok(args)
+}
+pub(super) fn review_appearance(path: &Path, target: &str) -> Result<AppearanceReview> {
+    if live_desktop_present() { bail!("use a separate desktop after closing all Mango Atelier sessions"); }
+    let checkout = Checkout::open(path)?;
+    let bytes = checkout.run(target, &["appearance","--review-json"], "180s")?;
+    let response: AppearanceResponse = serde_json::from_slice(&bytes).context("unsupported reviewed appearance API; update Mango Atelier")?;
+    if response.schema != 1 || response.sha256.len()!=64
+        || !response.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !response.palette.is_object() { bail!("invalid appearance review response"); }
+    Ok(AppearanceReview { path: checkout.root, target: target.into(), fingerprint:response.sha256,palette:response.palette })
+}
+impl AppearanceReview {
+    pub(super) fn changes(&self, values: &[String]) -> Result<Vec<String>> {
+        appearance_edits(values,&self.palette)
+    }
+    pub(super) fn apply(self, values: Vec<String>) -> Result<String> {
+        if live_desktop_present() { bail!("use a separate desktop after closing all Mango Atelier sessions"); }
+        let edits = self.changes(&values)?;
+        if edits.is_empty() { bail!("no appearance changes to save"); }
+        let checkout = Checkout::open(&self.path)?;
+        let mut args = vec!["appearance".into(), format!("--expected-sha256={}",self.fingerprint)];
+        args.extend(edits);
+        let args:Vec<_> = args.iter().map(String::as_str).collect();
+        let output=checkout.run(&self.target,&args,"180s")?;
+        let result:serde_json::Value=serde_json::from_slice(&output)?;
+        match result["status"].as_str() {
+            Some("saved") if result["recovery"].as_str().is_some_and(valid_snapshot_id) =>
+                Ok(format!("Appearance saved. Recovery snapshot: {}. Changes apply on next login.",result["recovery"].as_str().unwrap())),
+            Some("unchanged") => Ok("No changes saved.".into()),
+            _ => bail!("Unrecognized result; inspect the backup inventory before retrying"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn appearance_edits_validate_bounds_and_keep_absent_values() {
+        let palette=serde_json::json!({"accent":"#123456","radius":12});
+        let mut values=vec![String::new();APPEARANCE_FIELDS.len()];
+        values[0]="#123456".into(); values[1]="12".into();
+        assert!(appearance_edits(&values,&palette).unwrap().is_empty());
+        values[1]="31".into();
+        assert!(appearance_edits(&values,&palette).is_err());
+        values[1]="18".into(); values[8]="--help".into();
+        assert_eq!(appearance_edits(&values,&palette).unwrap(),vec!["--radius=18","--font-family=--help"]);
+        values[0]="red".into();
+        assert!(appearance_edits(&values,&palette).is_err());
+    }
     #[test]
     fn snapshot_actions_restrict_ids_paths_and_flags() {
         let id = "20261124T160000Z-0123456789ab";
