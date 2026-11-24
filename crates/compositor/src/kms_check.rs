@@ -470,6 +470,7 @@ pub fn run_native(
                     if server.dispatch_clients(&mut *state)? > 0 { queue.invalidate(); }
                     state.popups.cleanup();
                     state.space.refresh();
+                    if state.take_scene_dirty() { queue.invalidate(); }
                 }
                 server.flush_clients()?;
                 let Some(next) = queue.next() else { continue; };
