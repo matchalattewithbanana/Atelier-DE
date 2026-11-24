@@ -58,7 +58,7 @@ Close the nested host window or interrupt the supervisor to end the test. Use `-
 
 Preferences are stored under `${XDG_CONFIG_HOME:-$HOME/.config}/atelier-de/settings.toml`. A missing file uses defaults; unreadable or malformed settings are reported and are not silently overwritten. Settings applies changes after the relevant component is restarted.
 
-Choose Floating windows or Grid tiling in Settings (or set `layout = "grid"` in the preferences file). Grid placement is recalculated when windows map/unmap or the nested output resizes. Client size constraints remain future work.
+Choose Floating windows or Grid tiling in Settings (or set `layout = "grid"` in the preferences file). Grid placement is recalculated when windows map/unmap or the nested output resizes. Client size constraints and workspace switching remain future work.
 
 ### Nested workspace controls
 
@@ -68,6 +68,7 @@ Four virtual workspaces are available. With the nested window focused:
 - `Alt+Shift+1` through `Alt+Shift+4`: move the focused window to another workspace without switching.
 
 Hidden windows are removed from the rendered scene and restored when their workspace is selected. The host desktop may intercept these shortcuts; change its conflicting bindings for nested testing. Workspace persistence, per-output workspace sets and a shell workspace indicator are not implemented yet.
+
 
 `atelier-shell` and `atelier-settings` also work as standalone GTK windows, so work on them does not have to wait for the compositor's hardware backend.
 
@@ -115,9 +116,39 @@ cargo run -p atelier-compositor --features native-kms -- --check-kms
 
 The seat-owned DRM device is queried for cached connected connectors, advertised display modes, encoder-compatible CRTCs and candidate routes. Mode ranking prefers a display's advertised preferred mode, then resolution and refresh rate. No modesetting or atomic commit is performed; a candidate route does not establish scanout compatibility or exclusive ownership. Continue with real hardware validation before enabling monitor presentation.
 
+### Atomic scanout validation
+
+From a spare local TTY, run:
+
+```sh
+cargo run -p atelier-compositor --features native-kms -- --check-atomic
+```
+
+This selects one connector, compatible CRTC and XRGB8888 primary plane, allocates a bounded linear GBM scanout buffer, registers a temporary framebuffer and mode blob, then submits an atomic **TEST_ONLY** request. The framebuffer and blob are released on all normal result paths. No physical monitor mode is changed. Driver rejection is an explicit diagnostic; retries, modifier negotiation, multiple outputs, display restoration and real presentation are later stages.
+
+### Experimental physical presentation (not production-ready)
+
+Only after running the earlier hardware diagnostics successfully on a spare local text login, an explicit preview can attempt one synchronous atomic framebuffer swap:
+
+```sh
+cargo run -p atelier-compositor --features native-kms -- --present-test
+```
+
+This refuses inactive, scaled or mirrored routes, validates the swap and original framebuffer with TEST_ONLY, renders a static frame using EGL/GLES and attempts to restore the original framebuffer after one second or on Ctrl-C/SIGTERM. It never allows a modeset. A seat loss, driver failure or forced process termination can prevent restoration; use a spare TTY and be prepared to switch VTs if necessary. Do not use on a daily desktop or with sudo. Continuous page flips, inactive output activation and production display restoration remain pending.
+
 ### Experimental native input
 
 On a spare local text login, use `cargo run -p atelier-compositor --features native-input -- --check-input` to enumerate accessible libinput devices through libseat. The diagnostic discards raw input contents; the common input router supports absolute/relative pointer motion, buttons, scrolling, keyboard focus and workspace shortcuts. Wiring the libinput event source into a continuous native compositor session remains pending.
+
+### Experimental continuous native session
+
+On a spare local TTY only, after all diagnostics have passed, build with `native-session` and use `--native`. The implementation accepts Wayland clients, composites them with GLES, alternates two GBM scanout framebuffers using synchronous atomic swaps, and routes libinput events through the common input router. It requires one already-active unscaled non-mirrored output and exits on seat loss. On ordinary shutdown it attempts original framebuffer restoration. Driver failures, forced exits, and seat loss can prevent recovery. No inactive-output activation, multi-monitor, hotplug, nonblocking page-flip events or production login integration is provided. This is untested on physical hardware.
+
+```sh
+cargo run -p atelier-compositor --features native-session -- --native --socket wayland-atelier-native
+```
+
+Launch a native Wayland client with that socket from another terminal in the same user's session. Do not run as root or in your daily graphical session.
 
 ## Verification
 
