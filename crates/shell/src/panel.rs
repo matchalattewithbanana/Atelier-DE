@@ -11,7 +11,7 @@ pub fn build(app: &gtk::Application) {
     }
     let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).default_height(40).build();
     window.init_layer_shell();
-    window.set_namespace("atelier-panel");
+    window.set_namespace(Some("atelier-panel"));
     window.set_layer(Layer::Top);
     for edge in [Edge::Left, Edge::Right, Edge::Top] { window.set_anchor(edge, true); }
     window.set_keyboard_mode(KeyboardMode::None);
