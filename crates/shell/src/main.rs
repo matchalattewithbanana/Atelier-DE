@@ -3,10 +3,16 @@
 use atelier_config::{component, config_path, Config};
 use gtk::{gio, glib, prelude::*};
 use std::process::Command;
+#[cfg(feature = "layer-panel")]
+mod panel;
 
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder().application_id("org.atelier.Shell").flags(gio::ApplicationFlags::NON_UNIQUE).build();
-    app.connect_activate(build_shell);
+    app.connect_activate(|app| {
+        #[cfg(feature = "layer-panel")]
+        if gtk4_layer_shell::is_supported() { panel::build(app); return; }
+        build_shell(app);
+    });
     app.run()
 }
 
