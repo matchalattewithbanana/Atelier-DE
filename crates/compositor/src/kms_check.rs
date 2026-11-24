@@ -384,8 +384,9 @@ pub fn run_native(
     let damage = Rectangle::from_size(size);
 
     let mut server = Display::<Atelier>::new()?;
-    let mut compositor = Atelier::new(&server.handle(), config.layout)?;
-    compositor.resize(i32::from(width), i32::from(height));
+    let mut compositor = Atelier::new_for_output(&server.handle(), config.layout, "ATELIER-DRM-1", "Native DRM display")?;
+    let refresh = route.mode.vrefresh().saturating_mul(1000).max(1000).min(i32::MAX as u32) as i32;
+    compositor.resize_with_refresh(i32::from(width), i32::from(height), refresh);
     let state = Rc::new(RefCell::new(compositor));
     let listener = ListeningSocket::bind(socket).context("bind native Wayland socket")?;
 
@@ -433,6 +434,7 @@ pub fn run_native(
             let started = Instant::now();
             let color = config.theme.background();
             let mut pending_since: Option<Instant> = None;
+            let mut last_route_check = Instant::now();
             println!("Atelier native ready: WAYLAND_DISPLAY={socket}");
             while running.load(Ordering::SeqCst) || queue.pending().is_some() {
                 event_loop.dispatch(Duration::from_millis(8), &mut ())
@@ -451,6 +453,15 @@ pub fn run_native(
                 }
                 if pending_since.is_some_and(|since| since.elapsed() > Duration::from_secs(1)) {
                     bail!("timed out waiting for native page flip");
+                }
+                if last_route_check.elapsed() >= Duration::from_millis(500) {
+                    let connector = card.get_connector(route.connector, false)?;
+                    if connector.state() != connector::State::Connected ||
+                        property(&card, route.connector, "CRTC_ID")?.1 != u64::from(u32::from(route.crtc)) ||
+                        card.get_crtc(route.crtc)?.mode() != Some(route.mode) {
+                        bail!("native monitor route changed; restart after reconnecting");
+                    }
+                    last_route_check = Instant::now();
                 }
                 if !running.load(Ordering::SeqCst) {
                     server.flush_clients()?;
@@ -516,7 +527,10 @@ pub fn run_native(
         if let Err(error) = outcome { eprintln!("Native session error: {error:#}"); }
         bail!("native page flip remained pending; restoration could not be safely attempted");
     }
-    if queue.displayed().is_some() {
+    if let Some(slot) = queue.displayed() {
+        let expected = u64::from(u32::from(slots[slot].1));
+        let actual = property(&card, route.plane, "FB_ID")?.1;
+        if actual == expected {
         let restored = commit_framebuffer(&card, route.plane, original, false).and_then(|_| {
             if property(&card, route.plane, "FB_ID")?.1 != original { bail!("restored framebuffer differs from original"); }
             Ok(())
@@ -524,6 +538,9 @@ pub fn run_native(
         if let Err(error) = restored {
             if let Err(cause) = outcome { eprintln!("Native session error: {cause:#}"); }
             bail!("native restoration failed; seat release follows: {error:#}");
+        }
+        } else if actual != original {
+            eprintln!("Primary-plane framebuffer changed outside Atelier; leaving external state intact.");
         }
     }
     let mut cleanup = Ok(());
