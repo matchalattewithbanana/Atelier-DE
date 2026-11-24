@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+native-seat = ["smithay/backend_session_libseat", "smithay/backend_udev", "dep:rustix"]
+
 [dependencies]
+rustix = { version = "1", features = ["fs"], optional = true }
 atelier-config.workspace = true
 anyhow.workspace = true
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_winit", "desktop", "wayland_frontend"] }

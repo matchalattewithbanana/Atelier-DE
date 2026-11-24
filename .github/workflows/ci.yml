@@ -16,7 +16,7 @@ jobs:
       - name: Install native development libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev
       - name: Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Check workspace
@@ -30,3 +30,6 @@ jobs:
 
       - name: Read-only hardware inventory
         run: target/debug/atelier-compositor --probe-hardware
+
+      - name: Compile native-seat feature
+        run: cargo +stable test -p atelier-compositor --features native-seat

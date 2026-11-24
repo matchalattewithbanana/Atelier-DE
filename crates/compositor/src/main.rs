@@ -4,6 +4,8 @@ mod nested;
 mod state;
 mod layout;
 mod hardware;
+#[cfg(feature = "native-seat")]
+mod seat;
 
 use anyhow::{bail, Context, Result};
 use atelier_config::{config_path, Config};
@@ -14,17 +16,26 @@ fn main() -> Result<()> {
     let mut socket = None;
     let mut nested = false;
     let mut probe = false;
+    let mut check_seat = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--nested" => nested = true,
             "--probe-hardware" => probe = true,
+            "--check-seat" => check_seat = true,
             "--socket" => socket = Some(args.next().context("--socket requires a name")?),
             "--help" | "-h" => {
-                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
+                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
                 return Ok(());
             }
             other => bail!("unknown argument {other}"),
         }
+    }
+    if check_seat {
+        if nested || probe || socket.is_some() { bail!("--check-seat cannot be combined with other modes"); }
+        #[cfg(feature = "native-seat")]
+        return seat::check();
+        #[cfg(not(feature = "native-seat"))]
+        bail!("rebuild with --features native-seat to check a seat");
     }
     if probe {
         if nested || socket.is_some() { bail!("--probe-hardware cannot be combined with session arguments"); }

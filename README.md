@@ -75,6 +75,16 @@ Hidden windows are removed from the rendered scene and restored when their works
 
 Before native TTY bring-up, run `cargo run -p atelier-compositor -- --probe-hardware` as your normal user. This lists Linux DRM primary/render nodes, connector status and advertised modes, and input event nodes visible in sysfs. Missing directories or devices are reported without failing the diagnostic. It never opens device nodes or acquires a seat, and does not verify access, KMS or rendering compatibility.
 
+### Experimental native-seat bring-up
+
+On a spare local text login (not from a graphical terminal), the optional `native-seat` feature can check seat ownership and whether libseat can open and release a seat-assigned DRM card. Install the libseat, libudev and libinput development libraries first. On Arch/CachyOS these are supplied by `seatd`, `systemd` and `libinput`; on Debian/Ubuntu use `libseat-dev libudev-dev libinput-dev`.
+
+```sh
+cargo run -p atelier-compositor --features native-seat -- --check-seat
+```
+
+This explicitly acquires the current seat and briefly opens a DRM card through the seat provider. Do not run it with sudo or inside your active graphical session. It does not set a mode, present a frame or read input events. The default nested build remains unchanged.
+
 ## Verification
 
 ```sh
