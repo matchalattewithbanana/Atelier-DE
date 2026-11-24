@@ -5,6 +5,7 @@ use std::{sync::mpsc, thread, time::Duration};
 use crate::{acquire, catalog, packages, selection, trust};
 mod setup;
 mod deployment;
+mod updates;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -226,6 +227,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
         if id == "overview" { button.emit_clicked(); }
     }
     stack.add_titled(&setup::build(), Some("setup"), "Installation");
+    stack.add_titled(&updates::build(), Some("updates"), "Updates");
     window.set_child(Some(&layout));
     window
 }
