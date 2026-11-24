@@ -66,7 +66,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
 print("Workspace IPC smoke passed")
 PY
 if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
-    env -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" WAYLAND_DISPLAY="$socket" GDK_BACKEND=wayland GSK_RENDERER=cairo target/debug/atelier-shell >"$test_runtime/panel.log" 2>&1 &
+    env -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" WAYLAND_DISPLAY="$socket" GDK_BACKEND=wayland GSK_RENDERER=cairo target/debug/atelier-shell --panel >"$test_runtime/panel.log" 2>&1 &
     panel_pid=$!
     for _ in {1..100}; do
         if ! kill -0 "$panel_pid" 2>/dev/null; then
