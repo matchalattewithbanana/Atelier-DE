@@ -195,3 +195,5 @@ Classic portable theme import/export is available in Appearance Studio. Themes c
 The optional Wallpapers page provides local gallery browsing, bounded thumbnail preview, per-output static images/slideshows and reviewed recovery through the Classic backend. See [Mango integration](MANGO_INTEGRATION.md).
 
 The optional Panel, dock & widgets page edits Classic layout toggles and ordered dock pins using the reviewed snapshot backend. See [Mango integration](MANGO_INTEGRATION.md).
+
+Appearance Studio supports wallpaper-derived dark and light color drafts via the reviewed Classic integration. Color generation never applies settings automatically.
