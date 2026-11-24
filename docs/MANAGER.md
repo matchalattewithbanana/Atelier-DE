@@ -70,3 +70,13 @@ atelier-manager rollback
 ```
 
 Activation and rollback confirm the exact target, verify the manifest and every artifact hash, and atomically update a single selection record with current and previous IDs under an exclusive lock. A stale review or corrupt deployment is rejected without switching. Previous deployment files remain intact. `active-path` prints the selected bin directory after structural and size checks; use `verify` for a full hash check. This is a manager-local selection, not a display-manager change or system-wide install. To test a selected bundle, explicitly launch the desired binary from that directory or add it to PATH for the current shell yourself. Running sessions and shell startup files are not modified. A rollback switches the record back to the previous complete deployment, not system packages or user settings. Hashes detect corruption, not authenticity.
+
+## Verified nested session launch
+
+```sh
+atelier-manager session-check
+atelier-manager session-launch --nested
+atelier-manager session-launch --nested --no-shell
+```
+
+The manager resolves the selected deployment, verifies all recorded artifacts, and requires the supervisor and compositor (plus the shell unless explicitly disabled) inside that bundle. It launches the exact selected supervisor, not a PATH lookup, and hands process ownership to the supervisor. The readiness check only checks the bundle, host display environment and runtime-directory presence; it does not prove runtime compatibility. The existing desktop remains the graphical host. Rollback selects a previous deployment for the next launch, not the currently running session. Native TTY mode and display-manager registration remain gated on physical hardware and recovery acceptance; this command cannot start native DRM mode or create login entries.

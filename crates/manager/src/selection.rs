@@ -132,6 +132,26 @@ pub fn verify(id: &str) -> Result<()> {
     println!("Deployment {id}: all recorded artifacts verified.");
     Ok(())
 }
+/// Resolve the selected bundle and fully verify its recorded artifacts.
+/// Required binaries must belong to this bundle, never a PATH fallback.
+pub(super) fn verified_session_bin(no_shell: bool) -> Result<PathBuf> {
+    let root = data_root()?;
+    session_bin(&root, no_shell)
+}
+
+fn session_bin(root: &Path, no_shell: bool) -> Result<PathBuf> {
+    directory(root)?;
+    let id = load_selection(root)?.current.context("no selected deployment")?;
+    let manifest = manifest(root, &id, true)?;
+    let required = ["atelier-session", "atelier-compositor", "atelier-shell"];
+    for name in &required[..if no_shell { 2 } else { 3 }] {
+        if !manifest.artifacts.iter().any(|artifact| artifact.name == *name) {
+            bail!("selected deployment lacks {name}; stage and select the required native products");
+        }
+    }
+    Ok(root.join(id).join("bin"))
+}
+
 pub fn active_path() -> Result<()> {
     let root = data_root()?; directory(&root)?;
     let id = load_selection(&root)?.current.context("no selected deployment")?;
@@ -178,6 +198,38 @@ mod tests {
         switch(root, &second, "deployment-A").unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
+    }
+    #[test]
+    fn session_launch_requires_a_verified_complete_selected_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        assert!(session_bin(root, false).is_err());
+        fixture(root, "deployment-A", b"shell only");
+        switch(root, &Selection::default(), "deployment-A").unwrap();
+        assert!(session_bin(root, false).is_err());
+        assert!(session_bin(root, true).is_err());
+
+        let id = "deployment-B";
+        let dir = root.join(id);
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let content = b"fixture";
+        let mut artifacts = Vec::new();
+        for name in ["atelier-session", "atelier-compositor", "atelier-shell"] {
+            fs::write(bin.join(name), content).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+            artifacts.push(serde_json::json!({"name":name,"bytes":content.len(),"sha256":format!("{:x}",Sha256::digest(content))}));
+        }
+        fs::write(dir.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
+            "schema":1,"manager_version":"test","source":"/trusted",
+            "products":["session","shell"],"artifacts":artifacts
+        })).unwrap()).unwrap();
+        let old = load_selection(root).unwrap();
+        switch(root, &old, id).unwrap();
+        assert_eq!(session_bin(root, false).unwrap(), bin);
+        assert_eq!(session_bin(root, true).unwrap(), bin);
+        fs::write(bin.join("atelier-compositor"), b"altered").unwrap();
+        assert!(session_bin(root, false).is_err());
     }
     #[test]
     fn corrupt_or_untrusted_files_do_not_change_selection() {
