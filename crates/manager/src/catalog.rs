@@ -21,7 +21,7 @@ pub const PRODUCTS: &[Product] = &[
     Product { id: "settings", name: "Atelier Settings", source: "atelier-de", binaries: &["atelier-settings"], requires: &[], note: "Standalone desktop settings; system providers are optional." },
     Product { id: "services", name: "Atelier Services", source: "atelier-de", binaries: &["atelier-services"], requires: &[], note: "Independent power, media, audio, network and Bluetooth CLI." },
     Product { id: "notifications", name: "Atelier Notifications", source: "atelier-de", binaries: &["atelier-notifications"], requires: &[], note: "Explicit opt-in inbox; installing does not enable daemon ownership." },
-    Product { id: "manager", name: "Atelier Manager", source: "atelier-de", binaries: &["atelier-manager"], requires: &[], note: "Read-only diagnostics and planning foundation." },
+    Product { id: "manager", name: "Atelier Manager", source: "atelier-de", binaries: &["atelier-manager"], requires: &[], note: "Interactive setup, release and deployment lifecycle management." },
     Product { id: "mango-atelier", name: "Mango Atelier", source: "mango-atelier", binaries: &["atelier", "atelier-workspace"], requires: &[], note: "Separate rice distribution; choose a supported compositor and use its existing installer." },
     Product { id: "mangowm", name: "MangoWM", source: "external", binaries: &["mango"], requires: &[], note: "Third-party compositor, independent from Atelier-DE." },
     Product { id: "hyprland", name: "Hyprland", source: "external", binaries: &["Hyprland"], requires: &[], note: "Third-party compositor; runtime support must be validated." },
@@ -63,7 +63,7 @@ pub fn plan(ids: &[String], report: &Report) -> Result<Plan> {
         let status = if product.binaries.is_empty() { "aggregate" } else if missing_binaries.is_empty() { "found" } else { "missing" };
         PlanStep { id: product.id, name: product.name, source: product.source, status, missing_binaries }
     }).collect();
-    let mut warnings = vec!["Inventory does not verify runtime compatibility or package availability. No installation backend is enabled.".into()];
+    let mut warnings = vec!["This plan is preview-only. Inventory does not verify runtime compatibility or package availability; installation requires a separate confirmed operation.".into()];
     if products.iter().any(|p| p.id == "mango-atelier") {
         warnings.push("Mango Atelier requires an explicitly chosen supported compositor and rice configuration; no third-party compositor is selected automatically.".into());
     }

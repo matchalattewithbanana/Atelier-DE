@@ -65,9 +65,8 @@ fn request(endpoint: &str, binary: bool, limit: u64, output: &mut impl Write) ->
         Some(stdout) => io::copy(&mut stdout.take(limit + 1), output),
         None => Err(io::Error::other("missing query stdout")),
     };
-    // Closing the pipe and killing on a local write failure avoids waiting for
-    // an abandoned download; timeout also bounds the subprocess lifetime.
-    if read.as_ref().map_or(true, |n| *n > limit) { let _ = child.kill(); }
+    // The pipe is closed after the bounded read. Keep the timeout supervisor
+    // alive so its process-group deadline also applies to an abandoned gh child.
     let status = child.wait().context("wait for GitHub release query")?;
     let count = read.context("read GitHub release response")?;
     if count > limit { bail!("release response exceeds size limit"); }
