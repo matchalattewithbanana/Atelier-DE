@@ -164,12 +164,22 @@ fn main() -> Result<()> {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
             println!("{}", if result.is_some() { "Preview accepted. No changes made." } else { "Setup cancelled. No changes made." });
         }
+        [mode, flag, source] if mode == "setup" && flag == "--from" => {
+            let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
+            if let Some(preview) = result {
+                println!("Preview accepted. Staging requires a separate confirmation.");
+                println!("This step stages built native Atelier binaries only. External compositors, rice choices and optional providers remain unchanged.");
+                deploy::run(Path::new(source), &preview.plan.requested)?;
+            } else {
+                println!("Setup cancelled. No changes made.");
+            }
+        }
         [mode, flag] if mode == "setup" && flag == "--json" => {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => deploy::run(Path::new(source), products)?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\nSetup is preview-only; stage copies trusted local binaries after confirmation."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\nSetup is preview-only; stage copies trusted local binaries after confirmation."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
