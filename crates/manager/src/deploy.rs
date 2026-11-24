@@ -59,7 +59,7 @@ pub(super) fn ensure_root(root: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn read_artifact(source: &Path, name: &str, mut output: impl Write) -> Result<Artifact> {
+pub(super) fn read_artifact(source: &Path, name: &str, mut output: impl Write) -> Result<Artifact> {
     verify_source(source)?;
     let mut input = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(source)?;
     let metadata = input.metadata()?;
