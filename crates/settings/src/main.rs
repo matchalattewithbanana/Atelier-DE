@@ -2,11 +2,22 @@
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
+mod audio_page;
 
 fn main() -> glib::ExitCode {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let initial_page = match args.as_slice() {
+        [] => "appearance".to_owned(),
+        [flag, id] if flag == "--page" && ["appearance", "applications", "session", "power", "audio", "about"].contains(&id.as_str()) => id.clone(),
+        [flag] if flag == "--help" || flag == "-h" => {
+            println!("atelier-settings [--page appearance|applications|session|power|audio|about]");
+            return glib::ExitCode::SUCCESS;
+        }
+        _ => { eprintln!("Invalid settings page; use --help."); return glib::ExitCode::FAILURE; }
+    };
     let app = gtk::Application::builder().application_id("org.atelier.Settings").flags(gio::ApplicationFlags::NON_UNIQUE).build();
-    app.connect_activate(build_settings);
-    app.run()
+    app.connect_activate(move |app| build_settings(app, &initial_page));
+    app.run_with_args(&["atelier-settings"])
 }
 
 fn heading(text: &str) -> gtk::Label {
@@ -63,7 +74,7 @@ impl Fields {
     }
 }
 
-fn build_settings(app: &gtk::Application) {
+fn build_settings(app: &gtk::Application, initial_page: &str) {
     let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Settings").default_width(760).default_height(510).build();
     let (path, config) = match config_path().and_then(|path| Config::load(&path).map(|config| (path, config))) {
         Ok(result) => result,
@@ -127,6 +138,9 @@ fn build_settings(app: &gtk::Application) {
     refresh.connect_clicked(move |_| update_power(&target));
     power_page.append(&refresh);
 
+    let audio = page(&stack, "audio", "Audio", "Choose input and output devices and adjust volume or mute.");
+    audio_page::build(&audio);
+
     let about = page(&stack, "about", "About", "Atelier Settings is an independent application. It does not require a running Atelier compositor.");
     for (name, value) in [
         ("Version", env!("CARGO_PKG_VERSION").to_string()),
@@ -188,6 +202,7 @@ fn build_settings(app: &gtk::Application) {
     });
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&footer);
+    stack.set_visible_child_name(initial_page);
     window.set_child(Some(&root)); window.present();
 }
 

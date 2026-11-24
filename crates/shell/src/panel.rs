@@ -62,6 +62,9 @@ pub fn build(app: &gtk::Application) {
     let app_ref = app.downgrade();
     media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::media_controls::show(&app); } });
     bar.append(&media);
+    let audio = gtk::Button::with_label("Audio");
+    audio.connect_clicked(move |_| { let mut command = component("atelier-settings"); command.args(["--page", "audio"]); spawn(command); });
+    bar.append(&audio);
     let terminal = gtk::Button::with_label("Terminal");
     let terminal_path = config.terminal.clone();
     terminal.connect_clicked(move |_| spawn(Command::new(&terminal_path)));
