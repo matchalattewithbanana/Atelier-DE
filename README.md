@@ -96,6 +96,16 @@ cargo run -p atelier-compositor --features native-gbm -- --check-render
 
 This is an off-screen diagnostic, not a monitor presentation test. No modesetting, client composition or input dispatch is performed. CI compiles the feature and tests the pixel verifier; hardware execution requires a real local seat.
 
+### KMS output topology
+
+On a spare local TTY, run:
+
+```sh
+cargo run -p atelier-compositor --features native-kms -- --check-kms
+```
+
+The seat-owned DRM device is queried for cached connected connectors, advertised display modes, encoder-compatible CRTCs and candidate routes. Mode ranking prefers a display's advertised preferred mode, then resolution and refresh rate. No modesetting or atomic commit is performed; a candidate route does not establish scanout compatibility or exclusive ownership. Continue with real hardware validation before enabling monitor presentation.
+
 ## Verification
 
 ```sh
