@@ -65,9 +65,18 @@ fn download_bundle(root: &Path, bytes: &[u8], signature: &[u8], release: &Releas
     Ok(pending.keep())
 }
 
-pub fn run(choice: &str, id: &str, key: &str, prerelease: bool) -> Result<()> {
+#[derive(Serialize)]
+pub(super) struct FetchResult {
+    schema: u32,
+    pub cache: PathBuf,
+    release_id: u64,
+    pub version: String,
+    key_id: String,
+    pub status: &'static str,
+    note: &'static str,
+}
+pub(super) fn fetch_release(choice: &str, id: u64, key: &str, prerelease: bool) -> Result<FetchResult> {
     let repo = discovery::repository(choice)?;
-    let id: u64 = id.parse().context("expected numeric release ID")?;
     let metadata = discovery::detail(repo, id, prerelease)?;
     let manifest_name = format!("atelier-release-linux-{}.json", env::consts::ARCH);
     let manifest = required_asset(&metadata.assets, &manifest_name, 64 * 1024)?;
@@ -84,20 +93,19 @@ pub fn run(choice: &str, id: &str, key: &str, prerelease: bool) -> Result<()> {
     deploy::ensure_root(&root)?;
     let _lock = cache_lock(&root)?;
     if let Some(path) = reusable(&root, &bytes, &sig, key)? {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "schema":1,"cache":path,"release_id":id,"version":release.version,"key_id":key,
-            "status":"verified-cache-reused","note":"Revalidate before acceptance or installation."
-        }))?);
-        return Ok(());
+        return Ok(FetchResult { schema: 1, cache: path, release_id: id, version: release.version, key_id: key.into(),
+            status: "verified-cache-reused", note: "Revalidate before acceptance or installation." });
     }
     eprintln!("Authenticated release {}: downloading {} signed artifacts into an isolated cache.", release.version, assets.len());
     let path = download_bundle(&root, &bytes, &sig, &release, &assets,
         |asset, output| discovery::download(repo, asset, output),
         |bin| trust::check_candidate(&bytes, &sig, key)?.verify_local(bin))?;
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "schema":1,"cache":path,"release_id":id,"version":release.version,"key_id":key,
-        "status":"verified-cache-only","note":"Revalidate current trust and artifacts before acceptance or installation. No high-water marks advanced."
-    }))?);
+    Ok(FetchResult { schema: 1, cache: path, release_id: id, version: release.version, key_id: key.into(),
+        status: "verified-cache-only", note: "Revalidate current trust and artifacts before acceptance or installation. No high-water marks advanced." })
+}
+pub fn run(choice: &str, id: &str, key: &str, prerelease: bool) -> Result<()> {
+    let id = id.parse().context("expected numeric release ID")?;
+    println!("{}", serde_json::to_string_pretty(&fetch_release(choice, id, key, prerelease)?)?);
     Ok(())
 }
 
@@ -112,59 +120,75 @@ fn valid_cache_id(id: &str) -> bool {
     id.strip_prefix("release-").is_some_and(|suffix| !suffix.is_empty() && suffix.len() <= 64
         && suffix.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
-pub fn stage_cached(id: &str, key: &str) -> Result<()> {
-    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive staging requires a terminal"); }
-    if !valid_cache_id(id) { bail!("expected cache ID release-... (the final directory name from release-fetch)"); }
-    let root = cache_root()?;
-    let _lock = cache_lock(&root)?;
-    let path = root.join(id);
-    cache_directory(&path)?;
-    let bin = path.join("bin");
-    cache_directory(&bin)?;
-    let bytes = crate::release::bounded_file(&path.join("manifest.json"), 64 * 1024)?;
-    let signature = crate::release::bounded_file(&path.join("manifest.sig"), 16 * 1024)?;
-    let release = trust::check_candidate(&bytes, &signature, key)?;
-    release.verify_local(&bin)?;
-    println!("Authenticated release {} (sequence {})", release.version, release.sequence.context("missing release sequence")?);
-    println!("Publisher: {key}\nProducts: {}", release.products.join(", "));
-    println!("Stage a new complete deployment and accept its release sequences. No running session, package, settings or active selection changes.");
-    print!("Type 'stage release' to proceed: "); io::stdout().flush()?;
-    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-    if answer.trim() != "stage release" { println!("Cancelled."); return Ok(()); }
-    cache_directory(&root)?;
-    cache_directory(&path)?;
-    cache_directory(&bin)?;
-    let staged = trust::stage_authenticated(&bytes, &signature, key, &bin)?;
-    println!("Release staged at {}. Activate separately after reviewing deployments.", staged.display());
-    Ok(())
+/// Exact reviewed metadata and, for updates, an opaque reviewed copy plan.
+pub(super) struct CachedReview {
+    root: PathBuf,
+    id: String,
+    key: String,
+    bytes: Vec<u8>,
+    signature: Vec<u8>,
+    action: CachedAction,
+    detail: String,
 }
-
-pub fn update_cached(id: &str, key: &str) -> Result<()> {
+enum CachedAction { Full, Selective(deploy::StagePlan) }
+impl CachedReview {
+    pub(super) fn detail(&self) -> &str { &self.detail }
+    pub(super) fn apply(self) -> Result<PathBuf> {
+        if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+        let _lock = cache_lock(&self.root)?;
+        let path = self.root.join(&self.id);
+        let (bytes, sig) = cached_metadata(&path)?;
+        if bytes != self.bytes || sig != self.signature { bail!("cached release changed since review; review again"); }
+        let bin = path.join("bin");
+        trust::check_candidate(&bytes, &sig, &self.key)?.verify_local(&bin)?;
+        match self.action {
+            CachedAction::Full => trust::stage_authenticated(&bytes, &sig, &self.key, &bin),
+            CachedAction::Selective(plan) => trust::update_authenticated(&bytes, &sig, &self.key, plan),
+        }
+    }
+}
+pub(super) fn review_cached(id: &str, key: &str, update: bool) -> Result<Option<CachedReview>> {
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive update requires a terminal"); }
     if !valid_cache_id(id) { bail!("expected cache ID release-..."); }
     let root = cache_root()?;
     let _lock = cache_lock(&root)?;
     let path = root.join(id);
     let bin = path.join("bin");
-    for dir in [&root, &path, &bin] { cache_directory(dir)?; }
-    let bytes = crate::release::bounded_file(&path.join("manifest.json"), 64 * 1024)?;
-    let signature = crate::release::bounded_file(&path.join("manifest.sig"), 16 * 1024)?;
+    let (bytes, signature) = cached_metadata(&path)?;
     let release = trust::check_candidate(&bytes, &signature, key)?;
     release.verify_local(&bin)?;
-    let Some(plan) = deploy::review_signed_update(&bin, &release, key)? else { return Ok(()); };
-    println!("The whole signed component bundle is accepted. Retained components may be local builds; mixed-build compatibility is not established.");
-    println!("The active deployment remains unchanged. Release provenance applies only to the listed signed artifacts.");
-    print!("Type 'stage update' to proceed: "); io::stdout().flush()?;
+    let mut detail = format!("Authenticated release {} (sequence {})\nRevision: {}\nPublisher: {key}\nProducts: {}\n",
+        release.version, release.sequence.context("missing release sequence")?, release.revision, release.products.join(", "));
+    for a in &release.artifacts { detail.push_str(&format!("{}: {} bytes\nSHA-256 {}\n", a.name, a.bytes, a.sha256)); }
+    let action = if update {
+        let Some((plan, summary)) = deploy::review_signed_update(&bin, &release, key)? else { return Ok(None); };
+        detail.push_str(&summary);
+        detail.push_str("\nRetained components may be local builds; mixed-build compatibility is not established. Provenance covers only the signed components.");
+        CachedAction::Selective(plan)
+    } else {
+        detail.push_str("\nStage the entire signed bundle as a separate deployment.");
+        CachedAction::Full
+    };
+    detail.push_str("\nApproval records acceptance sequences and stages a new deployment. No activation, running session, package or settings changes.");
+    Ok(Some(CachedReview { root, id: id.into(), key: key.into(), bytes, signature, action, detail }))
+}
+fn confirmed_stage(id: &str, key: &str, update: bool) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive staging requires a terminal"); }
+    let Some(review) = review_cached(id, key, update)? else {
+        println!("No binary changes; nothing staged or accepted.");
+        return Ok(());
+    };
+    println!("{}", review.detail());
+    let phrase = if update { "stage update" } else { "stage release" };
+    print!("Type '{phrase}' to proceed: "); io::stdout().flush()?;
     let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-    if answer.trim() != "stage update" { println!("Cancelled."); return Ok(()); }
-    for dir in [&root, &path, &bin] { cache_directory(dir)?; }
-    let staged = trust::update_authenticated(&bytes, &signature, key, plan)?;
-    println!("Authenticated update staged at {}. Activate separately.", staged.display());
+    if answer.trim() != phrase { println!("Cancelled."); return Ok(()); }
+    let staged = review.apply()?;
+    println!("Release staged at {}. Activate separately.", staged.display());
     Ok(())
 }
-
+pub fn stage_cached(id: &str, key: &str) -> Result<()> { confirmed_stage(id, key, false) }
+pub fn update_cached(id: &str, key: &str) -> Result<()> { confirmed_stage(id, key, true) }
 
 fn cache_lock(root: &Path) -> Result<File> {
     cache_directory(root)?;

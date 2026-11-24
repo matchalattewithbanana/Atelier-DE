@@ -30,11 +30,11 @@ pub(super) struct Asset {
     pub size: u64,
 }
 #[derive(Debug, Serialize)]
-struct Candidate {
-    id: u64,
-    tag: String,
-    prerelease: bool,
-    metadata_status: &'static str,
+pub(super) struct Candidate {
+    pub id: u64,
+    pub tag: String,
+    pub prerelease: bool,
+    pub metadata_status: &'static str,
     manifest: Option<Asset>,
     signature: Option<Asset>,
 }
@@ -119,10 +119,13 @@ fn candidates(bytes: &[u8], arch: &str, prerelease: bool) -> Result<Vec<Candidat
     }
     Ok(result)
 }
+pub(super) fn browse(choice: &str, prerelease: bool) -> Result<Vec<Candidate>> {
+    let repo = repository(choice)?;
+    candidates(&fetch(repo)?, env::consts::ARCH, prerelease)
+}
 pub fn run(choice: &str, prerelease: bool) -> Result<()> {
     let repo = repository(choice)?;
-    let bytes = fetch(repo)?;
-    let releases = candidates(&bytes, env::consts::ARCH, prerelease)?;
+    let releases = browse(choice, prerelease)?;
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
         "schema": 1, "repository": repo, "host": "github.com",
         "target": format!("linux-{}", env::consts::ARCH),

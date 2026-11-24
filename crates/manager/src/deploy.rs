@@ -261,19 +261,16 @@ fn signed_update_plan(source: &Path, root: PathBuf, id: String, base: Manifest,
     Ok((plan, preview))
 }
 
-pub(super) fn review_signed_update(source: &Path, release: &crate::release::ReleaseManifest, key: &str) -> Result<Option<StagePlan>> {
+pub(super) fn review_signed_update(source: &Path, release: &crate::release::ReleaseManifest, key: &str) -> Result<Option<(StagePlan, String)>> {
     let root = data_root()?;
     let (id, base) = crate::selection::verified_current(&root)?;
     let (plan, preview) = signed_update_plan(source, root, id, base, release, key)?;
-    println!("Authenticated update of {} using release {}", preview.base_deployment, release.version);
+    let mut summary = format!("\nAuthenticated update of {} using release {}\n", preview.base_deployment, release.version);
     for change in &preview.changes {
-        println!("  {}: {} ({} -> {} bytes)", change.name, change.action, change.before.bytes, change.after.bytes);
+        summary.push_str(&format!("  {}: {} ({} -> {} bytes)\n", change.name, change.action, change.before.bytes, change.after.bytes));
     }
-    if !preview.changes.iter().any(|c| c.action == "replace") {
-        println!("No binary changes; nothing staged or accepted.");
-        return Ok(None);
-    }
-    Ok(Some(plan))
+    if !preview.changes.iter().any(|c| c.action == "replace") { return Ok(None); }
+    Ok(Some((plan, summary)))
 }
 
 pub(super) fn complete_signed_update(plan: StagePlan, before_complete: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {

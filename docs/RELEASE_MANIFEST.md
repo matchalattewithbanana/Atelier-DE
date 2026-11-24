@@ -80,3 +80,5 @@ atelier-manager release-cache remove CACHE_ID
 ```
 
 Fetch reuses an existing cache only when exact signed manifest and signature bytes match and current trust and all artifact hashes verify. The cache lock serializes cooperating fetch, staging, update and removal operations (including approval prompts). Inventory is read-only and structural, not an authenticity check. Removal requires a valid ID and typed confirmation, renames the cache out of its namespace and deletes it without following symlinks. Deployed copies, selection and trust records are untouched. A crash can leave a removed-* quarantine directory, not a usable cache; automated orphan cleanup is not yet implemented. Older manager binaries and manual modifications do not participate in the lock.
+
+The GTK update center uses the same acquisition and cached-release review APIs. Both interfaces release the cache lock while awaiting approval and reacquire it before staging; changed cache metadata, revoked keys, changed artifact hashes and a changed selective-update base are rejected. No acceptance occurs merely from browsing, downloading or reviewing.
