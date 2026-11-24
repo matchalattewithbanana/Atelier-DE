@@ -95,19 +95,29 @@ fn stage(plan: StagePlan) -> Result<PathBuf> {
     File::open(&plan.root)?.sync_all()?;
     Ok(pending.keep())
 }
-pub fn run(source: &Path, ids: &[String]) -> Result<()> {
+// Cancellation returns None; successful staging returns its deployment ID.
+// This operation never changes the selection.
+fn review_and_stage(plan: StagePlan, input: &mut impl io::BufRead, out: &mut impl Write) -> Result<Option<String>> {
+    writeln!(out, "Stage native Atelier binaries from {} into a new private deployment under {}", plan.source.display(), plan.root.display())?;
+    for name in &plan.binaries { writeln!(out, "  {name}")?; }
+    writeln!(out, "No existing installation, PATH, session, package or configuration will be modified. The source must be a trusted local build.")?;
+    write!(out, "Stage these files? [y/N] ")?; out.flush()?;
+    let mut answer = String::new(); input.read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        writeln!(out, "Staging cancelled. No changes made.")?;
+        return Ok(None);
+    }
+    let path = stage(plan)?;
+    let id = path.file_name().and_then(|name| name.to_str()).context("invalid generated deployment ID")?.to_owned();
+    writeln!(out, "Deployment staged: {}", path.display())?;
+    writeln!(out, "Binaries: {}. No activation was performed; previous deployments remain untouched.", path.join("bin").display())?;
+    Ok(Some(id))
+}
+
+pub fn run(source: &Path, ids: &[String]) -> Result<Option<String>> {
     if nix::unistd::Uid::effective().is_root() { bail!("run staging as your desktop user, not root or sudo"); }
     let plan = StagePlan::prepare(source, data_root()?, ids)?;
-    println!("Stage native Atelier binaries from {} into a new private deployment under {}", plan.source.display(), plan.root.display());
-    for name in &plan.binaries { println!("  {name}"); }
-    println!("No existing installation, PATH, session, package or configuration will be modified. The source must be a trusted local build.");
-    print!("Stage these files? [y/N] "); io::stdout().flush()?;
-    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") { println!("Staging cancelled. No changes made."); return Ok(()); }
-    let path = stage(plan)?;
-    println!("Deployment staged: {}", path.display());
-    println!("Binaries: {}. No activation was performed; previous deployments remain untouched.", path.join("bin").display());
-    Ok(())
+    review_and_stage(plan, &mut io::stdin().lock(), &mut io::stdout().lock())
 }
 
 #[cfg(test)]
@@ -136,6 +146,22 @@ mod tests {
         assert!(StagePlan::prepare(source.path(), root.clone(), &["session".into()]).is_err());
         assert!(StagePlan::prepare(source.path(), root.clone(), &["niri".into()]).is_err());
         assert!(!root.exists());
+    }
+    #[test]
+    fn review_cancellation_leaves_root_untouched_and_acceptance_returns_id() {
+        let source = tempfile::tempdir().unwrap();
+        artifact(source.path(), "atelier-shell");
+        let root = source.path().join("deployments");
+        let ids = vec!["shell".into()];
+        for answer in ["", "n\n", "q\n"] {
+            let plan = StagePlan::prepare(source.path(), root.clone(), &ids).unwrap();
+            assert!(review_and_stage(plan, &mut io::Cursor::new(answer), &mut Vec::new()).unwrap().is_none());
+            assert!(!root.exists());
+        }
+        let plan = StagePlan::prepare(source.path(), root.clone(), &ids).unwrap();
+        let id = review_and_stage(plan, &mut io::Cursor::new("yes\n"), &mut Vec::new()).unwrap().unwrap();
+        assert!(root.join(id).join("manifest.json").is_file());
+        assert!(!root.join("selection.json").exists());
     }
     #[test]
     fn symlink_artifact_is_refused() {
