@@ -164,7 +164,18 @@ fn main() -> Result<()> {
         [mode, products @ ..] if mode == "install-packages" => {
             let report = report();
             let plan = catalog::plan(products, &report)?;
-            packages::install(&plan, &report)?;
+            packages::install(&plan, &report, &[])?;
+        }
+        [mode, flag] if mode == "setup" && flag == "--packages" => {
+            let report = report();
+            let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report)?;
+            if let Some(preview) = result {
+                println!("Preview accepted. Package changes require separate confirmation.");
+                println!("This mode does not build or stage Atelier binaries, install rices or configure sessions.");
+                preview.install_packages(&report)?;
+            } else {
+                println!("Setup cancelled. No changes made.");
+            }
         }
         [mode] if mode == "setup" => {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
@@ -175,7 +186,11 @@ fn main() -> Result<()> {
             if let Some(preview) = result {
                 println!("Preview accepted. Staging requires a separate confirmation.");
                 println!("Only native binaries are staged; package, provider, rice and session preferences are not applied.");
-                deploy::run(Path::new(source), preview.requested_products())?;
+                if let Some(id) = deploy::run(Path::new(source), preview.requested_products())? {
+                    println!("Staging complete. Select this deployment or keep your current selection.");
+                    println!("If selection is declined, the new deployment remains staged.");
+                    selection::activate(Some(&id))?;
+                }
             } else {
                 println!("Setup cancelled. No changes made.");
             }
@@ -184,13 +199,13 @@ fn main() -> Result<()> {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => deploy::run(Path::new(source), products)?,
+        [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => { deploy::run(Path::new(source), products)?; }
         [mode] if mode == "deployments" => selection::list()?,
         [mode, id] if mode == "verify" => selection::verify(id)?,
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nSetup without --from is preview-only; staging and selection require explicit confirmation."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\nPlain setup is preview-only; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())

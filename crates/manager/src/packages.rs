@@ -148,14 +148,14 @@ fn snapshot(dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn install(plan: &Plan, report: &Report) -> Result<()> {
+pub fn install(plan: &Plan, report: &Report, providers: &[String]) -> Result<()> {
     if !arch_family(report) { bail!("package installation is currently limited to Arch-family systems"); }
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("package installation requires an interactive terminal");
     }
     for path in [PACMAN, SUDO, TIMEOUT] { trusted_tool(path)?; }
-    let requested: BTreeSet<_> = candidates(plan, &[]).into_keys().collect();
+    let requested: BTreeSet<_> = candidates(plan, providers).into_keys().collect();
     if requested.is_empty() { println!("No package candidates. Nothing to install."); return Ok(()); }
     let missing = missing_from_output(query("-T", &requested)?, &requested)
         .context("cannot establish missing packages; no installation attempted")?;
@@ -172,8 +172,12 @@ pub fn install(plan: &Plan, report: &Report) -> Result<()> {
     if answer.trim() != "upgrade and install" { println!("Cancelled; no package changes."); return Ok(()); }
     let dir = tempfile::Builder::new().prefix("transaction-").tempdir_in(checkpoint_root()?)?;
     snapshot(dir.path(), "before.txt")?;
-    fs::write(dir.path().join("targets.txt"), missing.iter().cloned().collect::<Vec<_>>().join("\n"))?;
+    let mut targets = fs::OpenOptions::new().write(true).create_new(true).open(dir.path().join("targets.txt"))?;
+    writeln!(targets, "{}", missing.iter().cloned().collect::<Vec<_>>().join("\n"))?;
+    targets.sync_all()?;
+    fs::File::open(dir.path())?.sync_all()?;
     let dir = dir.keep();
+    fs::File::open(dir.parent().context("checkpoint has no parent")?)?.sync_all()?;
     println!("Package inventory checkpoint: {}", dir.display());
     let result = Command::new(SUDO).args(&args).status();
     let after = snapshot(&dir, "after.txt");
@@ -184,7 +188,7 @@ pub fn install(plan: &Plan, report: &Report) -> Result<()> {
     if let Err(error) = after { eprintln!("Post-transaction inventory unavailable: {error}"); }
     let status = result.context("launch package transaction")?;
     if !status.success() { bail!("pacman did not complete successfully; inspect its output and checkpoint at {}. No automatic rollback attempted.", dir.display()); }
-    let remaining = missing_from_output(query("-T", &missing)?, &missing)
+    let remaining = missing_from_output(query("-T", &requested)?, &requested)
         .context("pacman exited successfully, but final dependency verification is unavailable")?;
     if !remaining.is_empty() { bail!("packages remain unsatisfied after transaction: {remaining:?}"); }
     println!("Requested dependencies verified. No Atelier binaries, rice settings or sessions were changed by the manager.");
