@@ -62,6 +62,13 @@ pub(super) fn build()->gtk::Box {
         });
     }
     editor.append(&preview);
+    editor.append(&label("Wallpaper-derived colors","title-3"));
+    editor.append(&label("Generate dark or light colors from a local image. Only color fields change; layout, typography and wallpaper selection remain untouched. Requires python-pillow.","dim-label"));
+    let wallpaper=gtk::Entry::new();wallpaper.set_placeholder_text(Some("Absolute local wallpaper image"));editor.append(&wallpaper);
+    let generate=gtk::Button::with_label("Generate dark and light palettes");editor.append(&generate);
+    let variants=gtk::ComboBoxText::new();variants.append(Some("dark"),"Dark");variants.append(Some("light"),"Light");variants.set_active_id(Some("dark"));editor.append(&variants);
+    let use_colors=gtk::Button::with_label("Use generated colors in draft");use_colors.set_sensitive(false);editor.append(&use_colors);
+    let generated:Rc<RefCell<Option<rice::WallpaperPalettes>>>=Rc::new(RefCell::new(None));
     editor.append(&label("Portable custom themes","title-3"));
     editor.append(&label("Import populates the draft only. Export saves a data-only JSON theme to a new file; no wallpaper, executable or private configuration is included.","dim-label"));
     let theme_path=gtk::Entry::new();theme_path.set_placeholder_text(Some("Absolute .json theme path"));editor.append(&theme_path);
@@ -152,22 +159,62 @@ pub(super) fn build()->gtk::Box {
             });
         });
     }
+    {
+        let (generated,use_colors)=(generated.clone(),use_colors.downgrade());
+        wallpaper.connect_changed(move|_|{generated.borrow_mut().take();if let Some(b)=use_colors.upgrade(){b.set_sensitive(false);}});
+    }
+    {
+        let (form,status,wallpaper,use_colors)=(form.downgrade(),status.downgrade(),wallpaper.downgrade(),use_colors.downgrade());
+        let (state,generated)=(state.clone(),generated.clone());
+        generate.connect_clicked(move|_|{
+            let (Some(f),Some(s),Some(image),Some(use_colors_widget))=(form.upgrade(),status.upgrade(),wallpaper.upgrade(),use_colors.upgrade())else{return;};
+            let Some((path,target))=state.borrow().as_ref().map(AppearanceReview::wallpaper_source)else{return;};
+            let image=image.text().trim().to_owned();
+            generated.borrow_mut().take();use_colors_widget.set_sensitive(false);
+            f.set_sensitive(false);s.set_text("Extracting local wallpaper colors…");
+            let (form,status,use_colors,generated)=(form.clone(),status.clone(),use_colors.clone(),generated.clone());
+            background(move||rice::wallpaper_palettes(&path,&target,&image),move|result|{
+                if let (Some(s),Some(b))=(status.upgrade(),use_colors.upgrade()){
+                    match result{
+                        Ok(palettes)=>{s.set_text(&format!("Generated dark and light drafts from seed {}. Choose a variant to populate colors.",palettes.seed));*generated.borrow_mut()=Some(palettes);b.set_sensitive(true);}
+                        Err(e)=>s.set_text(&format!("Palette generation failed: {e:#}")),
+                    }
+                }
+                if let Some(f)=form.upgrade(){f.set_sensitive(true);}
+            });
+        });
+    }
+    {
+        let (generated,variants,status,approval)=(generated.clone(),variants.downgrade(),status.downgrade(),approval.downgrade());
+        let fields:Vec<_>=fields.iter().map(|f|f.downgrade()).collect();
+        use_colors.connect_clicked(move|_|{
+            let data=generated.borrow();let Some(data)=data.as_ref()else{return;};
+            let Some(mode)=variants.upgrade().and_then(|v|v.active_id())else{return;};
+            let palette=if mode.as_str()=="dark"{&data.dark}else{&data.light};
+            for ((key,_,_,_),field) in APPEARANCE_FIELDS.iter().zip(&fields){
+                if let (Some(field),Some(value))=(field.upgrade(),palette.get(*key)){field.set_text(value);}
+            }
+            if let Some(a)=approval.upgrade(){a.set_text("");}
+            if let Some(s)=status.upgrade(){s.set_text("Generated colors loaded into draft only. Review and explicitly save to apply.");}
+        });
+    }
     let invalidate={
         let (state,editor,approval,preview)=(state.clone(),editor.downgrade(),approval.downgrade(),preview.downgrade());
-        Rc::new(move||{state.borrow_mut().take();if let Some(e)=editor.upgrade(){e.set_sensitive(false);}if let Some(a)=approval.upgrade(){a.set_text("");}if let Some(p)=preview.upgrade(){p.queue_draw();}})
+        let (generated,use_colors)=(generated.clone(),use_colors.downgrade());
+        Rc::new(move||{state.borrow_mut().take();generated.borrow_mut().take();if let Some(b)=use_colors.upgrade(){b.set_sensitive(false);}if let Some(e)=editor.upgrade(){e.set_sensitive(false);}if let Some(a)=approval.upgrade(){a.set_text("");}if let Some(p)=preview.upgrade(){p.queue_draw();}})
     };
     {let (invalidate,trust)=(invalidate.clone(),trust.downgrade());path.connect_changed(move|_|{if let Some(t)=trust.upgrade(){t.set_active(false);}invalidate();});}
     {let invalidate=invalidate.clone();target.connect_changed(move|_|invalidate());}
     {let invalidate=invalidate.clone();trust.connect_toggled(move|_|invalidate());}
     {
         let (form,path,trust,target,status,editor,preview)=(form.downgrade(),path.downgrade(),trust.downgrade(),target.downgrade(),status.downgrade(),editor.downgrade(),preview.downgrade());
-        let presets=presets.downgrade();
+        let presets=presets.downgrade();let generated=generated.clone();let use_colors=use_colors.downgrade();
         let fields:Vec<_>=fields.iter().map(|e|e.downgrade()).collect();let state=state.clone();
         load.connect_clicked(move|_|{
             let (Some(form_widget),Some(path),Some(trust),Some(target),Some(message))=(form.upgrade(),path.upgrade(),trust.upgrade(),target.upgrade(),status.upgrade())else{return;};
             if !trust.is_active(){message.set_text("Confirm checkout trust and offline state first.");return;}
             let Some(target)=target.active_id().map(|v|v.to_string())else{message.set_text("Select target compositor.");return;};
-            let path=PathBuf::from(path.text().trim());state.borrow_mut().take();
+            let path=PathBuf::from(path.text().trim());state.borrow_mut().take();generated.borrow_mut().take();if let Some(b)=use_colors.upgrade(){b.set_sensitive(false);}
             if let Some(e)=editor.upgrade(){e.set_sensitive(false);}
             form_widget.set_sensitive(false);message.set_text("Loading validated palette…");
             let (form,status,editor,preview,fields,state,presets)=(form.clone(),status.clone(),editor.clone(),preview.clone(),fields.clone(),state.clone(),presets.clone());

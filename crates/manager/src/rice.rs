@@ -420,6 +420,7 @@ pub(super) fn review_appearance(path: &Path, target: &str) -> Result<AppearanceR
     Ok(AppearanceReview { path: checkout.root, target: target.into(), fingerprint:response.sha256,palette:response.palette,presets:response.presets })
 }
 impl AppearanceReview {
+    pub(super) fn wallpaper_source(&self)->(PathBuf,String){(self.path.clone(),self.target.clone())}
     pub(super) fn changes(&self, values: &[String]) -> Result<Vec<String>> {
         appearance_edits(values,&self.palette)
     }
@@ -596,9 +597,48 @@ impl LayoutReview{
     }
 }
 
+#[derive(Deserialize)]
+pub(super) struct WallpaperPalettes {
+    schema:u32,
+    pub seed:String,
+    pub dark:std::collections::BTreeMap<String,String>,
+    pub light:std::collections::BTreeMap<String,String>,
+}
+fn parse_wallpaper_palettes(bytes:&[u8])->Result<WallpaperPalettes>{
+    let result:WallpaperPalettes=serde_json::from_slice(bytes)?;
+    if result.schema!=1{bail!("unsupported wallpaper palette schema");}
+    appearance_value("accent","Seed color",None,&result.seed)?;
+    for palette in [&result.dark,&result.light]{
+        if palette.len()!=9{bail!("incomplete wallpaper palette");}
+        for (key,_,title,range) in APPEARANCE_FIELDS{
+            if range.is_none() && *key!="fontFamily"{
+                let value=palette.get(*key).with_context(||format!("missing {key}"))?;
+                appearance_value(key,title,None,value)?;
+            }
+        }
+    }
+    Ok(result)
+}
+pub(super) fn wallpaper_palettes(path:&Path,target:&str,image:&str)->Result<WallpaperPalettes>{
+    if !Path::new(image).is_absolute() || image.chars().any(char::is_control){bail!("use an absolute local image path");}
+    let checkout=Checkout::open(path)?;
+    parse_wallpaper_palettes(&checkout.run(target,&["wallpaper-review","palette",image],"30s")?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_palette_requires_all_color_roles_and_no_other_keys(){
+        let palette:std::collections::BTreeMap<_,_>=APPEARANCE_FIELDS.iter().filter(|(key,_,_,range)|range.is_none()&&*key!="fontFamily").map(|(key,_,_,_)|(*key,"#123456")).collect();
+        let mut data=serde_json::json!({"schema":1,"seed":"#123456","dark":palette,"light":palette});
+        assert!(parse_wallpaper_palettes(&serde_json::to_vec(&data).unwrap()).is_ok());
+        data["dark"]["radius"]=serde_json::json!("#123456");
+        assert!(parse_wallpaper_palettes(&serde_json::to_vec(&data).unwrap()).is_err());
+        data["dark"].as_object_mut().unwrap().remove("radius");
+        data["light"]["accent"]=serde_json::json!("invalid");
+        assert!(parse_wallpaper_palettes(&serde_json::to_vec(&data).unwrap()).is_err());
+    }
     #[test]
     fn ordered_layout_pins_are_normalized_and_validated(){
         assert_eq!(layout_pins("Foot.desktop\nFirefox\n").unwrap(),vec!["foot","firefox"]);

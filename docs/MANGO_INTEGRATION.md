@@ -41,3 +41,7 @@ The Wallpapers page delegates to the reviewed Classic wallpaper API (Mango #20).
 ## Panel, dock and dashboard layout
 
 The Panel, dock & widgets page uses Mango #21’s reviewed layout API. Edit compact panel, date and active window title visibility, dock enable/fullscreen hiding, calendar/media/focus timer/system widgets and ordered application IDs. Unedited defaults are preserved, and a blank pin list removes fixed pins but not running applications. Draft reset and typed confirmation precede a fingerprint-bound recovery save. Panel/dock dimensions, typography and opacity remain in Appearance Studio. This is Classic-only offline editing, not drag-and-drop widget positioning or live preview. No new unsupported shell preferences are written.
+
+## Wallpaper-derived colors
+
+Appearance Studio can generate deterministic dark and light palettes from a local wallpaper using Mango #22 and optional python-pillow. The bounded image decoder and palette generator run in the trusted backend; the native Manager validates all nine returned color roles. Choosing a variant updates only the editable color draft, not wallpaper selection, typography or layout. Saving requires the existing reviewed appearance transaction. Generated colors target 4.5:1 contrast on opaque generated surfaces (border 3:1), not a complete accessibility certification. No live wallpaper tracking or automatic recoloring.
