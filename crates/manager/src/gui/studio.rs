@@ -62,6 +62,14 @@ pub(super) fn build()->gtk::Box {
         });
     }
     editor.append(&preview);
+    editor.append(&label("Portable custom themes","title-3"));
+    editor.append(&label("Import populates the draft only. Export saves a data-only JSON theme to a new file; no wallpaper, executable or private configuration is included.","dim-label"));
+    let theme_path=gtk::Entry::new();theme_path.set_placeholder_text(Some("Absolute .json theme path"));editor.append(&theme_path);
+    let theme_name=gtk::Entry::new();theme_name.set_placeholder_text(Some("Name for exported theme"));editor.append(&theme_name);
+    let portable=gtk::Box::new(gtk::Orientation::Horizontal,8);
+    let import=gtk::Button::with_label("Import into draft");
+    let export=gtk::Button::with_label("Export draft");
+    portable.append(&import);portable.append(&export);editor.append(&portable);
     let approval=gtk::Entry::new();approval.set_placeholder_text(Some("Type apply appearance"));editor.append(&approval);
     let apply=gtk::Button::with_label("Save reviewed appearance");apply.add_css_class("suggested-action");editor.append(&apply);
     form.append(&editor);
@@ -96,6 +104,52 @@ pub(super) fn build()->gtk::Box {
                 if let Some(field)=field.upgrade(){field.set_text(&field_text(&review.palette[*key]));}
             }
             if let Some(status)=status.upgrade(){status.set_text("Draft reset to the loaded baseline. No settings changed.");}
+        });
+    }
+    {
+        let (form,status,path,name,approval)=(form.downgrade(),status.downgrade(),theme_path.downgrade(),theme_name.downgrade(),approval.downgrade());
+        let fields:Vec<_>=fields.iter().map(|e|e.downgrade()).collect();
+        import.connect_clicked(move|_|{
+            let (Some(form_widget),Some(message),Some(path))=(form.upgrade(),status.upgrade(),path.upgrade())else{return;};
+            let path=PathBuf::from(path.text().trim());
+            form_widget.set_sensitive(false);message.set_text("Validating portable theme…");
+            let (form,status,name,approval,fields)=(form.clone(),status.clone(),name.clone(),approval.clone(),fields.clone());
+            background(move||rice::import_theme(&path),move|result|{
+                if let Some(status)=status.upgrade(){
+                    match result{
+                        Ok((title,values))=>{
+                            for (field,value) in fields.iter().zip(values){
+                                if let (Some(field),Some(value))=(field.upgrade(),value){field.set_text(&value);}
+                            }
+                            if let Some(name)=name.upgrade(){name.set_text(&title);}
+                            if let Some(approval)=approval.upgrade(){approval.set_text("");}
+                            status.set_text("Imported into draft only. Review colors and explicitly save to apply.");
+                        }
+                        Err(e)=>status.set_text(&format!("Import rejected: {e:#}")),
+                    }
+                }
+                if let Some(form)=form.upgrade(){form.set_sensitive(true);}
+            });
+        });
+    }
+    {
+        let (form,status,path,name)=(form.downgrade(),status.downgrade(),theme_path.downgrade(),theme_name.downgrade());
+        let fields:Vec<_>=fields.iter().map(|e|e.downgrade()).collect();
+        let state=state.clone();
+        export.connect_clicked(move|_|{
+            let (Some(form_widget),Some(message),Some(path),Some(name))=(form.upgrade(),status.upgrade(),path.upgrade(),name.upgrade())else{return;};
+            let Some(values)=fields.iter().map(|e|e.upgrade().map(|e|e.text().to_string())).collect::<Option<Vec<_>>>()else{return;};
+            let Some(baseline)=state.borrow().as_ref().map(|r|r.palette.clone())else{return;};
+            let path=PathBuf::from(path.text().trim());let name=name.text().trim().to_owned();
+            form_widget.set_sensitive(false);message.set_text("Exporting validated draft to a new file…");
+            let (form,status)=(form.clone(),status.clone());
+            background(move||rice::export_theme(&path,&name,&values,&baseline),move|result|{
+                if let Some(status)=status.upgrade(){match result{
+                    Ok(())=>status.set_text("Theme exported. Desktop settings unchanged."),
+                    Err(e)=>status.set_text(&format!("Export failed: {e:#}")),
+                }}
+                if let Some(form)=form.upgrade(){form.set_sensitive(true);}
+            });
         });
     }
     let invalidate={

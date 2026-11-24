@@ -189,3 +189,5 @@ The optional Live rice preview page uses the versioned Mango supervisor contract
 Appearance Studio now provides optional Classic palette and layout editing via the reviewed Mango appearance API; see [Mango integration](MANGO_INTEGRATION.md). Native appearance settings remain separately owned by Atelier Settings.
 
 Appearance Studio supports all nine Classic colors and bundled preset drafts, with reset and existing reviewed-save recovery. See [Mango integration](MANGO_INTEGRATION.md).
+
+Classic portable theme import/export is available in Appearance Studio. Themes contain validated appearance data only; importing never applies configuration, and export never overwrites an existing file.
