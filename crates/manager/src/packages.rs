@@ -149,7 +149,44 @@ fn snapshot(dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn parse_install_args(args: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut products = Vec::new();
+    let mut providers = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--provider" {
+            let id = rest.next().context("missing provider ID")?;
+            if !crate::wizard::PROVIDERS.contains(&id.as_str()) { bail!("unsupported provider: {id}"); }
+            if !providers.contains(id) { providers.push(id.clone()); }
+        } else if arg.starts_with('-') { bail!("unsupported install-packages option: {arg}"); }
+        else { products.push(arg.clone()); }
+    }
+    crate::catalog::resolve(&products)?;
+    Ok((products, providers))
+}
+
+/// Launch the existing interactive CLI in a real terminal. It recomputes
+/// dependencies and owns both typed approval and the sudo/pacman prompts.
+#[cfg(feature = "gui")]
+pub(super) fn terminal_install(products: Vec<String>, providers: Vec<String>) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !arch_family(&crate::report()) { bail!("package installation is currently limited to Arch-family systems"); }
+    let mut args = products;
+    for provider in providers { args.extend(["--provider".into(), provider]); }
+    parse_install_args(&args)?;
+    let manager = std::env::current_exe()?.canonicalize()?;
+    let mut terminals: Vec<(&str, &[&str])> = Vec::new();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() { terminals.push(("/usr/bin/foot", &["--hold"])); }
+    terminals.extend([("/usr/bin/konsole", &["--hold", "-e"][..]), ("/usr/bin/kitty", &["--hold"][..]), ("/usr/bin/xterm", &["-hold", "-e"][..])]);
+    let (terminal, prefix) = terminals.into_iter().find(|(path, _)| trusted_tool(path).is_ok())
+        .context("no supported system terminal found (foot, Konsole, kitty, xterm); use install-packages from an existing terminal")?;
+    let status = Command::new(terminal).args(prefix).arg(manager).arg("install-packages").args(&args).status()?;
+    if !status.success() { bail!("terminal exited with {status}; inspect package history and terminal output"); }
+    Ok(())
+}
+
 pub fn install(plan: &Plan, report: &Report, providers: &[String]) -> Result<()> {
+    if providers.iter().any(|id| !crate::wizard::PROVIDERS.contains(&id.as_str())) { bail!("unsupported provider"); }
     if !arch_family(report) { bail!("package installation is currently limited to Arch-family systems"); }
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -328,6 +365,16 @@ pub fn show_history(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn package_handoff_accepts_only_catalog_products_and_known_providers() {
+        let args = ["shell","--provider","media","--provider","audio"].map(str::to_owned);
+        let (products, providers) = parse_install_args(&args).unwrap();
+        assert_eq!(products, vec!["shell"]);
+        assert_eq!(providers, vec!["media","audio"]);
+        for invalid in [["shell","--provider","unknown"],["shell","--provider","--needed"],["shell","--bad","audio"]] {
+            assert!(parse_install_args(&invalid.map(str::to_owned)).is_err());
+        }
+    }
     use crate::catalog::PlanStep;
     use std::os::unix::process::ExitStatusExt;
     fn plan(id: &'static str, source: &'static str) -> Plan {
