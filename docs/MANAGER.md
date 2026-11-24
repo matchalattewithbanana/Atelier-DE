@@ -98,6 +98,17 @@ atelier-manager deployment-info DEPLOYMENT_ID
 
 Inventory schema 1 is derived directly from existing completion manifests and the current/previous selection record; it does not maintain a second registry. It includes staged bundles, requested and resolved product IDs, the staging manager version, source directory and artifact sizes/hashes. Missing selected directories are reported as invalid, not silently omitted. Inventory performs structural and size checks only. The individual deployment-info command verifies all hashes before emitting details. The recorded manager version is **not** the version of each copied binary; artifact hashes identify the actual copied bytes. No version probing, remote update check, download, package change or binary execution occurs. Source paths are local information; review JSON before sharing it. Independent product updates will build on these manifests.
 
+## Selective native updates (experimental)
+
+```sh
+atelier-manager update-plan --from target/release shell
+atelier-manager update --from target/release shell
+atelier-manager deployments
+atelier-manager activate DEPLOYMENT_ID
+```
+
+The update plan verifies the currently selected bundle and hashes candidate binaries without running them. It reports replacement, unchanged and retained artifacts. Selected products expand through their catalog dependencies and must already exist in the selected bundle. The confirmed update copies all artifacts into a new private deployment, rechecks each copied hash against the review and records the base deployment ID. A changed candidate or retained file aborts staging. An identical candidate creates no new bundle. The original remains selected; activation is a separate operation. The selection is rechecked before staging, but staging does not hold a selection lock or change the current selection. Mixed build runtime compatibility is not established by hashes; test nested before relying on the update. No network, packages, settings or live session changes occur. This is local build comparison, not semantic-version ordering or remote release discovery.
+
 ## Transaction history and recovery diagnostics
 
 ```sh

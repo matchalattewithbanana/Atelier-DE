@@ -276,6 +276,7 @@ fn main() -> Result<()> {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        [mode, flag, source, products @ ..] if (mode == "update" || mode == "update-plan") && flag == "--from" => deploy::update(Path::new(source), products, mode == "update-plan")?,
         [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => { deploy::run(Path::new(source), products)?; }
         [mode] if mode == "package-history" => packages::show_history(false)?,
         [mode, flag] if mode == "package-history" && flag == "--json" => packages::show_history(true)?,
@@ -294,7 +295,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
