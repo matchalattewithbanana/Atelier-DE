@@ -1,18 +1,31 @@
 //! User-session supervisor; owns only the child processes that it starts.
 
 use anyhow::{bail, Context, Result};
+mod profiles;
 use atelier_config::{component, config_path, Config};
 use std::{env, fs, os::unix::{fs::FileTypeExt, net::UnixStream}, path::PathBuf, process::{Child, Command}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::{Duration, Instant}};
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1).peekable();
     if args.peek().is_some_and(|arg| arg == "--help" || arg == "-h") {
-        println!("atelier-session (--nested | --native) [--no-shell | --shell-command PROGRAM [--shell-arg ARG]...]\nStarts an Atelier session with the default shell, no shell, or an explicitly selected external shell. Native mode is experimental and requires a spare local TTY.");
+        println!("atelier-session (--nested | --native) [--no-shell | --shell-command PROGRAM [--shell-arg ARG]... | --profile NAME]\natelier-session --list-profiles\nStarts an Atelier session with the default shell, no shell, or an explicitly selected external shell. Native mode is experimental and requires a spare local TTY.");
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--list-profiles") {
+        args.next();
+        if args.next().is_some() { bail!("--list-profiles must be used alone"); }
+        let profiles = profiles::load()?;
+        if profiles.is_empty() { println!("No saved shell profiles."); }
+        for (name, shell) in profiles { println!("{name}: {}", shell.program); }
         return Ok(());
     }
     let options = Options::parse(args)?;
     let config = Config::load(&config_path()?)?;
-    let shell = options.shell.or_else(|| {
+    let explicit = match options.profile.as_deref() {
+        Some(name) => Some(profiles::selected(name)?),
+        None => options.shell,
+    };
+    let shell = explicit.or_else(|| {
         if !options.no_shell && config.start_shell { Some(Shell { program: "atelier-shell".into(), args: Vec::new() }) } else { None }
     });
     let running = Arc::new(AtomicBool::new(true));
@@ -93,17 +106,19 @@ impl Drop for Children {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct Shell { program: String, args: Vec<String> }
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Shell { program: String, #[serde(default)] args: Vec<String> }
 
 #[derive(Debug)]
-struct Options { backend: &'static str, no_shell: bool, shell: Option<Shell> }
+struct Options { backend: &'static str, no_shell: bool, shell: Option<Shell>, profile: Option<String> }
 
 impl Options {
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut backend = None;
         let mut no_shell = false;
         let mut shell = None;
+        let mut profile = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--nested" | "--native" => {
@@ -111,14 +126,18 @@ impl Options {
                     backend = Some(if arg == "--nested" { "--nested" } else { "--native" });
                 }
                 "--no-shell" => {
-                    if no_shell || shell.is_some() { bail!("select exactly one shell profile"); }
+                    if no_shell || shell.is_some() || profile.is_some() { bail!("select exactly one shell profile"); }
                     no_shell = true;
                 }
                 "--shell-command" => {
-                    if no_shell || shell.is_some() { bail!("select exactly one shell profile"); }
+                    if no_shell || shell.is_some() || profile.is_some() { bail!("select exactly one shell profile"); }
                     let program = args.next().context("--shell-command requires an executable")?;
                     if program.trim().is_empty() || program.starts_with('-') { bail!("invalid shell executable"); }
                     shell = Some(Shell { program, args: Vec::new() });
+                }
+                "--profile" => {
+                    if no_shell || shell.is_some() || profile.is_some() { bail!("select exactly one shell profile"); }
+                    profile = Some(args.next().context("--profile requires a name")?);
                 }
                 "--shell-arg" => {
                     let profile = shell.as_mut().context("--shell-arg requires a preceding --shell-command")?;
@@ -127,7 +146,7 @@ impl Options {
                 other => bail!("unknown argument {other}"),
             }
         }
-        Ok(Self { backend: backend.context("select --nested or --native")?, no_shell, shell })
+        Ok(Self { backend: backend.context("select --nested or --native")?, no_shell, shell, profile })
     }
 }
 
@@ -142,11 +161,12 @@ mod tests {
         assert_eq!(opts.backend, "--nested");
         assert_eq!(opts.shell.unwrap(), Shell { program: "quickshell".into(), args: vec!["-c".into(), "my profile".into()] });
         assert!(parse(&["--native", "--no-shell"]).unwrap().no_shell);
+        assert_eq!(parse(&["--nested", "--profile", "classic"]).unwrap().profile.as_deref(), Some("classic"));
     }
 
     #[test]
     fn rejects_conflicting_or_incomplete_options() {
-        for args in [vec!["--nested", "--native"], vec!["--nested", "--no-shell", "--shell-command", "foo"], vec!["--nested", "--shell-arg", "foo"], vec!["--nested", "--shell-command"], vec![]] {
+        for args in [vec!["--nested", "--native"], vec!["--nested", "--no-shell", "--shell-command", "foo"], vec!["--nested", "--shell-arg", "foo"], vec!["--nested", "--shell-command"], vec!["--nested", "--profile", "classic", "--no-shell"], vec!["--nested", "--profile", "classic", "--shell-arg", "bad"], vec![]] {
             assert!(parse(&args).is_err(), "accepted {args:?}");
         }
     }
