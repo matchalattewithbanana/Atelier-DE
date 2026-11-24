@@ -18,10 +18,13 @@ pub struct Appearance {
     pub show_notifications:bool,
     pub show_audio:bool,
     pub show_terminal:bool,
+    pub dock_enabled:bool,
+    pub dock_icon_size:u32,
+    pub dock_pins:Vec<String>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_icon_size:32,dock_pins:Vec::new()}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -29,9 +32,10 @@ impl Appearance{
         if !self.accent.is_empty() && !(self.accent.len()==7 && self.accent.starts_with('#') && self.accent.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)){
             bail!("accent must be blank (system default) or #RRGGBB");
         }
-        for (name,value,min,max) in [("Panel minimum height",self.panel_height,32,80),("Panel spacing",self.panel_spacing,0,24),("Button radius",self.button_radius,0,24),("Launcher icon size",self.launcher_icon_size,16,64)]{
+        for (name,value,min,max) in [("Panel minimum height",self.panel_height,32,80),("Panel spacing",self.panel_spacing,0,24),("Button radius",self.button_radius,0,24),("Launcher icon size",self.launcher_icon_size,16,64),("Dock icon size",self.dock_icon_size,16,64)]{
             if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
         }
+        validate_dock_pins(&self.dock_pins)?;
         Ok(())
     }
     pub fn load(path:&Path)->Result<Self>{decode(read(path)?.as_deref())}
@@ -45,8 +49,23 @@ impl Appearance{
             let foreground=if (l+0.05)/0.05>=1.05/(l+0.05){"#000000"}else{"#ffffff"};
             css.push_str(&format!(" .atelier-panel button.suggested-action, .atelier-launcher button.suggested-action {{ background-image: none; background-color: {}; color: {}; }}",self.accent,foreground));
         }
+        css.push_str(&format!(" .atelier-dock {{ background: @theme_bg_color; border-radius: {}px; padding: 6px; }} .atelier-dock button {{ border-radius: {}px; padding: 6px; }}",self.button_radius,self.button_radius));
         Ok(css)
     }
+}
+/// Desktop entry IDs are case-sensitive, not executable names or paths.
+pub fn validate_dock_pins(pins:&[String])->Result<()>{
+    let mut seen=std::collections::HashSet::new();
+    if pins.len()>32{bail!("At most 32 pinned applications");}
+    for id in pins{
+        if id.len()>256 || !id.ends_with(".desktop") || id.len()<=8
+            || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            || !id.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'))
+            || !seen.insert(id){
+            bail!("Invalid or duplicate desktop application ID: {id}");
+        }
+    }
+    Ok(())
 }
 pub fn appearance_path()->Result<PathBuf>{Ok(crate::config_path()?.with_file_name("appearance.toml"))}
 fn read(path:&Path)->Result<Option<Vec<u8>>>{
@@ -115,6 +134,17 @@ mod tests{
         assert_eq!(Appearance::load(&path).unwrap(),next);
         let previous=a.previous().unwrap();a.save(previous).unwrap();
         assert_eq!(a.previous().unwrap(),next);
+    }
+    #[test]
+    fn dock_pins_round_trip_and_validate(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let next=Appearance{dock_enabled:true,dock_pins:vec!["org.gnome.Nautilus.desktop".into(),"firefox.desktop".into()],dock_icon_size:40,..Appearance::default()};
+        review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
+        for pins in [vec!["/bin/sh".into()],vec!["firefox.desktop".into(),"firefox.desktop".into()],vec![".desktop".into()]]{
+            assert!(Appearance{dock_pins:pins,..Appearance::default()}.validate().is_err());
+        }
+        assert!(!decode(Some(b"version = 1\n")).unwrap().dock_enabled);
     }
     #[test]
     fn validation_prevents_css_injection_and_invalid_geometry(){

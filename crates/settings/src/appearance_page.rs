@@ -8,15 +8,19 @@ use super::description;
 struct Fields{
     accent:gtk::Entry,height:gtk::SpinButton,spacing:gtk::SpinButton,radius:gtk::SpinButton,icons:gtk::SpinButton,
     toggles:Vec<gtk::CheckButton>,
+    dock:gtk::CheckButton,dock_icons:gtk::SpinButton,pins:gtk::TextView,
 }
 impl Fields{
     fn populate(&self,p:&Appearance){
         self.accent.set_text(&p.accent);
+        self.dock.set_active(p.dock_enabled);self.dock_icons.set_value(p.dock_icon_size as f64);self.pins.buffer().set_text(&p.dock_pins.join("\n"));
         for (field,value) in [(&self.height,p.panel_height),(&self.spacing,p.panel_spacing),(&self.radius,p.button_radius),(&self.icons,p.launcher_icon_size)]{field.set_value(value as f64);}
         for (field,value) in self.toggles.iter().zip([p.show_date,p.show_battery,p.show_media,p.show_notifications,p.show_audio,p.show_terminal]){field.set_active(value);}
     }
     fn collect(&self)->Appearance{
-        Appearance{accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
+        let buffer=self.pins.buffer();let pins=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
+        Appearance{dock_enabled:self.dock.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
+            dock_pins:pins.lines().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect(),accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
             button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
             show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
             show_notifications:self.toggles[3].is_active(),show_audio:self.toggles[4].is_active(),show_terminal:self.toggles[5].is_active(),..Appearance::default()}
@@ -35,7 +39,35 @@ pub fn build(parent:&gtk::Box){
     let radius=spin(parent,"Button radius",0.0,24.0);
     let icons=spin(parent,"Launcher icon size",16.0,64.0);
     let toggles:Vec<_>=["Show date","Show battery","Show media button","Show notifications button","Show audio button","Show terminal button"].iter().map(|title|{let field=gtk::CheckButton::with_label(title);parent.append(&field);field}).collect();
-    let fields=Fields{accent,height,spacing,radius,icons,toggles};
+    parent.append(&super::heading("Application dock"));
+    parent.append(&description("Optional bottom dock in panel mode. Pins launch applications, not running windows. On external desktops disable any overlapping dock yourself."));
+    let dock=gtk::CheckButton::with_label("Enable bottom application dock");parent.append(&dock);
+    let dock_icons=spin(parent,"Dock icon size",16.0,64.0);
+    parent.append(&description("Choose an installed application to append, or edit the exact case-sensitive desktop IDs below. Order is left to right."));
+    let picker=gtk::ComboBoxText::new();picker.set_hexpand(true);
+    let mut apps:Vec<_>=gtk::gio::AppInfo::all().into_iter().filter(|app|app.should_show()).collect();
+    apps.sort_by_key(|app|app.display_name().to_lowercase());
+    let mut seen=std::collections::HashSet::new();
+    for app in apps{
+        if let Some(id)=app.id(){
+            if id.ends_with(".desktop") && seen.insert(id.to_string()){
+                picker.append(Some(&id),&format!("{} ({id})",app.display_name()));
+            }
+        }
+    }
+    let add=gtk::Button::with_label("Add pin");
+    let row=gtk::Box::new(gtk::Orientation::Horizontal,8);row.append(&picker);row.append(&add);parent.append(&row);
+    let pins=gtk::TextView::new();pins.set_monospace(true);pins.set_wrap_mode(gtk::WrapMode::WordChar);
+    parent.append(&gtk::ScrolledWindow::builder().child(&pins).min_content_height(100).build());
+    {let picker=picker.downgrade();let pins=pins.downgrade();add.connect_clicked(move |_|{
+        let (Some(picker),Some(pins))=(picker.upgrade(),pins.upgrade())else{return;};
+        let Some(id)=picker.active_id()else{return;};let buffer=pins.buffer();
+        let text=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
+        if !text.lines().any(|line|line.trim()==id.as_str()){
+            let text=text.trim_end();buffer.set_text(&if text.is_empty(){id.to_string()}else{format!("{text}\n{id}")});
+        }
+    });}
+    let fields=Fields{accent,height,spacing,radius,icons,toggles,dock,dock_icons,pins};
     let status=description("Load saved appearance to begin.");status.set_selectable(true);
     let reload=gtk::Button::with_label("Load saved appearance");
     let defaults=gtk::Button::with_label("Preview defaults");

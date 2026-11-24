@@ -11,6 +11,9 @@ mod panel;
 mod workspace_backend;
 #[cfg(feature = "layer-panel")]
 mod notification_toast;
+#[cfg(feature = "layer-panel")]
+mod dock;
+mod applications;
 
 fn main() -> glib::ExitCode {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
@@ -104,8 +107,7 @@ fn build_shell(app: &gtk::Application) {
 
     let search = gtk::Entry::new(); search.set_placeholder_text(Some("Search installed applications")); content.append(&search);
     let list = gtk::ListBox::new(); list.set_selection_mode(gtk::SelectionMode::None); list.add_css_class("boxed-list");
-    let mut apps: Vec<_> = gio::AppInfo::all().into_iter().filter(|app| app.should_show()).collect();
-    apps.sort_by_key(|app| app.display_name().to_lowercase());
+    let apps = applications::installed();
     let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     for app_info in apps {
@@ -120,8 +122,7 @@ fn build_shell(app: &gtk::Application) {
         item.append(&icon); item.append(&label); button.set_child(Some(&item)); row.set_child(Some(&button));
         let message = status.clone();
         button.connect_clicked(move |_| {
-            let context = gtk::gdk::Display::default().map(|display| display.app_launch_context());
-            match app_info.launch(&[], context.as_ref()) {
+            match applications::launch(&app_info) {
                 Ok(()) => message.set_text("Application launched."),
                 Err(error) => message.set_text(&format!("Could not launch application: {error}")),
             }
