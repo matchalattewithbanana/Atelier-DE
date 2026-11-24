@@ -150,6 +150,10 @@ cargo run -p atelier-compositor --features native-session -- --native --socket w
 
 Launch a native Wayland client with that socket from another terminal in the same user's session. Do not run as root or in your daily graphical session.
 
+### Experimental layer-shell
+
+Both compositors expose `zwlr_layer_shell_v1`, arrange layer surfaces with anchor/margin/exclusive-zone information, render background/bottom/top/overlay layers around ordinary windows, and deliver frame callbacks. Grid tiling uses the non-exclusive output region. Layer surfaces may receive keyboard focus on click when requested; automatic exclusive keyboard grabs and secure session locking are not implemented. The native GTK shell remains an ordinary application until its layer-shell client integration lands.
+
 ## Verification
 
 ```sh
