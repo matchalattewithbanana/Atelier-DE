@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 mod catalog;
 mod wizard;
 mod packages;
+mod deploy;
 use serde::Serialize;
 use std::{env, fs, io::{self, Read}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -167,7 +168,8 @@ fn main() -> Result<()> {
             let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager packages PRODUCT [PRODUCT...] [--json]\nRead-only inventory and planning; no setup or package changes."),
+        [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => deploy::run(Path::new(source), products)?,
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\nSetup is preview-only; stage copies trusted local binaries after confirmation."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
