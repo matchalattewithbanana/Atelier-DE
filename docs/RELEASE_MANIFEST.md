@@ -71,3 +71,12 @@ atelier-manager release-update CACHE_ID --key-id KEY_ID
 ```
 
 The signed cached bundle determines the update scope (for example, a release containing only shell). All declared artifacts must already belong to the current deployment. The manager fully verifies the base deployment and cached release, previews replacement/unchanged/retained artifacts, and requires typed approval. It rechecks trust and release sequence under the trust lock, refuses a changed selected base at staging start and copies only reviewed hashes into a new complete deployment. Unchanged/retained components are copied from the verified base, not fetched again. No changed bytes means no new deployment or sequence acceptance. Release provenance explicitly lists covered artifacts; retained artifacts are not claimed to be signed by this release. The base deployment ID preserves lineage, so future cleanup must account for referenced ancestors if provenance history is to remain available. This is not a cryptographic attestation of the entire mixed bundle; activation and rollback remain separate local operations. Late storage failure can advance acceptance without completing staging. No mixed-build compatibility guarantee or live remote acceptance testing yet.
+
+## Release cache maintenance
+
+```sh
+atelier-manager release-cache
+atelier-manager release-cache remove CACHE_ID
+```
+
+Fetch reuses an existing cache only when exact signed manifest and signature bytes match and current trust and all artifact hashes verify. The cache lock serializes cooperating fetch, staging, update and removal operations (including approval prompts). Inventory is read-only and structural, not an authenticity check. Removal requires a valid ID and typed confirmation, renames the cache out of its namespace and deletes it without following symlinks. Deployed copies, selection and trust records are untouched. A crash can leave a removed-* quarantine directory, not a usable cache; automated orphan cleanup is not yet implemented. Older manager binaries and manual modifications do not participate in the lock.

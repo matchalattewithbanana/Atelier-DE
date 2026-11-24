@@ -179,6 +179,28 @@ fn recovery_at(root: &Path) -> Result<serde_json::Value> {
     }))
 }
 
+fn cleanup_report(root: &Path) -> Result<serde_json::Value> {
+    let report = inventory(root)?;
+    let referenced: BTreeSet<_> = report.deployments.iter().filter_map(|entry| {
+        entry.manifest.as_ref()?.base_deployment.as_deref()
+    }).collect();
+    let uncertain = report.deployments.iter().any(|entry| entry.manifest.is_none());
+    let entries: Vec<_> = report.deployments.iter().map(|entry| {
+        let reason = if entry.role == "current" || entry.role == "previous" { "selected-or-rollback" }
+            else if referenced.contains(entry.id.as_str()) { "referenced-base" }
+            else if uncertain { "inventory-incomplete" }
+            else { "unreferenced-runtime-unknown" };
+        let bytes = entry.manifest.as_ref().map(|m| m.artifacts.iter().map(|a| a.bytes).sum::<u64>());
+        serde_json::json!({"id":entry.id,"role":entry.role,"bytes":bytes,"protection":reason,"removable":false})
+    }).collect();
+    Ok(serde_json::json!({"schema":1,"deployments":entries,
+        "note":"Read-only planning. Running sessions may use any prior bundle; deletion remains disabled until runtime-use tracking is available."}))
+}
+pub fn cleanup_plan() -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&cleanup_report(&data_root()?)?)?);
+    Ok(())
+}
+
 pub fn list(json: bool) -> Result<()> {
     let inventory = inventory(&data_root()?)?;
     if json {
@@ -292,6 +314,21 @@ mod tests {
         switch(root, &second, "deployment-A").unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
+    }
+    #[test]
+    fn cleanup_report_protects_selection_and_referenced_bases() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for id in ["deployment-A","deployment-B","deployment-C"] { fixture(root,id,b"test"); }
+        let file = root.join("deployment-C/manifest.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        value["base_deployment"] = serde_json::json!("deployment-A");
+        fs::write(&file,serde_json::to_vec(&value).unwrap()).unwrap();
+        switch(root,&Selection::default(),"deployment-B").unwrap();
+        let report = cleanup_report(root).unwrap();
+        assert_eq!(report["deployments"][0]["protection"],"referenced-base");
+        assert_eq!(report["deployments"][1]["protection"],"selected-or-rollback");
+        assert_eq!(report["deployments"][2]["removable"],false);
     }
     #[test]
     fn recovery_checks_current_and_previous_independently() {

@@ -1,5 +1,7 @@
 //! Fetch authenticated release assets into isolated, non-installed cache bundles.
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, env, fs::{self, File, OpenOptions}, io::{self, IsTerminal, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
 use crate::{deploy, discovery::{self, ApiAsset, Asset}, trust, release::ReleaseManifest};
@@ -78,8 +80,18 @@ pub fn run(choice: &str, id: &str, key: &str, prerelease: bool) -> Result<()> {
     let release = trust::check_candidate(&bytes, &sig, key)?;
     let assets = binary_assets(&metadata.assets, &release)?;
     if assets.iter().any(|(_, a)| a.id == manifest.id || a.id == signature.id) { bail!("duplicate asset ID"); }
+    let root = cache_root()?;
+    deploy::ensure_root(&root)?;
+    let _lock = cache_lock(&root)?;
+    if let Some(path) = reusable(&root, &bytes, &sig, key)? {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "schema":1,"cache":path,"release_id":id,"version":release.version,"key_id":key,
+            "status":"verified-cache-reused","note":"Revalidate before acceptance or installation."
+        }))?);
+        return Ok(());
+    }
     eprintln!("Authenticated release {}: downloading {} signed artifacts into an isolated cache.", release.version, assets.len());
-    let path = download_bundle(&cache_root()?, &bytes, &sig, &release, &assets,
+    let path = download_bundle(&root, &bytes, &sig, &release, &assets,
         |asset, output| discovery::download(repo, asset, output),
         |bin| trust::check_candidate(&bytes, &sig, key)?.verify_local(bin))?;
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
@@ -105,7 +117,7 @@ pub fn stage_cached(id: &str, key: &str) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive staging requires a terminal"); }
     if !valid_cache_id(id) { bail!("expected cache ID release-... (the final directory name from release-fetch)"); }
     let root = cache_root()?;
-    cache_directory(&root)?;
+    let _lock = cache_lock(&root)?;
     let path = root.join(id);
     cache_directory(&path)?;
     let bin = path.join("bin");
@@ -133,6 +145,7 @@ pub fn update_cached(id: &str, key: &str) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive update requires a terminal"); }
     if !valid_cache_id(id) { bail!("expected cache ID release-..."); }
     let root = cache_root()?;
+    let _lock = cache_lock(&root)?;
     let path = root.join(id);
     let bin = path.join("bin");
     for dir in [&root, &path, &bin] { cache_directory(dir)?; }
@@ -152,6 +165,122 @@ pub fn update_cached(id: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+
+fn cache_lock(root: &Path) -> Result<File> {
+    cache_directory(root)?;
+    let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(root.join("cache.lock"))?;
+    let m = file.metadata()?;
+    if !m.is_file() || m.uid() != nix::unistd::Uid::effective().as_raw() || m.permissions().mode() & 0o022 != 0 {
+        bail!("unsafe cache lock");
+    }
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+fn cache_ids(root: &Path) -> Result<Vec<String>> {
+    match fs::symlink_metadata(root) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+        Ok(_) => cache_directory(root)?,
+    }
+    let mut ids = BTreeSet::new();
+    for entry in fs::read_dir(root)? {
+        if let Ok(id) = entry?.file_name().into_string() {
+            if valid_cache_id(&id) { ids.insert(id); }
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+fn cached_metadata(path: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+    cache_directory(path)?;
+    cache_directory(&path.join("bin"))?;
+    Ok((crate::release::bounded_file(&path.join("manifest.json"), 64 * 1024)?,
+        crate::release::bounded_file(&path.join("manifest.sig"), 16 * 1024)?))
+}
+fn reusable(root: &Path, bytes: &[u8], sig: &[u8], key: &str) -> Result<Option<PathBuf>> {
+    for id in cache_ids(root)? {
+        let path = root.join(id);
+        if let Ok((old, old_sig)) = cached_metadata(&path) {
+            if old == bytes && old_sig == sig {
+                // An invalid cached copy must never prevent a fresh acquisition.
+                let release = trust::check_candidate(bytes, sig, key)?;
+                if release.verify_local(&path.join("bin")).is_ok() { return Ok(Some(path)); }
+            }
+        }
+    }
+    Ok(None)
+}
+#[derive(Serialize)]
+struct CacheEntry {
+    id: String,
+    status: &'static str,
+    bytes: Option<u64>,
+    error: Option<String>,
+}
+fn inspect_cache(path: &Path) -> Result<u64> {
+    let (bytes, sig) = cached_metadata(path)?;
+    let release: ReleaseManifest = serde_json::from_slice(&bytes)?;
+    release.validate_host()?;
+    let bin = path.join("bin");
+    let names = fs::read_dir(&bin)?.map(|entry| {
+        entry?.file_name().into_string().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid artifact name"))
+    }).collect::<io::Result<BTreeSet<_>>>()?;
+    let expected = release.artifacts.iter().map(|a| a.name.clone()).collect::<BTreeSet<_>>();
+    if names != expected { bail!("unexpected or missing cached artifacts"); }
+    let mut total = (bytes.len() + sig.len()) as u64;
+    for artifact in &release.artifacts {
+        let m = fs::symlink_metadata(bin.join(&artifact.name))?;
+        if !m.is_file() || m.uid() != nix::unistd::Uid::effective().as_raw() || m.permissions().mode() & 0o022 != 0
+            || m.len() != artifact.bytes || m.permissions().mode() & 0o111 == 0 {
+            bail!("unsafe or invalid cached artifact: {}", artifact.name);
+        }
+        total = total.checked_add(m.len()).context("cache size overflow")?;
+    }
+    Ok(total)
+}
+pub fn list_cache() -> Result<()> {
+    let root = cache_root()?;
+    let entries: Vec<_> = cache_ids(&root)?.into_iter().map(|id| {
+        match inspect_cache(&root.join(&id)) {
+            Ok(bytes) => CacheEntry { id, status: "structural-check-passed", bytes: Some(bytes), error: None },
+            Err(error) => CacheEntry { id, status: "invalid-or-incomplete", bytes: None, error: Some(format!("{error:#}")) },
+        }
+    }).collect();
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "schema":1,"entries":entries,"note":"Sizes are logical artifact and metadata bytes, not disk allocation. No signature or hash verification."
+    }))?);
+    Ok(())
+}
+fn remove_entry(root: &Path, id: &str) -> Result<()> {
+    if !valid_cache_id(id) { bail!("invalid cache ID"); }
+    let path = root.join(id);
+    cache_directory(&path)?;
+    // Rename out of the cache namespace before deletion; do not follow symlinks.
+    let quarantine = tempfile::Builder::new().prefix("removed-").tempdir_in(root)?;
+    fs::rename(&path, quarantine.path().join("bundle"))?;
+    File::open(root)?.sync_all()?;
+    quarantine.close()?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+pub fn remove_cache(id: &str) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive cache removal requires a terminal"); }
+    if !valid_cache_id(id) { bail!("invalid cache ID"); }
+    let root = cache_root()?;
+    let _lock = cache_lock(&root)?;
+    let path = root.join(id);
+    cache_directory(&path)?;
+    println!("Remove cached release {id}? Installed deployments and trust records remain untouched.");
+    print!("Type 'remove cache' to proceed: "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "remove cache" { println!("Cancelled."); return Ok(()); }
+    remove_entry(&root, id)?;
+    println!("Cache removed.");
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +296,22 @@ mod tests {
         ])).unwrap();
         let assets = binary_assets(&api, &release).unwrap();
         (release, assets)
+    }
+    #[test]
+    fn cache_removal_is_scoped_and_does_not_follow_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("keep"), b"keep").unwrap();
+        let dir = root.path().join("release-A");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("release-B")).unwrap();
+        let _lock = cache_lock(root.path()).unwrap();
+        assert!(remove_entry(root.path(), "release-B").is_err());
+        assert!(remove_entry(root.path(), "../release-A").is_err());
+        remove_entry(root.path(), "release-A").unwrap();
+        assert!(!dir.exists());
+        assert!(outside.path().join("keep").exists());
     }
     #[test]
     fn cache_ids_cannot_escape_storage() {
