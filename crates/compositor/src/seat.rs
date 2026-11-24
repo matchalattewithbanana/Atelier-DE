@@ -12,7 +12,7 @@ fn tty_allowed(tty: bool, session: Option<&str>, graphical: bool) -> bool {
     tty && session == Some("tty") && !graphical
 }
 
-pub fn check(check_gbm: bool) -> Result<()> {
+pub fn check(check_gbm: bool, _render: bool) -> Result<()> {
     let graphical = std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("WAYLAND_SOCKET").is_some();
     if !tty_allowed(std::io::stdin().is_terminal(), std::env::var("XDG_SESSION_TYPE").ok().as_deref(), graphical) {
         bail!("seat check requires a local text login (XDG_SESSION_TYPE=tty), with no graphical display environment");
@@ -47,7 +47,7 @@ pub fn check(check_gbm: bool) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("seat denied {}: {error}", device.display()))?;
     let allocation_result = if check_gbm {
         #[cfg(feature = "native-gbm")]
-        { crate::gbm_check::check(&fd) }
+        { crate::gbm_check::check(&fd, _render) }
         #[cfg(not(feature = "native-gbm"))]
         { Err(anyhow::anyhow!("GBM support is disabled")) }
     } else { Ok(()) };
@@ -59,7 +59,7 @@ pub fn check(check_gbm: bool) -> Result<()> {
         (Ok(()), Ok(())) => {}
     }
     println!("Seat-mediated DRM open and close succeeded: {}", device.display());
-    println!("No display mode was changed. EGL rendering, KMS presentation and input dispatch remain unimplemented.");
+    println!("No display mode was changed. KMS presentation and input dispatch remain unimplemented.");
     Ok(())
 }
 
