@@ -24,7 +24,20 @@ fn main() -> Result<()> {
             };
             audio_action(Direction::parse(direction)?, device, action)?;
         }
-        [arg] if arg == "--help" || arg == "-h" => println!("atelier-services power | media | audio\natelier-services media-action PLAYER play|pause|play-pause|next|previous\natelier-services audio-action output|input DEVICE volume PERCENT|mute on|off|default\nVersioned snapshots and explicit controls; audio requires pactl."),
+        [arg] if arg == "network" => println!("{}", serde_json::to_string(&atelier_services::network::network_snapshot()?)?),
+        [arg] if arg == "wifi" => println!("{}", serde_json::to_string(&atelier_services::network::wifi_snapshot(false)?)?),
+        [arg, flag] if arg == "wifi" && flag == "--rescan" => println!("{}", serde_json::to_string(&atelier_services::network::wifi_snapshot(true)?)?),
+        [mode, action, value] if mode == "network-action" => {
+            use atelier_services::network::{network_action, NetworkAction};
+            let action = match action.as_str() {
+                "wifi" if value == "on" || value == "off" => NetworkAction::Wifi(value == "on"),
+                "activate" => NetworkAction::Activate(value.clone()),
+                "deactivate" => NetworkAction::Deactivate(value.clone()),
+                _ => bail!("expected wifi on|off, activate UUID, or deactivate UUID"),
+            };
+            network_action(action)?;
+        }
+        [arg] if arg == "--help" || arg == "-h" => println!("atelier-services power | media | audio | network | wifi [--rescan]\natelier-services media-action PLAYER play|pause|play-pause|next|previous\natelier-services audio-action output|input DEVICE volume PERCENT|mute on|off|default\natelier-services network-action wifi on|off | activate UUID | deactivate UUID\nVersioned snapshots and explicit controls; optional providers require their respective tools."),
         _ => bail!("usage: atelier-services --help"),
     }
     Ok(())
