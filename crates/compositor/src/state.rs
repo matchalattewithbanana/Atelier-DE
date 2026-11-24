@@ -41,6 +41,7 @@ pub struct Atelier {
     active_workspace: usize,
     parked: [Vec<(Window, Point<i32, Logical>)>; 4],
     focused: Option<Window>,
+    scene_dirty: bool,
 }
 
 impl Atelier {
@@ -62,13 +63,17 @@ impl Atelier {
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(),
-            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None,
+            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
     }
+
+    #[cfg(feature = "native-session")]
+    pub fn take_scene_dirty(&mut self) -> bool { std::mem::take(&mut self.scene_dirty) }
 
     pub fn resize(&mut self, width: i32, height: i32) {
         let mode = Mode { size: (width, height).into(), refresh: 60_000 };
         if self.output.current_mode() != Some(mode) {
+            self.scene_dirty = true;
             let previous = self.output.current_mode();
             self.output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(1)), Some((0, 0).into()));
             self.output.set_preferred(mode);
@@ -93,6 +98,7 @@ impl Atelier {
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
+        self.scene_dirty = true;
         self.focused = window.clone();
         if let Some(window) = &window { self.space.raise_element(window, true); }
         for candidate in self.space.elements() {
@@ -160,6 +166,7 @@ impl Atelier {
     }
 
     fn unmap(&mut self, window: &Window) {
+        self.scene_dirty = true;
         for hidden in &mut self.parked { hidden.retain(|(candidate, _)| candidate != window); }
         let had_focus = self.focused.as_ref() == Some(window);
         self.space.unmap_elem(window);
@@ -185,6 +192,7 @@ impl CompositorHandler for Atelier {
         &client.get_data::<ClientState>().expect("Atelier client data").compositor
     }
     fn commit(&mut self, surface: &WlSurface) {
+        self.scene_dirty = true;
         on_commit_buffer_handler::<Self>(surface);
         self.popups.commit(surface);
         if !is_sync_subsurface(surface) {
