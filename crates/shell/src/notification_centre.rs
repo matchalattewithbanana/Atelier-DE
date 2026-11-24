@@ -7,11 +7,11 @@ use std::{cell::RefCell, rc::Rc, process::Command, sync::mpsc, time::Duration};
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct Notice { id: u32, app: String, summary: String, body: String }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Snapshot { schema: u32, instance: String, active: Vec<Notice>, history: Vec<Notice> }
-enum Request { Dismiss(String, u32), Clear(String), Refresh }
+struct Snapshot { schema: u32, instance: String, dnd: bool, active: Vec<Notice>, history: Vec<Notice> }
+enum Request { Dismiss(String, u32), Clear(String), Dnd(String, bool), Refresh }
 struct Reply { snapshot: Result<Snapshot, String>, action_error: Option<String> }
 
-fn call(args: &[&str]) -> Result<String, String> {
+pub(crate) fn call(args: &[&str]) -> Result<String, String> {
     let helper = component("atelier-notifications");
     let output = Command::new("timeout").args(["--kill-after=1s", "3s"]).arg(helper.get_program())
         .args(args).output().map_err(|error| error.to_string())?;
@@ -49,7 +49,8 @@ pub fn show(app: &gtk::Application) {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let clear = gtk::Button::with_label("Clear closed history"); clear.set_sensitive(false);
     let refresh = gtk::Button::with_label("Refresh");
-    actions.append(&clear); actions.append(&refresh); root.append(&actions);
+    let dnd = gtk::Button::with_label("Do Not Disturb"); dnd.set_sensitive(false);
+    actions.append(&clear); actions.append(&refresh); actions.append(&dnd); root.append(&actions);
     let text = gtk::TextView::new(); text.set_editable(false); text.set_cursor_visible(false); text.set_wrap_mode(gtk::WrapMode::WordChar);
     text.buffer().set_text("Active notifications and closed history appear here.");
     let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&text).build(); root.append(&scroll);
@@ -63,6 +64,7 @@ pub fn show(app: &gtk::Application) {
             let result = match incoming.recv_timeout(Duration::from_secs(3)) {
                 Ok(Request::Dismiss(instance, id)) => call(&["dismiss", &instance, &id.to_string()]),
                 Ok(Request::Clear(instance)) => call(&["clear-history", &instance]),
+                Ok(Request::Dnd(instance, enabled)) => call(&["dnd", &instance, if enabled { "on" } else { "off" }]),
                 Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
@@ -81,6 +83,12 @@ pub fn show(app: &gtk::Application) {
     clear.connect_clicked(move |_| {
         if let Some(snapshot) = current.borrow().as_ref() {
             if sender.try_send(Request::Clear(snapshot.instance.clone())).is_err() { message.set_text("Notification service busy."); }
+        }
+    });
+    let current = Rc::clone(&state); let sender = requests.clone(); let message = status.clone();
+    dnd.connect_clicked(move |_| {
+        if let Some(snapshot) = current.borrow().as_ref() {
+            if sender.try_send(Request::Dnd(snapshot.instance.clone(), !snapshot.dnd)).is_err() { message.set_text("Notification service busy."); }
         }
     });
     let sender = requests.clone();
@@ -103,13 +111,14 @@ pub fn show(app: &gtk::Application) {
                         if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) && !snapshot.active.is_empty() { choice.set_active(Some(0)); }
                         text.buffer().set_text(&format!("ACTIVE ({})\n{}\n\nCLOSED HISTORY ({})\n{}", snapshot.active.len(), format_notices(&snapshot.active), snapshot.history.len(), format_notices(&snapshot.history)));
                         dismiss.set_sensitive(!snapshot.active.is_empty()); clear.set_sensitive(!snapshot.history.is_empty());
+                        dnd.set_sensitive(true); dnd.set_label(if snapshot.dnd { "Do Not Disturb: On" } else { "Do Not Disturb: Off" });
                         *state.borrow_mut() = Some(snapshot);
                     }
                     status.set_text(reply.action_error.as_deref().unwrap_or("Atelier inbox · content stays in session memory"));
                 }
                 Err(error) => {
                     *state.borrow_mut() = None;
-                    choice.remove_all(); dismiss.set_sensitive(false); clear.set_sensitive(false);
+                    choice.remove_all(); dismiss.set_sensitive(false); clear.set_sensitive(false); dnd.set_sensitive(false);
                     text.buffer().set_text("No Atelier inbox available. Your existing notification service is untouched.");
                     status.set_text(&format!("Atelier notification service unavailable: {error}"));
                 }
