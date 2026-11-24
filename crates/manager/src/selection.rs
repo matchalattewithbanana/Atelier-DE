@@ -651,7 +651,17 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(held,"managed-in-use");
-        assert_eq!(runtime_status(tmp.path()),"no-managed-lease");
+        // Other tests can fork while the shared descriptor is open. CLOEXEC
+        // closes their transient copy only at exec, not at fork. Wait for
+        // that bounded transition; a persistent leaked lease still fails.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let status = runtime_status(tmp.path());
+            if status == "no-managed-lease" { break; }
+            assert_eq!(status, "managed-in-use");
+            assert!(std::time::Instant::now() < deadline, "lease persisted after child exit");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     #[test]
     fn product_launch_is_catalog_restricted() {
