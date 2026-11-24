@@ -3,6 +3,7 @@
 use atelier_config::{component, config_path, Config};
 use gtk::{gio, glib, prelude::*};
 use std::process::Command;
+mod media_controls;
 #[cfg(feature = "layer-panel")]
 mod panel;
 #[cfg(feature = "layer-panel")]
@@ -71,7 +72,11 @@ fn build_shell(app: &gtk::Application) {
         Ok(mut child) => { std::thread::spawn(move || { let _ = child.wait(); }); message.set_text("Settings opened."); }
         Err(error) => message.set_text(&format!("Could not open Settings: {error}")),
     });
-    shortcuts.append(&terminal); shortcuts.append(&settings); content.append(&shortcuts);
+    shortcuts.append(&terminal); shortcuts.append(&settings);
+    let media = gtk::Button::with_label("Media"); media.set_hexpand(true);
+    let app_ref = app.downgrade();
+    media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { media_controls::show(&app); } });
+    shortcuts.append(&media); content.append(&shortcuts);
 
     let search = gtk::Entry::new(); search.set_placeholder_text(Some("Search installed applications")); content.append(&search);
     let list = gtk::ListBox::new(); list.set_selection_mode(gtk::SelectionMode::None); list.add_css_class("boxed-list");
