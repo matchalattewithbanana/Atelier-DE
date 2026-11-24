@@ -23,6 +23,10 @@ jobs:
         run: cargo +stable check --workspace --all-targets
       - name: Test workspace
         run: cargo +stable test --workspace
+      - name: Test graphical manager and GTK smoke
+        run: |
+          cargo +stable test -p atelier-manager --features gui
+          dbus-run-session -- xvfb-run -a cargo +stable test -p atelier-manager --features gui gui::tests::gtk_window_smoke -- --ignored
       - name: Isolated notification D-Bus smoke
         run: |
           cargo +stable build -p atelier-notifications

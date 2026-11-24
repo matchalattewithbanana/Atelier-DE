@@ -146,3 +146,12 @@ atelier-manager deployment-remove DEPLOYMENT_ID --offline
 ```
 
 Close all applications and sessions using the target bundle, including direct/legacy launches. Use a manager from another deployment or an independent build. Do not run older managers concurrently. Offline means the user confirms no target runtime use, not a network disconnection or a verified system-wide logout. The command requires a terminal and an exact ID-specific confirmation. It rechecks selection, all inventory records, base references, artifact hashes, and an exclusive runtime lease while holding the lifecycle lock shared with staging and activation. It refuses the current or previous deployment, referenced bases, incomplete inventory, the running manager's own bundle, managed runtime use, and unknown files. It renames the bundle into a private quarantine and removes only known flat files and empty directories; interrupted removal can leave a quarantine for manual inspection. No recursive deployment deletion, automatic cleanup, package changes, trust changes, or settings deletion. Runtime locks cannot detect unmanaged processes or older software, and users must keep the target offline throughout removal.
+
+## Graphical manager (preview)
+
+```sh
+cargo build -p atelier-manager --features gui
+./target/debug/atelier-manager --gui
+```
+
+The optional GTK4 frontend runs on an existing graphical desktop without Atelier compositor protocols. The default CLI build remains GTK-free. Overview, products, deployments, recovery, storage and publisher trust are backed directly by the existing manager's read-only operations; inspection runs off the GTK thread, and refresh errors are shown without silently declaring success. Initial views are loaded on selection and can be refreshed explicitly. Product detection is executable presence, deployment and cache inventories are structural, and recovery hashes current and previous deployments. No setup, network download, trust mutation, removal, rollback or activation is triggered by this preview. Continue to use the CLI for confirmed operations. Graphical installation and update controls, appearance integration, packaging and actual desktop acceptance are future work. GTK4 development libraries are required to build the GUI.

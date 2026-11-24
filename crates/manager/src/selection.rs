@@ -128,20 +128,20 @@ fn switch(root: &Path, reviewed: &Selection, target: &str, historical: bool) -> 
     write_selection(root, &Selection { schema: 1, current: Some(target.to_owned()), previous: current.current })
 }
 #[derive(Debug, Serialize)]
-struct Inventory {
+pub(super) struct Inventory {
     schema: u32,
-    current: Option<String>,
-    previous: Option<String>,
-    deployments: Vec<InventoryEntry>,
+    pub current: Option<String>,
+    pub previous: Option<String>,
+    pub deployments: Vec<InventoryEntry>,
 }
 #[derive(Debug, Serialize)]
-struct InventoryEntry {
-    id: String,
-    role: &'static str,
-    status: &'static str,
-    manifest: Option<Manifest>,
-    resolved_products: Vec<&'static str>,
-    error: Option<String>,
+pub(super) struct InventoryEntry {
+    pub id: String,
+    pub role: &'static str,
+    pub status: &'static str,
+    pub manifest: Option<Manifest>,
+    pub resolved_products: Vec<&'static str>,
+    pub error: Option<String>,
 }
 
 fn inventory(root: &Path) -> Result<Inventory> {
@@ -399,8 +399,10 @@ pub fn cleanup_plan() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn snapshot() -> Result<Inventory> { inventory(&data_root()?) }
+
 pub fn list(json: bool) -> Result<()> {
-    let inventory = inventory(&data_root()?)?;
+    let inventory = snapshot()?;
     if json {
         println!("{}", serde_json::to_string_pretty(&inventory)?);
         return Ok(());
