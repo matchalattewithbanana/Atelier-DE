@@ -6,6 +6,8 @@ mod layout;
 mod hardware;
 #[cfg(feature = "native-seat")]
 mod seat;
+#[cfg(feature = "native-gbm")]
+mod gbm_check;
 
 use anyhow::{bail, Context, Result};
 use atelier_config::{config_path, Config};
@@ -17,23 +19,32 @@ fn main() -> Result<()> {
     let mut nested = false;
     let mut probe = false;
     let mut check_seat = false;
+    let mut check_gbm = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--nested" => nested = true,
             "--probe-hardware" => probe = true,
             "--check-seat" => check_seat = true,
+            "--check-gbm" => check_gbm = true,
             "--socket" => socket = Some(args.next().context("--socket requires a name")?),
             "--help" | "-h" => {
-                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
+                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\natelier-compositor --check-gbm (requires native-gbm feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
                 return Ok(());
             }
             other => bail!("unknown argument {other}"),
         }
     }
+    if check_gbm {
+        if nested || probe || check_seat || socket.is_some() { bail!("--check-gbm cannot be combined with other modes"); }
+        #[cfg(feature = "native-gbm")]
+        return seat::check(true);
+        #[cfg(not(feature = "native-gbm"))]
+        bail!("rebuild with --features native-gbm to check GPU allocation");
+    }
     if check_seat {
         if nested || probe || socket.is_some() { bail!("--check-seat cannot be combined with other modes"); }
         #[cfg(feature = "native-seat")]
-        return seat::check();
+        return seat::check(false);
         #[cfg(not(feature = "native-seat"))]
         bail!("rebuild with --features native-seat to check a seat");
     }
