@@ -1,0 +1,29 @@
+name: Native desktop checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils
+      - name: Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: Check workspace
+        run: cargo +stable check --workspace --all-targets
+      - name: Test workspace
+        run: cargo +stable test --workspace
+      - name: Build nested session binaries
+        run: cargo +stable build -p atelier-compositor -p atelier-session
+      - name: Nested Wayland smoke
+        run: xvfb-run -a bash scripts/nested-smoke.sh
