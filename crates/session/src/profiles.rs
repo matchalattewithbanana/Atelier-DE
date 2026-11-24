@@ -43,6 +43,12 @@ fn file_path() -> Result<PathBuf> {
 pub fn load() -> Result<BTreeMap<String, Shell>> {
     use std::io::Read;
     let path = file_path()?;
+    match fs::metadata(&path) {
+        Ok(metadata) if !metadata.is_file() => bail!("session profile path is not a regular file"),
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
