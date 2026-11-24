@@ -23,6 +23,10 @@ fn value(path: &Path, key: &str) -> Option<String> {
     if value.is_empty() { None } else { Some(value.to_owned()) }
 }
 
+pub fn system_power_snapshot() -> io::Result<PowerSnapshot> {
+    power_snapshot(Path::new("/sys/class/power_supply"))
+}
+
 pub fn power_snapshot(root: &Path) -> io::Result<PowerSnapshot> {
     let mut result = PowerSnapshot { schema: 1, batteries: Vec::new(), external_power: None };
     for entry in fs::read_dir(root)? {
