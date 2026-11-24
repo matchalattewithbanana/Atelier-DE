@@ -581,8 +581,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lease = lease_file(tmp.path(),true).unwrap();
         FileExt::lock_shared(&lease).unwrap();
-        inherit_lease(&lease).unwrap();
-        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        // Keep CLOEXEC in the multithreaded test runner. Otherwise concurrent
+        // subprocesses (e.g. ssh-keygen) can inherit this unrelated lease.
+        let fd = lease.as_raw_fd();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        // SAFETY: only async-signal-safe fcntl calls in the forked child.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
         drop(lease);
         let held = runtime_status(tmp.path());
         child.kill().unwrap();
