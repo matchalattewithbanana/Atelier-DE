@@ -128,6 +128,30 @@ pub fn stage_cached(id: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn update_cached(id: &str, key: &str) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive update requires a terminal"); }
+    if !valid_cache_id(id) { bail!("expected cache ID release-..."); }
+    let root = cache_root()?;
+    let path = root.join(id);
+    let bin = path.join("bin");
+    for dir in [&root, &path, &bin] { cache_directory(dir)?; }
+    let bytes = crate::release::bounded_file(&path.join("manifest.json"), 64 * 1024)?;
+    let signature = crate::release::bounded_file(&path.join("manifest.sig"), 16 * 1024)?;
+    let release = trust::check_candidate(&bytes, &signature, key)?;
+    release.verify_local(&bin)?;
+    let Some(plan) = deploy::review_signed_update(&bin, &release, key)? else { return Ok(()); };
+    println!("The whole signed component bundle is accepted. Retained components may be local builds; mixed-build compatibility is not established.");
+    println!("The active deployment remains unchanged. Release provenance applies only to the listed signed artifacts.");
+    print!("Type 'stage update' to proceed: "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "stage update" { println!("Cancelled."); return Ok(()); }
+    for dir in [&root, &path, &bin] { cache_directory(dir)?; }
+    let staged = trust::update_authenticated(&bytes, &signature, key, plan)?;
+    println!("Authenticated update staged at {}. Activate separately.", staged.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
