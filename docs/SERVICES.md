@@ -10,7 +10,7 @@ An independent Rust component for desktop-independent system information. It doe
 
 A desktop without a battery returns an empty array. Unknown fields are null; an unreadable inventory returns an error rather than falsely reporting no battery. Multiple system batteries are reported separately rather than averaged. Known peripheral batteries are excluded. The implementation uses Linux power-supply sysfs as a read-only baseline and does not claim UPower support or power-control authority.
 
-Consumers can link the Rust library or use the versioned CLI from another language. No autostart or persistent daemon is required for this initial provider. Future providers should remain independent, use standard desktop interfaces where appropriate, and distinguish unavailable data from negative values. Power actions, notifications and network providers are future work.
+Consumers can link the Rust library or use the versioned CLI from another language. No autostart or persistent daemon is required for this initial provider. Future providers should remain independent, use standard desktop interfaces where appropriate, and distinguish unavailable data from negative values. Power actions and notifications are future work.
 
 ## Media
 
@@ -36,3 +36,19 @@ atelier-services audio-action output DEVICE default
 ```
 
 The snapshot includes named inputs and outputs, the current default IDs when available, channel volume percentages and mute state. Conventional monitor sources are marked separately. Unknown values are null; invalid inventory is an error. Existing amplified volumes can be displayed, but Atelier's absolute volume commands are limited to 0–100% and apply to all channels. Controls validate a fresh device inventory and accept only named devices and explicit actions. Default changes are delegated to the audio server; existing streams are not explicitly moved. A UI must run these bounded subprocess calls outside its event thread.
+
+
+## Networking
+
+The optional NetworkManager provider uses `nmcli` and coreutils `timeout`. Devices, saved connections (UUID, name, type), Wi-Fi radio status and access points are represented as schema-1 JSON. Access point inventory reads the existing cache unless an explicit rescan is requested. Terse output escapes are decoded rather than splitting raw colons in SSIDs or MAC addresses.
+
+```sh
+atelier-services network
+atelier-services wifi
+atelier-services wifi --rescan
+atelier-services network-action wifi on
+atelier-services network-action activate CONNECTION_UUID
+atelier-services network-action deactivate CONNECTION_UUID
+```
+
+Actions are explicit and affect the current system network; NetworkManager and its authorization policy remain in control. Atelier requests no sudo, never reads or stores network passwords and never modifies or deletes connection profiles. Activation is limited to discovered saved UUIDs and can fail if authentication or authorization is required. New protected network setup and secret-agent integration remain future work. No connectivity probes or external requests are made by the inventory provider.
