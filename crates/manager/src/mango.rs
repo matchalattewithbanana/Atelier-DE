@@ -2,7 +2,7 @@
 use anyhow::{bail, Context, Result};
 use std::{fs, io::{self, IsTerminal, Write}, path::Path, process::Command};
 
-const API: &str = "mango-atelier-setup-v1";
+pub(super) const API: &str = "mango-atelier-setup-v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode { Setup, Plan, Rollback }
 

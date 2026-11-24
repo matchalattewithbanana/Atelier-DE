@@ -7,6 +7,7 @@ mod setup;
 mod deployment;
 mod updates;
 mod maintenance;
+mod rices;
 
 #[derive(Clone, Copy, Debug)]
 enum Page { Overview, Products, Deployments, Recovery, Storage, Security }
@@ -244,6 +245,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     }
     stack.add_titled(&setup::build(), Some("setup"), "Installation");
     stack.add_titled(&updates::build(), Some("updates"), "Updates");
+    stack.add_titled(&rices::build(), Some("rices"), "Rices");
     window.set_child(Some(&layout));
     window
 }

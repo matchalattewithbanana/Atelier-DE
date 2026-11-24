@@ -7,6 +7,8 @@ mod deploy;
 mod selection;
 mod session;
 mod mango;
+#[cfg(feature = "gui")]
+mod rice;
 mod release;
 mod trust;
 mod discovery;
