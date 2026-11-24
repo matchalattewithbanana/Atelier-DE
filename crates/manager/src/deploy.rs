@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, env, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
 use crate::catalog;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Artifact { pub name: String, pub bytes: u64, pub sha256: String }
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Manifest {
@@ -14,9 +14,12 @@ pub(super) struct Manifest {
     pub source: PathBuf,
     pub products: Vec<String>,
     pub artifacts: Vec<Artifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_deployment: Option<String>,
 }
 
-pub struct StagePlan { source: PathBuf, root: PathBuf, products: Vec<String>, binaries: Vec<&'static str> }
+struct StageArtifact { name: String, source: PathBuf, reviewed: Option<Artifact> }
+pub struct StagePlan { source: PathBuf, root: PathBuf, products: Vec<String>, binaries: Vec<StageArtifact>, base_deployment: Option<String> }
 
 pub(super) fn data_root() -> Result<PathBuf> {
     let base = env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
@@ -41,7 +44,10 @@ impl StagePlan {
         }
         let binaries: BTreeSet<_> = products.iter().flat_map(|product| product.binaries.iter().copied()).collect();
         for name in &binaries { verify_source(&source.join(name))?; }
-        Ok(Self { source, root, products: ids.to_vec(), binaries: binaries.into_iter().collect() })
+        let binaries = binaries.into_iter().map(|name| StageArtifact {
+            name: name.into(), source: source.join(name), reviewed: None,
+        }).collect();
+        Ok(Self { source, root, products: ids.to_vec(), binaries, base_deployment: None })
     }
 }
 
@@ -53,12 +59,11 @@ pub(super) fn ensure_root(root: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn copy_artifact(source: &Path, destination: &Path, name: &str) -> Result<Artifact> {
+fn read_artifact(source: &Path, name: &str, mut output: impl Write) -> Result<Artifact> {
     verify_source(source)?;
     let mut input = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(source)?;
     let metadata = input.metadata()?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 { bail!("source changed during staging"); }
-    let mut output = OpenOptions::new().write(true).create_new(true).mode(0o700).open(destination)?;
     let mut digest = Sha256::new();
     let mut bytes = 0u64;
     let mut buffer = [0u8; 64 * 1024];
@@ -71,8 +76,13 @@ fn copy_artifact(source: &Path, destination: &Path, name: &str) -> Result<Artifa
         digest.update(&buffer[..count]);
     }
     if bytes == 0 || bytes != metadata.len() { bail!("artifact changed while copying"); }
-    output.sync_all()?;
     Ok(Artifact { name: name.to_owned(), bytes, sha256: format!("{:x}", digest.finalize()) })
+}
+fn copy_artifact(source: &Path, destination: &Path, name: &str) -> Result<Artifact> {
+    let mut output = OpenOptions::new().write(true).create_new(true).mode(0o700).open(destination)?;
+    let artifact = read_artifact(source, name, &mut output)?;
+    output.sync_all()?;
+    Ok(artifact)
 }
 fn stage(plan: StagePlan) -> Result<PathBuf> {
     ensure_root(&plan.root)?;
@@ -80,11 +90,15 @@ fn stage(plan: StagePlan) -> Result<PathBuf> {
     let bin = pending.path().join("bin");
     fs::create_dir(&bin)?;
     let mut artifacts = Vec::new();
-    for name in &plan.binaries {
-        artifacts.push(copy_artifact(&plan.source.join(name), &bin.join(name), name)?);
+    for item in &plan.binaries {
+        let artifact = copy_artifact(&item.source, &bin.join(&item.name), &item.name)?;
+        if item.reviewed.as_ref().is_some_and(|expected| expected != &artifact) {
+            bail!("artifact changed after review: {}", item.name);
+        }
+        artifacts.push(artifact);
     }
     File::open(&bin)?.sync_all()?;
-    let manifest = Manifest { schema: 1, manager_version: env!("CARGO_PKG_VERSION").into(), source: plan.source, products: plan.products, artifacts };
+    let manifest = Manifest { schema: 1, manager_version: env!("CARGO_PKG_VERSION").into(), source: plan.source, products: plan.products, artifacts, base_deployment: plan.base_deployment };
     // The manifest is the completion marker; interrupted partial directories
     // without this marker are not considered valid deployments.
     let mut marker = tempfile::NamedTempFile::new_in(pending.path())?;
@@ -99,7 +113,7 @@ fn stage(plan: StagePlan) -> Result<PathBuf> {
 // This operation never changes the selection.
 fn review_and_stage(plan: StagePlan, input: &mut impl io::BufRead, out: &mut impl Write) -> Result<Option<String>> {
     writeln!(out, "Stage native Atelier binaries from {} into a new private deployment under {}", plan.source.display(), plan.root.display())?;
-    for name in &plan.binaries { writeln!(out, "  {name}")?; }
+    for item in &plan.binaries { writeln!(out, "  {}", item.name)?; }
     writeln!(out, "No existing installation, PATH, session, package or configuration will be modified. The source must be a trusted local build.")?;
     write!(out, "Stage these files? [y/N] ")?; out.flush()?;
     let mut answer = String::new(); input.read_line(&mut answer)?;
@@ -118,6 +132,80 @@ pub fn run(source: &Path, ids: &[String]) -> Result<Option<String>> {
     if nix::unistd::Uid::effective().is_root() { bail!("run staging as your desktop user, not root or sudo"); }
     let plan = StagePlan::prepare(source, data_root()?, ids)?;
     review_and_stage(plan, &mut io::stdin().lock(), &mut io::stdout().lock())
+}
+
+
+#[derive(Debug, Serialize)]
+struct Change {
+    name: String,
+    action: &'static str,
+    before: Artifact,
+    after: Artifact,
+}
+#[derive(Debug, Serialize)]
+struct UpdatePreview {
+    schema: u32,
+    base_deployment: String,
+    source: PathBuf,
+    changes: Vec<Change>,
+}
+fn update_plan(source: &Path, root: PathBuf, id: String, base: Manifest, ids: &[String]) -> Result<(StagePlan, UpdatePreview)> {
+    let source = source.canonicalize().context("resolve trusted candidate build directory")?;
+    if !source.is_dir() { bail!("source must be a directory"); }
+    let selected = catalog::resolve(ids)?;
+    if selected.iter().any(|p| !matches!(p.source, "atelier-de" | "aggregate")) {
+        bail!("only native products can be updated");
+    }
+    let targets: BTreeSet<_> = selected.iter().flat_map(|p| p.binaries.iter().copied()).collect();
+    if targets.iter().any(|name| !base.artifacts.iter().any(|a| a.name == *name)) {
+        bail!("update only supports products already in the selected deployment; stage a new bundle to add products");
+    }
+    let mut binaries = Vec::new();
+    let mut changes = Vec::new();
+    for old in base.artifacts {
+        let retained = root.join(&id).join("bin").join(&old.name);
+        let (action, path, expected) = if targets.contains(old.name.as_str()) {
+            let candidate = source.join(&old.name);
+            let next = read_artifact(&candidate, &old.name, io::sink())?;
+            if next == old { ("unchanged", retained, old.clone()) } else { ("replace", candidate, next) }
+        } else {
+            ("retain", retained, old.clone())
+        };
+        binaries.push(StageArtifact { name: old.name.clone(), source: path, reviewed: Some(expected.clone()) });
+        changes.push(Change { name: old.name.clone(), action, before: old, after: expected });
+    }
+    let preview = UpdatePreview { schema: 1, base_deployment: id.clone(), source: source.clone(), changes };
+    Ok((StagePlan { source, root, products: base.products, binaries, base_deployment: Some(id) }, preview))
+}
+
+pub fn update(source: &Path, ids: &[String], preview_only: bool) -> Result<()> {
+    if !preview_only && nix::unistd::Uid::effective().is_root() { bail!("run updates as your desktop user, not root"); }
+    let root = data_root()?;
+    let (id, base) = crate::selection::verified_current(&root)?;
+    let (plan, preview) = update_plan(source, root, id, base, ids)?;
+    if preview_only {
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+        return Ok(());
+    }
+    println!("Update preview for {} from {}", preview.base_deployment, preview.source.display());
+    for change in &preview.changes {
+        println!("  {}: {} ({} -> {} bytes)", change.name, change.action, change.before.bytes, change.after.bytes);
+    }
+    if !preview.changes.iter().any(|change| change.action == "replace") {
+        println!("No candidate binary changes; nothing staged.");
+        return Ok(());
+    }
+    println!("The new bundle preserves all other components. Mixed build compatibility is not guaranteed.");
+    println!("No selection, running session, settings or packages will be modified.");
+    print!("Stage this update? [y/N] "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        println!("Update cancelled."); return Ok(());
+    }
+    crate::selection::require_current(&plan.root, &preview.base_deployment)?;
+    let path = stage(plan)?;
+    println!("Update staged at {}. Review and activate explicitly; the current deployment remains selected.", path.display());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -162,6 +250,32 @@ mod tests {
         let id = review_and_stage(plan, &mut io::Cursor::new("yes\n"), &mut Vec::new()).unwrap().unwrap();
         assert!(root.join(id).join("manifest.json").is_file());
         assert!(!root.join("selection.json").exists());
+    }
+    #[test]
+    fn selective_update_preserves_other_artifacts_and_rejects_changed_candidates() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for name in ["atelier-shell", "atelier-settings"] { artifact(original.path(), name); }
+        let ids = vec!["shell".into(), "settings".into()];
+        let old_path = stage(StagePlan::prepare(original.path(), root.path().to_owned(), &ids).unwrap()).unwrap();
+        let id = old_path.file_name().unwrap().to_str().unwrap().to_owned();
+        let base = || serde_json::from_reader::<_, Manifest>(File::open(old_path.join("manifest.json")).unwrap()).unwrap();
+        artifact(candidate.path(), "atelier-shell");
+        let (_, unchanged) = update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &["shell".into()]).unwrap();
+        assert!(unchanged.changes.iter().all(|c| c.action != "replace"));
+        fs::write(candidate.path().join("atelier-shell"), b"new shell").unwrap();
+        let (plan, preview) = update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &["shell".into()]).unwrap();
+        assert_eq!(preview.changes.iter().filter(|c| c.action == "replace").count(), 1);
+        let updated = stage(plan).unwrap();
+        assert_eq!(fs::read(updated.join("bin/atelier-settings")).unwrap(), b"fixture not executed");
+        assert_eq!(fs::read(updated.join("bin/atelier-shell")).unwrap(), b"new shell");
+        assert_eq!(fs::read(old_path.join("bin/atelier-shell")).unwrap(), b"fixture not executed");
+        let (plan, _) = update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &["shell".into()]).unwrap();
+        fs::write(candidate.path().join("atelier-shell"), b"changed after review").unwrap();
+        assert!(stage(plan).is_err());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        assert!(update_plan(candidate.path(), root.path().to_owned(), id, base(), &["session".into()]).is_err());
     }
     #[test]
     fn symlink_artifact_is_refused() {

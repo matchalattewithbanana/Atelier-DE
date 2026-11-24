@@ -184,6 +184,21 @@ pub fn info(id: &str) -> Result<()> {
     }))?);
     Ok(())
 }
+pub(super) fn verified_current(root: &Path) -> Result<(String, Manifest)> {
+    directory(root)?;
+    let id = load_selection(root)?.current.context("no selected deployment")?;
+    let verified = manifest(root, &id, true)?;
+    Ok((id, verified))
+}
+
+pub(super) fn require_current(root: &Path, expected: &str) -> Result<()> {
+    directory(root)?;
+    if load_selection(root)?.current.as_deref() != Some(expected) {
+        bail!("selected deployment changed during update review; retry");
+    }
+    Ok(())
+}
+
 pub fn verify(id: &str) -> Result<()> {
     manifest(&data_root()?, id, true)?;
     println!("Deployment {id}: all recorded artifacts verified.");
