@@ -108,3 +108,13 @@ atelier-manager activate DEPLOYMENT_ID
 ```
 
 The update plan verifies the currently selected bundle and hashes candidate binaries without running them. It reports replacement, unchanged and retained artifacts. Selected products expand through their catalog dependencies and must already exist in the selected bundle. The confirmed update copies all artifacts into a new private deployment, rechecks each copied hash against the review and records the base deployment ID. A changed candidate or retained file aborts staging. An identical candidate creates no new bundle. The original remains selected; activation is a separate operation. The selection is rechecked before staging, but staging does not hold a selection lock or change the current selection. Mixed build runtime compatibility is not established by hashes; test nested before relying on the update. No network, packages, settings or live session changes occur. This is local build comparison, not semantic-version ordering or remote release discovery.
+
+## Transaction history and recovery diagnostics
+
+```sh
+atelier-manager package-history
+atelier-manager package-history --json
+atelier-manager recovery-status
+```
+
+Package history reads existing checkpoints without creating directories or running commands. New transactions persist atomic outcome and final dependency-verification markers separately; a missing outcome can indicate interruption, while older records without a verification marker remain unknown rather than assumed successful. A missing after-inventory is reported independently. History is a historical record, not a current package-health check; entries are listed by ID, not chronology. Recovery-status emits schema-1 JSON with full hash checks of current and previous native deployments independently, structural failures of other bundles, and package transaction history. Backend errors are reported separately. No automatic repair, package rollback, native activation, deletion or Mango configuration restoration is performed. Mango recovery remains delegated to its installer. Review local paths and diagnostic data before sharing.
