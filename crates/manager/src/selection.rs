@@ -107,24 +107,81 @@ fn switch(root: &Path, reviewed: &Selection, target: &str) -> Result<()> {
     if current.current.as_deref() == Some(target) { return Ok(()); }
     write_selection(root, &Selection { schema: 1, current: Some(target.to_owned()), previous: current.current })
 }
-pub fn list() -> Result<()> {
-    let root = data_root()?;
-    match fs::symlink_metadata(&root) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => { println!("No deployments."); return Ok(()); }
+#[derive(Debug, Serialize)]
+struct Inventory {
+    schema: u32,
+    current: Option<String>,
+    previous: Option<String>,
+    deployments: Vec<InventoryEntry>,
+}
+#[derive(Debug, Serialize)]
+struct InventoryEntry {
+    id: String,
+    role: &'static str,
+    status: &'static str,
+    manifest: Option<Manifest>,
+    resolved_products: Vec<&'static str>,
+    error: Option<String>,
+}
+
+fn inventory(root: &Path) -> Result<Inventory> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Inventory {
+            schema: 1, current: None, previous: None, deployments: vec![],
+        }),
         Err(error) => return Err(error.into()),
-        Ok(_) => directory(&root)?,
+        Ok(_) => directory(root)?,
     }
-    let selection = load_selection(&root)?;
-    let mut ids: Vec<_> = fs::read_dir(&root)?.filter_map(|entry| entry.ok()).filter_map(|entry| entry.file_name().into_string().ok()).filter(|id| valid_id(id)).collect();
-    ids.sort();
-    for id in ids {
-        let marker = if selection.current.as_deref() == Some(&id) { "current" } else if selection.previous.as_deref() == Some(&id) { "previous" } else { "staged" };
-        match manifest(&root, &id, false) {
-            Ok(manifest) => println!("{id} [{marker}] — {}", manifest.products.join(", ")),
-            Err(error) => println!("{id} [{marker}] — incomplete or invalid: {error}"),
+    let selection = load_selection(root)?;
+    let mut ids = BTreeSet::new();
+    for entry in fs::read_dir(root)? {
+        if let Ok(id) = entry?.file_name().into_string() {
+            if valid_id(&id) { ids.insert(id); }
         }
     }
-    if let Some(id) = selection.current { println!("Selected deployment: {id}"); } else { println!("No selected deployment."); }
+    // Include selected IDs even if their directories have been removed.
+    ids.extend(selection.current.iter().chain(selection.previous.iter()).cloned());
+    let mut deployments = Vec::new();
+    for id in ids {
+        let role = if selection.current.as_deref() == Some(&id) { "current" }
+            else if selection.previous.as_deref() == Some(&id) { "previous" } else { "staged" };
+        let entry = match manifest(root, &id, false) {
+            Ok(manifest) => {
+                let resolved_products = catalog::resolve(&manifest.products)?.iter().map(|product| product.id).collect();
+                InventoryEntry { id, role, status: "structural-check-passed", manifest: Some(manifest), resolved_products, error: None }
+            }
+            Err(error) => InventoryEntry { id, role, status: "invalid-or-incomplete", manifest: None, resolved_products: vec![], error: Some(format!("{error:#}")) },
+        };
+        deployments.push(entry);
+    }
+    Ok(Inventory { schema: 1, current: selection.current, previous: selection.previous, deployments })
+}
+
+pub fn list(json: bool) -> Result<()> {
+    let inventory = inventory(&data_root()?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&inventory)?);
+        return Ok(());
+    }
+    if inventory.deployments.is_empty() { println!("No deployments."); }
+    for entry in inventory.deployments {
+        match entry.manifest {
+            Some(manifest) => println!("{} [{}] — {} (staged by manager {})", entry.id, entry.role, entry.resolved_products.join(", "), manifest.manager_version),
+            None => println!("{} [{}] — incomplete or invalid: {}", entry.id, entry.role, entry.error.as_deref().unwrap_or("unknown error")),
+        }
+    }
+    if let Some(id) = inventory.current { println!("Selected deployment: {id}"); } else { println!("No selected deployment."); }
+    println!("Inventory checks structure and size only; use verify ID for full artifact hashing.");
+    Ok(())
+}
+
+pub fn info(id: &str) -> Result<()> {
+    let manifest = manifest(&data_root()?, id, true)?;
+    let products: Vec<_> = catalog::resolve(&manifest.products)?.iter().map(|product| product.id).collect();
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "schema": 1, "id": id, "status": "hashes-verified",
+        "resolved_products": products, "manifest": manifest
+    }))?);
     Ok(())
 }
 pub fn verify(id: &str) -> Result<()> {
@@ -198,6 +255,27 @@ mod tests {
         switch(root, &second, "deployment-A").unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
+    }
+    #[test]
+    fn inventory_tracks_selection_and_missing_deployments_without_mutating() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("deployments");
+        assert!(inventory(&root).unwrap().deployments.is_empty());
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        fixture(&root, "deployment-A", b"one");
+        fixture(&root, "deployment-B", b"two");
+        switch(&root, &Selection::default(), "deployment-A").unwrap();
+        switch(&root, &load_selection(&root).unwrap(), "deployment-B").unwrap();
+        fs::remove_dir_all(root.join("deployment-A")).unwrap();
+        let report = inventory(&root).unwrap();
+        assert_eq!(report.current.as_deref(), Some("deployment-B"));
+        assert_eq!(report.previous.as_deref(), Some("deployment-A"));
+        assert_eq!(report.deployments[0].role, "previous");
+        assert_eq!(report.deployments[0].status, "invalid-or-incomplete");
+        assert_eq!(report.deployments[1].status, "structural-check-passed");
+        assert_eq!(report.deployments[1].resolved_products, vec!["shell"]);
+        assert_eq!(report.deployments[1].manifest.as_ref().unwrap().manager_version, "test");
     }
     #[test]
     fn session_launch_requires_a_verified_complete_selected_bundle() {

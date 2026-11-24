@@ -88,3 +88,12 @@ atelier-manager session-launch --nested --no-shell
 ```
 
 The manager resolves the selected deployment, verifies all recorded artifacts, and requires the supervisor and compositor (plus the shell unless explicitly disabled) inside that bundle. It launches the exact selected supervisor, not a PATH lookup, and hands process ownership to the supervisor. The readiness check only checks the bundle, host display environment and runtime-directory presence; it does not prove runtime compatibility. The existing desktop remains the graphical host. Rollback selects a previous deployment for the next launch, not the currently running session. Native TTY mode and display-manager registration remain gated on physical hardware and recovery acceptance; this command cannot start native DRM mode or create login entries.
+
+## Deployment inventory and build identity
+
+```sh
+atelier-manager deployments --json
+atelier-manager deployment-info DEPLOYMENT_ID
+```
+
+Inventory schema 1 is derived directly from existing completion manifests and the current/previous selection record; it does not maintain a second registry. It includes staged bundles, requested and resolved product IDs, the staging manager version, source directory and artifact sizes/hashes. Missing selected directories are reported as invalid, not silently omitted. Inventory performs structural and size checks only. The individual deployment-info command verifies all hashes before emitting details. The recorded manager version is **not** the version of each copied binary; artifact hashes identify the actual copied bytes. No version probing, remote update check, download, package change or binary execution occurs. Source paths are local information; review JSON before sharing it. Independent product updates will build on these manifests.

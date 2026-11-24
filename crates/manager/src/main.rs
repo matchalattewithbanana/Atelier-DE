@@ -277,12 +277,14 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => { deploy::run(Path::new(source), products)?; }
-        [mode] if mode == "deployments" => selection::list()?,
+        [mode] if mode == "deployments" => selection::list(false)?,
+        [mode, flag] if mode == "deployments" && flag == "--json" => selection::list(true)?,
+        [mode, id] if mode == "deployment-info" => selection::info(id)?,
         [mode, id] if mode == "verify" => selection::verify(id)?,
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
