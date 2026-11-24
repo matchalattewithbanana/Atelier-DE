@@ -58,6 +58,10 @@ pub fn build(app: &gtk::Application) {
     let battery = gtk::Label::new(None);
     battery.add_css_class("dim-label");
     bar.append(&clock); bar.append(&battery);
+    let media = gtk::Button::with_label("Media");
+    let app_ref = app.downgrade();
+    media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::media_controls::show(&app); } });
+    bar.append(&media);
     let terminal = gtk::Button::with_label("Terminal");
     let terminal_path = config.terminal.clone();
     terminal.connect_clicked(move |_| spawn(Command::new(&terminal_path)));
