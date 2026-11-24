@@ -12,7 +12,17 @@ fn tty_allowed(tty: bool, session: Option<&str>, graphical: bool) -> bool {
     tty && session == Some("tty") && !graphical
 }
 
-pub fn check(check_gbm: bool, _render: bool) -> Result<()> {
+pub enum Check {
+    Seat,
+    #[cfg(feature = "native-gbm")]
+    Gbm,
+    #[cfg(feature = "native-gbm")]
+    Render,
+    #[cfg(feature = "native-kms")]
+    Kms,
+}
+
+pub fn check(kind: Check) -> Result<()> {
     let graphical = std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("WAYLAND_SOCKET").is_some();
     if !tty_allowed(std::io::stdin().is_terminal(), std::env::var("XDG_SESSION_TYPE").ok().as_deref(), graphical) {
         bail!("seat check requires a local text login (XDG_SESSION_TYPE=tty), with no graphical display environment");
@@ -45,16 +55,19 @@ pub fn check(check_gbm: bool, _render: bool) -> Result<()> {
     // Device access is mediated by the seat provider; no direct opens or permission changes.
     let fd = session.open(device, rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC)
         .map_err(|error| anyhow::anyhow!("seat denied {}: {error}", device.display()))?;
-    let allocation_result = if check_gbm {
+    let diagnostic_result = match kind {
+        Check::Seat => Ok(()),
         #[cfg(feature = "native-gbm")]
-        { crate::gbm_check::check(&fd, _render) }
-        #[cfg(not(feature = "native-gbm"))]
-        { Err(anyhow::anyhow!("GBM support is disabled")) }
-    } else { Ok(()) };
+        Check::Gbm => crate::gbm_check::check(&fd, false),
+        #[cfg(feature = "native-gbm")]
+        Check::Render => crate::gbm_check::check(&fd, true),
+        #[cfg(feature = "native-kms")]
+        Check::Kms => crate::kms_check::check(&fd),
+    };
     // Always release the seat descriptor, including after allocation/export failure.
     let release_result = session.close(fd).map_err(|error| anyhow::anyhow!("release {}: {error}", device.display()));
-    match (allocation_result, release_result) {
-        (Err(allocation), Err(release)) => bail!("{allocation}; additionally failed to {release}"),
+    match (diagnostic_result, release_result) {
+        (Err(diagnostic), Err(release)) => bail!("{diagnostic}; additionally failed to {release}"),
         (Err(error), _) | (_, Err(error)) => return Err(error),
         (Ok(()), Ok(())) => {}
     }

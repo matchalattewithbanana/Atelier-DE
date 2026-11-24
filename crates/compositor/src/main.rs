@@ -8,6 +8,8 @@ mod hardware;
 mod seat;
 #[cfg(feature = "native-gbm")]
 mod gbm_check;
+#[cfg(feature = "native-kms")]
+mod kms_check;
 
 use anyhow::{bail, Context, Result};
 use atelier_config::{config_path, Config};
@@ -21,6 +23,7 @@ fn main() -> Result<()> {
     let mut check_seat = false;
     let mut check_gbm = false;
     let mut check_render = false;
+    let mut check_kms = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--nested" => nested = true,
@@ -28,32 +31,40 @@ fn main() -> Result<()> {
             "--check-seat" => check_seat = true,
             "--check-gbm" => check_gbm = true,
             "--check-render" => check_render = true,
+            "--check-kms" => check_kms = true,
             "--socket" => socket = Some(args.next().context("--socket requires a name")?),
             "--help" | "-h" => {
-                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\natelier-compositor --check-gbm (requires native-gbm feature and local text login)\natelier-compositor --check-render (requires native-gbm feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
+                println!("atelier-compositor --nested [--socket NAME]\natelier-compositor --probe-hardware\natelier-compositor --check-seat (requires native-seat feature and local text login)\natelier-compositor --check-gbm (requires native-gbm feature and local text login)\natelier-compositor --check-render (requires native-gbm feature and local text login)\natelier-compositor --check-kms (requires native-kms feature and local text login)\nDevelopment Wayland compositor (requires an existing Wayland or X11 session).");
                 return Ok(());
             }
             other => bail!("unknown argument {other}"),
         }
     }
+    if check_kms {
+        if nested || probe || check_seat || check_gbm || check_render || socket.is_some() { bail!("--check-kms cannot be combined with other modes"); }
+        #[cfg(feature = "native-kms")]
+        return seat::check(seat::Check::Kms);
+        #[cfg(not(feature = "native-kms"))]
+        bail!("rebuild with --features native-kms to query KMS topology");
+    }
     if check_render {
         if nested || probe || check_seat || check_gbm || socket.is_some() { bail!("--check-render cannot be combined with other modes"); }
         #[cfg(feature = "native-gbm")]
-        return seat::check(true, true);
+        return seat::check(seat::Check::Render);
         #[cfg(not(feature = "native-gbm"))]
         bail!("rebuild with --features native-gbm to check GPU rendering");
     }
     if check_gbm {
         if nested || probe || check_seat || socket.is_some() { bail!("--check-gbm cannot be combined with other modes"); }
         #[cfg(feature = "native-gbm")]
-        return seat::check(true, false);
+        return seat::check(seat::Check::Gbm);
         #[cfg(not(feature = "native-gbm"))]
         bail!("rebuild with --features native-gbm to check GPU allocation");
     }
     if check_seat {
         if nested || probe || socket.is_some() { bail!("--check-seat cannot be combined with other modes"); }
         #[cfg(feature = "native-seat")]
-        return seat::check(false, false);
+        return seat::check(seat::Check::Seat);
         #[cfg(not(feature = "native-seat"))]
         bail!("rebuild with --features native-seat to check a seat");
     }
