@@ -26,6 +26,9 @@ pub(super) struct ReleaseOrigin {
     pub revision: String,
     pub sequence: u64,
     pub key_id: String,
+    // None denotes a complete signed bundle (legacy release-stage records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_artifacts: Option<Vec<String>>,
 }
 
 struct StageArtifact { name: String, source: PathBuf, reviewed: Option<Artifact> }
@@ -139,7 +142,7 @@ fn stage_release_at(source: &Path, root: PathBuf, release: &crate::release::Rele
         item.reviewed = Some(Artifact { name: expected.name.clone(), bytes: expected.bytes, sha256: expected.sha256.clone() });
     }
     plan.release = Some(ReleaseOrigin { version: release.version.clone(), revision: release.revision.clone(),
-        sequence: release.sequence.context("release sequence required")?, key_id: key_id.into() });
+        sequence: release.sequence.context("release sequence required")?, key_id: key_id.into(), covered_artifacts: None });
     stage_with(plan, before_complete)
 }
 
@@ -210,6 +213,49 @@ fn update_plan(source: &Path, root: PathBuf, id: String, base: Manifest, ids: &[
     }
     let preview = UpdatePreview { schema: 1, base_deployment: id.clone(), source: source.clone(), changes };
     Ok((StagePlan { source, root, products: base.products, binaries, base_deployment: Some(id), release: None }, preview))
+}
+
+
+/// An authenticated component release may replace only artifacts already in the
+/// current deployment. Retained identities are pinned to the verified base.
+fn signed_update_plan(source: &Path, root: PathBuf, id: String, base: Manifest,
+    release: &crate::release::ReleaseManifest, key: &str) -> Result<(StagePlan, UpdatePreview)> {
+    release.validate_host()?;
+    let (mut plan, preview) = update_plan(source, root, id, base, &release.products)?;
+    let mut covered = Vec::new();
+    for expected in &release.artifacts {
+        let item = plan.binaries.iter().find(|item| item.name == expected.name)
+            .context("signed artifact is not part of the base deployment")?;
+        let signed = Artifact { name: expected.name.clone(), bytes: expected.bytes, sha256: expected.sha256.clone() };
+        if item.reviewed.as_ref() != Some(&signed) {
+            bail!("candidate artifact differs from signed identity: {}", expected.name);
+        }
+        covered.push(expected.name.clone());
+    }
+    plan.release = Some(ReleaseOrigin { version: release.version.clone(), revision: release.revision.clone(),
+        sequence: release.sequence.context("release sequence required")?, key_id: key.into(), covered_artifacts: Some(covered) });
+    Ok((plan, preview))
+}
+
+pub(super) fn review_signed_update(source: &Path, release: &crate::release::ReleaseManifest, key: &str) -> Result<Option<StagePlan>> {
+    let root = data_root()?;
+    let (id, base) = crate::selection::verified_current(&root)?;
+    let (plan, preview) = signed_update_plan(source, root, id, base, release, key)?;
+    println!("Authenticated update of {} using release {}", preview.base_deployment, release.version);
+    for change in &preview.changes {
+        println!("  {}: {} ({} -> {} bytes)", change.name, change.action, change.before.bytes, change.after.bytes);
+    }
+    if !preview.changes.iter().any(|c| c.action == "replace") {
+        println!("No binary changes; nothing staged or accepted.");
+        return Ok(None);
+    }
+    Ok(Some(plan))
+}
+
+pub(super) fn complete_signed_update(plan: StagePlan, before_complete: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+    let base = plan.base_deployment.as_deref().context("missing reviewed base")?;
+    crate::selection::require_current(&plan.root, base)?;
+    stage_with(plan, before_complete)
 }
 
 pub fn update(source: &Path, ids: &[String], preview_only: bool) -> Result<()> {
@@ -310,6 +356,33 @@ mod tests {
         assert!(stage(plan).is_err());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
         assert!(update_plan(candidate.path(), root.path().to_owned(), id, base(), &["session".into()]).is_err());
+    }
+    #[test]
+    fn signed_component_update_preserves_base_and_marks_only_covered_artifacts() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for name in ["atelier-shell", "atelier-settings"] { artifact(original.path(), name); }
+        let base_path = stage(StagePlan::prepare(original.path(), root.path().to_owned(), &["shell".into(),"settings".into()]).unwrap()).unwrap();
+        let id = base_path.file_name().unwrap().to_str().unwrap().to_owned();
+        let base = || serde_json::from_reader::<_, Manifest>(File::open(base_path.join("manifest.json")).unwrap()).unwrap();
+        artifact(candidate.path(), "atelier-shell");
+        fs::write(candidate.path().join("atelier-shell"), b"signed new shell").unwrap();
+        let release: crate::release::ReleaseManifest = serde_json::from_value(serde_json::json!({
+            "schema":2,"sequence":8,"version":"v2","revision":"0123456789abcdef0123456789abcdef01234567",
+            "os":"linux","arch":env::consts::ARCH,"products":["shell"],
+            "artifacts":[{"name":"atelier-shell","bytes":b"signed new shell".len(),"sha256":format!("{:x}",Sha256::digest(b"signed new shell"))}]
+        })).unwrap();
+        let (plan, preview) = signed_update_plan(candidate.path(), root.path().to_owned(), id.clone(), base(), &release, "key").unwrap();
+        assert_eq!(preview.changes.iter().filter(|c| c.action == "replace").count(),1);
+        let path = stage(plan).unwrap();
+        let manifest: Manifest = serde_json::from_reader(File::open(path.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest.base_deployment.as_deref(),Some(id.as_str()));
+        assert_eq!(manifest.release.unwrap().covered_artifacts.unwrap(),vec!["atelier-shell"]);
+        assert_eq!(fs::read(path.join("bin/atelier-settings")).unwrap(),b"fixture not executed");
+        assert_eq!(fs::read(path.join("bin/atelier-shell")).unwrap(),b"signed new shell");
+        fs::write(candidate.path().join("atelier-shell"),b"not signed").unwrap();
+        assert!(signed_update_plan(candidate.path(), root.path().to_owned(), id, base(), &release, "key").is_err());
     }
     #[test]
     fn signed_staging_copies_only_reviewed_bytes_and_requires_final_check() {

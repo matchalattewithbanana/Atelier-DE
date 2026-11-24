@@ -192,6 +192,29 @@ pub(super) fn stage_authenticated(bytes: &[u8], signature: &[u8], id: &str, sour
     })
 }
 
+/// Reauthenticate the exact reviewed bytes and serialize acceptance with staging.
+pub(super) fn update_authenticated(bytes: &[u8], signature: &[u8], id: &str,
+    plan: crate::deploy::StagePlan) -> Result<PathBuf> {
+    let root = root()?;
+    active_key(&load(&root)?, id)?;
+    let _lock = locked(&root)?;
+    let mut state = load(&root)?;
+    release::authenticate(bytes, signature, active_key(&state, id)?.as_bytes())?;
+    let release: ReleaseManifest = serde_json::from_slice(bytes).context("parse authenticated release")?;
+    release.validate_host()?;
+    advance(&mut state, &release)?;
+    crate::deploy::complete_signed_update(plan, |pending| {
+        for (name, content) in [("release-manifest.json", bytes), ("release-manifest.sig", signature)] {
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(pending.join(name))?;
+            file.write_all(content)?;
+            file.sync_all()?;
+        }
+        File::open(pending)?.sync_all()?;
+        save(&root, &state)?;
+        Ok(())
+    })
+}
+
 pub fn accept(manifest: &Path, signature: &Path, id: &str, source: &Path) -> Result<()> {
     if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
     let bytes = release::bounded_file(manifest, 64 * 1024)?;
