@@ -8,6 +8,7 @@ mod selection;
 mod session;
 mod mango;
 mod release;
+mod discovery;
 use serde::Serialize;
 use std::{env, fs, io::{self, BufRead, IsTerminal, Read, Write}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -208,6 +209,8 @@ fn installer_menu() -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, repo] if mode == "release-discover" => discovery::run(repo, false)?,
+        [mode, repo, flag] if mode == "release-discover" && flag == "--prerelease" => discovery::run(repo, true)?,
         [mode, rest @ ..] if mode == "release-manifest" => release::generate(rest)?,
         [mode, manifest, flag, source] if mode == "release-verify" && flag == "--from" => release::verify(Path::new(manifest), Path::new(source))?,
         [mode, manifest, sig_flag, sig, key_flag, key, from, source] if mode == "release-verify-signed" && sig_flag == "--signature" && key_flag == "--key" && from == "--from" => release::verify_signed(Path::new(manifest), Path::new(sig), Path::new(key), Path::new(source))?,
@@ -299,7 +302,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\natelier-manager release-discover native [--prerelease]\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
