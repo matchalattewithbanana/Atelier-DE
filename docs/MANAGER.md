@@ -23,3 +23,7 @@ atelier-manager plan mango-atelier hyprland
 ```
 
 The catalog separates native Atelier components, the Mango Atelier distribution, external compositors and the native desktop aggregate. Selection expands only explicit dependencies and deduplicates them. A standalone shell/settings plan never silently installs a compositor; a session requires the native compositor. The preview reports detected and missing executable names per product. Missing is not a package transaction or package availability claim. The JSON contract marks `apply_supported: false`; there is no apply operation, sudo, network or file modification. Installer backends and interactive setup will build on this catalog.
+
+## Guided setup preview
+
+Run `atelier-manager setup` (or `setup --json` to send prompts to stderr and obtain an accepted preview or null on stdout). Choose Express, Custom or Minimal, then select native products or external compositors, per-compositor rice choices where Mango Atelier is selected, a native shell preference, optional service providers, and first session preference. The final review is explicitly non-mutating, including no sudo, package changes, backups or recovery operations. A confirmation accepts only the preview; it does not persist preferences or enable installation. Type q or end input to cancel. Custom rice/profile IDs are planning preferences, not proof of installation or compatibility. A real installation transaction and package-level review remain future work.
