@@ -7,3 +7,4 @@ publish.workspace = true
 [dependencies]
 atelier-config.workspace = true
 gtk.workspace = true
+atelier-services = { path = "../services" }
