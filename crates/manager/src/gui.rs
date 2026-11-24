@@ -16,7 +16,7 @@ const PAGES: &[(Page, &str, &str, &str)] = &[
     (Page::Products, "products", "Products", "Native components and supported external desktops. Detection does not establish runtime compatibility."),
     (Page::Deployments, "deployments", "Deployments", "Staged bundles, active selection and rollback target. Inventory checks structure and size only."),
     (Page::Recovery, "recovery", "Recovery", "Verify selected deployments and inspect historical system package transactions. No automatic repair."),
-    (Page::Storage, "storage", "Storage", "Cached releases and logical file sizes. Structural checks are not signature verification."),
+    (Page::Storage, "storage", "Storage", "Deployments, protection reasons, cached releases and logical sizes. Removal requires explicit approval."),
     (Page::Security, "security", "Publisher trust", "Locally pinned and revoked publisher keys. No key is trusted automatically."),
 ];
 
@@ -93,6 +93,18 @@ fn rows(page: Page) -> Result<Vec<Row>> {
             }
         }
         Page::Storage => {
+            match selection::cleanup_snapshot() {
+                Ok(report) => {
+                    if let Some(entries) = report["deployments"].as_array() {
+                        for entry in entries {
+                            let id = entry["id"].as_str().unwrap_or("Unknown");
+                            let size = entry["bytes"].as_u64().map(|n| format!("{:.2} MiB logical artifact size", n as f64 / 1_048_576.0)).unwrap_or_else(|| "Size unknown".into());
+                            rows.push(Row::new(id, entry["protection"].as_str().unwrap_or("Unknown"), format!("{size}\nRuntime: {}", entry["runtime"].as_str().unwrap_or("unknown"))));
+                        }
+                    }
+                }
+                Err(e) => rows.push(Row::error("Deployment storage", e)),
+            }
             for entry in acquire::cache_snapshot()? {
                 let detail = entry.bytes.map(|n| format!("{:.2} MiB logical size", n as f64 / 1_048_576.0))
                     .or(entry.error).unwrap_or_else(|| "Size unknown".into());

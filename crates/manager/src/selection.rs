@@ -351,10 +351,15 @@ fn removal_files(bundle: &Path, m: &Manifest) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn remove_at(root: &Path, id: &str) -> Result<()> {
+#[cfg(test)]
+fn remove_at(root: &Path, id: &str) -> Result<()> { remove_reviewed(root, id, None) }
+fn remove_reviewed(root: &Path, id: &str, reviewed: Option<(&File, &[u8])>) -> Result<()> {
     let _lifecycle = selection_lock(root)?;
     let m = removal_candidate(root, id)?;
     let bundle = root.join(id);
+    if let Some((directory, identity)) = reviewed {
+        check_removal_identity(&bundle, directory, &m, identity)?;
+    }
     if std::env::current_exe()?.canonicalize()?.starts_with(bundle.canonicalize()?) {
         bail!("cannot remove the deployment containing the running manager");
     }
@@ -380,19 +385,62 @@ fn remove_at(root: &Path, id: &str) -> Result<()> {
     result.with_context(|| format!("removal interrupted; inspect quarantine {}", quarantine.display()))
 }
 
-pub fn remove_offline(id: &str) -> Result<()> {
-    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive offline removal requires a terminal"); }
-    let root = data_root()?;
+fn check_removal_identity(bundle: &Path, reviewed: &File, manifest: &Manifest, identity: &[u8]) -> Result<()> {
+    directory(bundle)?;
+    let actual = fs::symlink_metadata(bundle)?;
+    let old = reviewed.metadata()?;
+    if actual.dev() != old.dev() || actual.ino() != old.ino() || serde_json::to_vec(manifest)?.as_slice() != identity {
+        bail!("deployment identity changed since review; review again");
+    }
+    Ok(())
+}
+pub(super) struct OfflineRemoval {
+    root: PathBuf,
+    id: String,
+    directory: File,
+    identity: Vec<u8>,
+    detail: String,
+    phrase: String,
+}
+impl OfflineRemoval {
+    pub(super) fn detail(&self) -> &str { &self.detail }
+    pub(super) fn phrase(&self) -> &str { &self.phrase }
+    pub(super) fn apply(self) -> Result<String> {
+        if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+        remove_reviewed(&self.root, &self.id, Some((&self.directory, &self.identity)))?;
+        Ok(format!("Deployment {} removed.", self.id))
+    }
+}
+fn review_removal_at(root: PathBuf, id: &str) -> Result<OfflineRemoval> {
+    let _lock = selection_lock(&root)?;
     let m = removal_candidate(&root, id)?;
-    println!("Permanently remove deployment {id} ({})?", m.products.join(", "));
-    println!("Close ALL Atelier sessions and applications using this bundle, including direct launches. Use a separate manager executable and do not run older managers concurrently.");
-    println!("Current selection, rollback target, referenced bases, packages, configuration and release trust will not be removed.");
-    print!("Type 'remove offline {id}' to confirm the bundle is not in use: "); io::stdout().flush()?;
+    let bundle = root.join(id);
+    if std::env::current_exe()?.canonicalize()?.starts_with(bundle.canonicalize()?) {
+        bail!("cannot remove the deployment containing the running manager");
+    }
+    if !matches!(runtime_status(&bundle), "untracked" | "no-managed-lease") {
+        bail!("deployment has an active managed lease or unknown runtime status");
+    }
+    removal_files(&bundle, &m)?;
+    let directory = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&bundle)?;
+    let identity = serde_json::to_vec(&m)?;
+    check_removal_identity(&bundle, &directory, &m, &identity)?;
+    let bytes = m.artifacts.iter().map(|a| a.bytes).sum::<u64>();
+    let detail = format!("Permanently remove deployment {id} ({})?\n{} logical artifact bytes.\nClose ALL Atelier sessions and applications using this bundle, including direct launches. Use a separate manager executable and do not run older managers concurrently.\nCurrent selection, rollback target, referenced bases, packages, configuration and release trust remain untouched.", m.products.join(", "), bytes);
+    Ok(OfflineRemoval { root, id: id.into(), directory, identity, detail, phrase: format!("remove offline {id}") })
+}
+pub(super) fn review_remove_offline(id: &str) -> Result<OfflineRemoval> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    review_removal_at(data_root()?, id)
+}
+pub fn remove_offline(id: &str) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() { bail!("interactive offline removal requires a terminal"); }
+    let review = review_remove_offline(id)?;
+    println!("{}", review.detail());
+    print!("Type '{}' to confirm the bundle is not in use: ", review.phrase()); io::stdout().flush()?;
     let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-    if answer.trim() != format!("remove offline {id}") { println!("Cancelled."); return Ok(()); }
-    remove_at(&root, id)?;
-    println!("Deployment {id} removed.");
+    if answer.trim() != review.phrase() { println!("Cancelled."); return Ok(()); }
+    println!("{}", review.apply()?);
     Ok(())
 }
 
@@ -401,8 +449,9 @@ pub(super) fn select_for_test(root: &Path, id: &str) {
     switch(root, &load_selection(root).unwrap(), id, false).unwrap();
 }
 
+pub(super) fn cleanup_snapshot() -> Result<serde_json::Value> { cleanup_report(&data_root()?) }
 pub fn cleanup_plan() -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&cleanup_report(&data_root()?)?)?);
+    println!("{}", serde_json::to_string_pretty(&cleanup_snapshot()?)?);
     Ok(())
 }
 
@@ -655,6 +704,21 @@ mod tests {
         assert_eq!(load_selection(root).unwrap().current.as_deref(),Some("deployment-C"));
         fs::write(root.join("deployment-C/bin/atelier-shell"),b"evil").unwrap();
         assert!(switch(root,&load_selection(root).unwrap(),"deployment-C",true).is_err());
+    }
+    #[test]
+    fn reviewed_removal_refuses_replacement_and_new_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fixture(root,"deployment-A",b"first");
+        fixture(root,"deployment-B",b"second");
+        let plan = review_removal_at(root.to_owned(),"deployment-B").unwrap();
+        fixture(root,"deployment-B",b"changed bytes");
+        assert!(remove_reviewed(root,"deployment-B",Some((&plan.directory,&plan.identity))).is_err());
+        assert!(root.join("deployment-B").exists());
+        let plan = review_removal_at(root.to_owned(),"deployment-B").unwrap();
+        switch(root,&Selection::default(),"deployment-B",false).unwrap();
+        assert!(remove_reviewed(root,"deployment-B",Some((&plan.directory,&plan.identity))).is_err());
+        assert!(root.join("deployment-B").exists());
     }
     #[test]
     fn offline_removal_protects_selection_lineage_leases_and_unknown_files() {

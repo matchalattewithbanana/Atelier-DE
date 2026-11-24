@@ -1,21 +1,21 @@
 //! Explicitly reviewed publisher and cache maintenance using the CLI backends.
 use gtk::prelude::*;
 use std::{cell::RefCell, rc::Rc, path::PathBuf};
-use crate::{acquire, trust};
+use crate::{acquire, trust, selection};
 use super::{background, label};
 
 #[derive(Clone, Copy)]
-enum Action { Pin, Revoke, RemoveCache }
-enum Review { Trust(trust::TrustReview), Cache(acquire::CacheRemoval) }
+enum Action { Pin, Revoke, RemoveCache, RemoveDeployment }
+enum Review { Trust(trust::TrustReview), Cache(acquire::CacheRemoval), Deployment(selection::OfflineRemoval) }
 impl Review {
     fn detail(&self) -> &str {
-        match self { Self::Trust(r) => r.detail(), Self::Cache(r) => r.detail() }
+        match self { Self::Trust(r) => r.detail(), Self::Cache(r) => r.detail(), Self::Deployment(r) => r.detail() }
     }
     fn phrase(&self) -> &str {
-        match self { Self::Trust(r) => r.phrase(), Self::Cache(_) => "remove cache" }
+        match self { Self::Trust(r) => r.phrase(), Self::Cache(_) => "remove cache", Self::Deployment(r) => r.phrase() }
     }
     fn apply(self) -> anyhow::Result<String> {
-        match self { Self::Trust(r) => r.apply(), Self::Cache(r) => r.apply() }
+        match self { Self::Trust(r) => r.apply(), Self::Cache(r) => r.apply(), Self::Deployment(r) => r.apply() }
     }
 }
 fn review(action: Action, input: String) -> anyhow::Result<Review> {
@@ -27,6 +27,7 @@ fn review(action: Action, input: String) -> anyhow::Result<Review> {
         }
         Action::Revoke => Ok(Review::Trust(trust::review_revoke(&input)?)),
         Action::RemoveCache => Ok(Review::Cache(acquire::review_remove_cache(&input)?)),
+        Action::RemoveDeployment => Ok(Review::Deployment(selection::review_remove_offline(&input)?)),
     }
 }
 
@@ -40,7 +41,7 @@ pub(super) fn controls(window: &gtk::ApplicationWindow, refresh: &gtk::Button, s
     outer.append(&status);
     let actions = if security {
         vec![(Action::Pin, "Absolute path to Ed25519 public key", "Review pin"), (Action::Revoke, "Pinned key ID", "Review revocation")]
-    } else { vec![(Action::RemoveCache, "Cache ID (release-...)", "Review removal")] };
+    } else { vec![(Action::RemoveCache, "Cache ID (release-...)", "Review cache removal"), (Action::RemoveDeployment, "Deployment ID (offline only)", "Review deployment removal")] };
     for (action, placeholder, caption) in actions {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let entry = gtk::Entry::new();

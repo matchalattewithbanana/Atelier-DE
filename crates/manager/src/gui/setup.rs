@@ -1,7 +1,7 @@
 //! Graphical setup review. Mutation is restricted to explicitly approved local staging.
 use gtk::prelude::*;
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
-use crate::{catalog, deploy, wizard};
+use crate::{catalog, deploy, wizard, packages};
 use super::{label, background};
 
 struct Fields {
@@ -31,8 +31,9 @@ impl Fields {
     }
 }
 
-struct Review { text: String, stage: Option<deploy::StagePlan> }
+struct Review { text: String, stage: Option<deploy::StagePlan>, packages: (Vec<String>, Vec<String>) }
 fn review(choices: wizard::Choices, source: Option<PathBuf>) -> anyhow::Result<Review> {
+    let package_choices = (choices.ids.clone(), choices.optional_providers.clone());
     let preview = wizard::build_preview(choices, &crate::report())?;
     let mut text = Vec::new();
     preview.write_review(&mut text)?;
@@ -51,8 +52,8 @@ fn review(choices: wizard::Choices, source: Option<PathBuf>) -> anyhow::Result<R
             }
         }
     } else { None };
-    text.push_str("\nSystem package changes and Mango rice application require their separate CLI workflows. No sudo or network actions are triggered here.");
-    Ok(Review { text, stage })
+    text.push_str("\nPackage installation opens a separate terminal, recomputes dependencies, and may upgrade the entire system. No sudo is invoked until you confirm inside that terminal. Mango rice application remains separate.");
+    Ok(Review { text, stage, packages: package_choices })
 }
 
 fn section(container: &gtk::Box, title: &str, description: &str) {
@@ -147,9 +148,12 @@ pub(super) fn build() -> gtk::Box {
     preview.add_css_class("suggested-action");
     let stage = gtk::Button::with_label("Stage reviewed build");
     stage.set_sensitive(false);
-    actions.append(&edit); actions.append(&preview); actions.append(&stage);
+    let install = gtk::Button::with_label("Install dependencies…");
+    install.set_sensitive(false);
+    actions.append(&edit); actions.append(&preview); actions.append(&stage); actions.append(&install);
     outer.append(&actions);
     let plan: Rc<RefCell<Option<deploy::StagePlan>>> = Rc::new(RefCell::new(None));
+    let package_choices: Rc<RefCell<Option<(Vec<String>, Vec<String>)>>> = Rc::new(RefCell::new(None));
 
     let weak_stage = stage.downgrade();
     approve.connect_toggled(move |check| {
@@ -157,8 +161,9 @@ pub(super) fn build() -> gtk::Box {
     });
     {
         let (stack, status, preview, stage, approve, plan) = (stack.clone(), status.clone(), preview.clone(), stage.clone(), approve.clone(), plan.clone());
+        let (install, package_choices) = (install.clone(), package_choices.clone());
         edit.connect_clicked(move |edit| {
-            plan.borrow_mut().take();
+            plan.borrow_mut().take(); package_choices.borrow_mut().take(); install.set_sensitive(false);
             approve.set_active(false); approve.set_visible(false);
             stage.set_sensitive(false);
             stack.set_visible_child_name("choices");
@@ -168,6 +173,7 @@ pub(super) fn build() -> gtk::Box {
     }
     {
         let (stack, status, text, stage, approve, edit, plan) = (stack.clone(), status.clone(), review_text.clone(), stage.clone(), approve.clone(), edit.clone(), plan.clone());
+        let (install, package_choices) = (install.clone(), package_choices.clone());
         preview.connect_clicked(move |preview| {
             let choices = match fields.choices() {
                 Ok(choices) => choices,
@@ -175,13 +181,14 @@ pub(super) fn build() -> gtk::Box {
             };
             let source = fields.source.text().trim().to_owned();
             let source = (!source.is_empty()).then(|| PathBuf::from(source));
-            preview.set_sensitive(false); edit.set_sensitive(false);
+            preview.set_sensitive(false); edit.set_sensitive(false); install.set_sensitive(false);
             approve.set_active(false); stage.set_sensitive(false);
             status.set_text("Checking dependency plan and local artifacts…");
             text.set_text("");
             stack.set_visible_child_name("review");
             let (status, text, approve, edit) = (status.downgrade(), text.downgrade(), approve.downgrade(), edit.downgrade());
             let plan = plan.clone();
+            let package_choices = package_choices.clone(); let install = install.downgrade();
             background(move || review(choices, source), move |result| {
                 let (Some(status), Some(text), Some(approve), Some(edit)) = (status.upgrade(), text.upgrade(), approve.upgrade(), edit.upgrade()) else { return; };
                 match result {
@@ -189,6 +196,8 @@ pub(super) fn build() -> gtk::Box {
                         text.set_text(&review.text);
                         approve.set_visible(review.stage.is_some());
                         *plan.borrow_mut() = review.stage;
+                        *package_choices.borrow_mut() = Some(review.packages);
+                        if let Some(install) = install.upgrade() { install.set_sensitive(true); }
                         status.set_text("Review complete. Nothing installed.");
                     }
                     Err(error) => {
@@ -202,11 +211,12 @@ pub(super) fn build() -> gtk::Box {
     }
     {
         let (status, text, edit, approve, plan) = (status.clone(), review_text.clone(), edit.clone(), approve.clone(), plan.clone());
+        let install = install.clone();
         stage.connect_clicked(move |stage| {
             if !approve.is_active() { return; }
             let Some(reviewed) = plan.borrow_mut().take() else { return; };
             stage.set_sensitive(false); approve.set_active(false); approve.set_visible(false);
-            edit.set_sensitive(false);
+            edit.set_sensitive(false); install.set_sensitive(false);
             status.set_text("Staging verified local bytes…");
             let (status, text, edit) = (status.downgrade(), text.downgrade(), edit.downgrade());
             background(move || deploy::stage_reviewed(reviewed), move |result| {
@@ -219,6 +229,28 @@ pub(super) fn build() -> gtk::Box {
                     Err(error) => { text.set_text(&format!("{error:#}")); status.set_text("Staging failed; review again before retrying."); }
                 }
                 edit.set_sensitive(true);
+            });
+        });
+    }
+    {
+        let (status, stage, approve, edit, plan, package_choices) = (status.clone(), stage.clone(), approve.clone(), edit.clone(), plan.clone(), package_choices.clone());
+        install.connect_clicked(move |install| {
+            let Some((products, providers)) = package_choices.borrow().clone() else { return; };
+            install.set_sensitive(false); edit.set_sensitive(false); stage.set_sensitive(false);
+            approve.set_active(false); approve.set_sensitive(false);
+            // Invalidate local review: dependencies or source artifacts can change during upgrade.
+            plan.borrow_mut().take();
+            status.set_text("Opening package installer. Review the recomputed targets and confirm inside the terminal.");
+            let (status, edit, approve) = (status.downgrade(), edit.downgrade(), approve.downgrade());
+            background(move || packages::terminal_install(products, providers), move |result| {
+                if let Some(status) = status.upgrade() {
+                    match result {
+                        Ok(()) => status.set_text("Terminal closed. Inspect Recovery for transaction records; review setup again."),
+                        Err(e) => status.set_text(&format!("Terminal handoff failed: {e:#}")),
+                    }
+                }
+                if let Some(approve) = approve.upgrade() { approve.set_visible(false); approve.set_sensitive(true); }
+                if let Some(edit) = edit.upgrade() { edit.set_sensitive(true); }
             });
         });
     }
