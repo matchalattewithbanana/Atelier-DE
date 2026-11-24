@@ -1,6 +1,7 @@
 //! Initial read-only ecosystem manager and installation diagnostics.
 use anyhow::{bail, Result};
 mod catalog;
+mod wizard;
 use serde::Serialize;
 use std::{env, fs, io::{self, Read}, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 
@@ -144,7 +145,15 @@ fn main() -> Result<()> {
                 for warning in &plan.warnings { println!("Note: {warning}"); }
             }
         }
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\nRead-only inventory and planning; no setup or package changes."),
+        [mode] if mode == "setup" => {
+            let result = wizard::run(&mut io::stdin().lock(), &mut io::stdout().lock(), &report())?;
+            println!("{}", if result.is_some() { "Preview accepted. No changes made." } else { "Setup cancelled. No changes made." });
+        }
+        [mode, flag] if mode == "setup" && flag == "--json" => {
+            let result = wizard::run(&mut io::stdin().lock(), &mut io::stderr().lock(), &report())?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\nRead-only inventory and planning; no setup or package changes."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
