@@ -158,6 +158,10 @@ Both compositors expose `zwlr_layer_shell_v1`, arrange layer surfaces with ancho
 
 Build `atelier-shell` with `--features layer-panel` (install GTK4 layer-shell library, `gtk4-layer-shell` on Arch/CachyOS). In a supported Wayland session the shell opens an anchored top panel with exclusive space, searchable launcher access, workspace selection, clock, battery and terminal/settings shortcuts. Without the feature or layer-shell protocol it opens the normal launcher. Workspace control is local to Atelier's own display via a user-only command socket; no cross-compositor automation is used.
 
+### Compatibility with other Atelier products
+
+The optional panel can run on Atelier DE, MangoWM, Hyprland or Niri. Native sessions use their display-specific workspace socket. For other Atelier products install the existing Mango Atelier `atelier-workspace` helper; the panel reuses its `status` and `focus` commands, recognizes up to nine external workspace numbers, and highlights active workspaces reported across monitors. Conflicting compositor signals or missing helper commands disable external controls instead of guessing. The Rices window calls the existing `atelier rice list` command without changing rice selections. Classic, SekaiPop, Serpantinum and registered custom products retain their existing compatibility limits; the panel does not install or change their configuration. Launch it explicitly and disable an overlapping bar yourself if desired. Native settings remain separate from rice preferences.
+
 ## Verification
 
 ```sh
