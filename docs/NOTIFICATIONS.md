@@ -16,3 +16,9 @@ The server handles plain text summaries and bodies, active replacement, expirati
 ## Graphical inbox
 
 Open Notifications from the Atelier panel or standalone launcher. It reads the explicitly started Atelier daemon only and never starts or replaces an existing service. It presents plain text active notifications and closed history, refreshes while the window is open, and offers explicit dismiss and clear-history controls. The inbox uses a daemon-instance identifier to reject stale actions after a daemon restart. GUI helper calls require coreutils `timeout`. Popups and Do Not Disturb remain future work.
+
+## Experimental popups and Do Not Disturb
+
+On a dedicated test session with the Atelier daemon already running, build the shell with `layer-panel` and run `atelier-shell --panel --notification-popups` instead of another panel. Popups are opt-in; the shell does not claim the notification service. The presenter uses a non-interactive layer-shell overlay, showing only the newest newly observed eligible active notification for up to five seconds. It polls a compact snapshot once per second through the bounded helper. Very short-lived notices, bursts and replacements can be missed; no replay of older notices occurs. It is not a lock-screen-safe or production notification renderer. Do not run the experimental presenter in a session where private notification content must be hidden on lock.
+
+The centre's Do Not Disturb button changes the daemon's in-memory session policy. It suppresses this presenter without deleting notifications, and suppressed notices are not replayed when disabled. It does not control other notification daemons. Persistent preferences, urgency handling, actions, icons, multi-output and lock integration remain future work.

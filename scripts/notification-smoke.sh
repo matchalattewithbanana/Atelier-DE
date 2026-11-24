@@ -35,4 +35,11 @@ if "$binary" dismiss wrong-instance 2; then echo 'Stale instance accepted' >&2; 
 "$binary" list | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["active"] and s["history"][0]["closed_reason"]==2'
 "$binary" clear-history "$instance"
 "$binary" list | python3 -c 'import json,sys; assert not json.load(sys.stdin)["history"]'
+"$binary" dnd "$instance" on
+call Notify 'Atelier smoke' 0 '' 'Silent title' 'Body' '[]' '{}' 0
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["dnd"] and s["notice"] is None'
+"$binary" dnd "$instance" off
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["dnd"] and s["notice"] is None'
+call Notify 'Atelier smoke' 0 '' 'Visible title' 'Body' '[]' '{}' 0
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["notice"]["summary"]=="Visible title"'
 echo 'Notification D-Bus smoke passed'

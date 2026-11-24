@@ -11,6 +11,7 @@ pub struct Notice {
     pub summary: String,
     pub body: String,
     pub transient: bool,
+    pub popup_allowed: bool,
     pub closed_reason: Option<u32>,
     #[serde(skip)]
     deadline: Option<Instant>,
@@ -18,6 +19,7 @@ pub struct Notice {
 
 pub struct Store {
     instance: String,
+    dnd: bool,
     next_id: u32,
     active: Vec<Notice>,
     history: VecDeque<Notice>,
@@ -27,14 +29,24 @@ pub struct Store {
 pub struct Snapshot<'a> {
     schema: u32,
     instance: &'a str,
+    dnd: bool,
     active: &'a [Notice],
     history: &'a VecDeque<Notice>,
+}
+
+#[derive(Serialize)]
+pub struct PopupSnapshot<'a> {
+    schema: u32,
+    instance: &'a str,
+    last_id: u32,
+    dnd: bool,
+    notice: Option<&'a Notice>,
 }
 
 impl Default for Store {
     fn default() -> Self {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        Self { instance: format!("{}-{stamp}", std::process::id()), next_id: 0, active: Vec::new(), history: VecDeque::new() }
+        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, next_id: 0, active: Vec::new(), history: VecDeque::new() }
     }
 }
 
@@ -53,7 +65,7 @@ impl Store {
             value if value > 0 => Some(now + Duration::from_millis(value as u64)),
             _ => Some(now + Duration::from_secs(5)),
         };
-        let notice = Notice { id, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, closed_reason: None, deadline };
+        let notice = Notice { id, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !self.dnd, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
     }
@@ -72,7 +84,15 @@ impl Store {
         for id in &expired { self.close(*id, 1); }
         expired
     }
-    pub fn snapshot(&self) -> Snapshot<'_> { Snapshot { schema: 1, instance: &self.instance, active: &self.active, history: &self.history } }
+    pub fn snapshot(&self) -> Snapshot<'_> { Snapshot { schema: 1, instance: &self.instance, dnd: self.dnd, active: &self.active, history: &self.history } }
+    pub fn set_dnd(&mut self, enabled: bool) {
+        self.dnd = enabled;
+        if enabled { for notice in &mut self.active { notice.popup_allowed = false; } }
+    }
+    pub fn popup_snapshot(&self) -> PopupSnapshot<'_> {
+        let notice = if self.dnd { None } else { self.active.iter().filter(|n| n.popup_allowed).max_by_key(|n| n.id) };
+        PopupSnapshot { schema: 1, instance: &self.instance, last_id: self.next_id, dnd: self.dnd, notice }
+    }
     pub fn matches_instance(&self, instance: &str) -> bool { self.instance == instance }
     pub fn clear_history(&mut self) { self.history.clear(); }
 }
@@ -104,6 +124,19 @@ mod tests {
         }
         assert_eq!(store.history.len(), MAX_HISTORY);
         store.clear_history(); assert!(store.history.is_empty());
+    }
+    #[test]
+    fn dnd_does_not_replay_suppressed_notices() {
+        let mut store = Store::default(); let now = Instant::now();
+        add(&mut store, 0, false, 0, now);
+        assert!(store.popup_snapshot().notice.is_some());
+        store.set_dnd(true);
+        add(&mut store, 0, false, 0, now);
+        assert!(store.popup_snapshot().notice.is_none());
+        store.set_dnd(false);
+        assert!(store.popup_snapshot().notice.is_none());
+        let id = add(&mut store, 0, false, 0, now);
+        assert_eq!(store.popup_snapshot().notice.unwrap().id, id);
     }
     #[test]
     fn rejects_over_capacity_and_unknown_close() {

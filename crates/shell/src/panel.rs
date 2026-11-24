@@ -5,7 +5,7 @@ use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::{rc::Rc, process::Command, time::Duration};
 
-pub fn build(app: &gtk::Application) {
+pub fn build(app: &gtk::Application, popups: bool) {
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_application_prefer_dark_theme(config.theme.is_dark());
@@ -110,6 +110,7 @@ pub fn build(app: &gtk::Application) {
     }
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
+    if popups { crate::notification_toast::start(app, &window); }
 }
 
 fn spawn(mut command: Command) {
