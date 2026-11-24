@@ -336,8 +336,21 @@ pub fn present_test(fd: &OwnedFd, mut poll_session: impl FnMut() -> Result<bool>
 }
 
 
-// Experimental continuous native session. Blocking commits provide conservative
-// buffer ownership: only the buffer not currently displayed may be rendered.
+#[cfg(feature = "native-session")]
+fn flip_completed(card: &Card<'_>, crtc: control::crtc::Handle) -> Result<bool> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+    let mut fds = [PollFd::new(card, PollFlags::IN)];
+    let immediately = Timespec { tv_sec: 0, tv_nsec: 0 };
+    poll(&mut fds, Some(&immediately)).context("poll DRM event descriptor")?;
+    let flags = fds[0].revents();
+    if flags.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) { bail!("DRM event descriptor failed"); }
+    if !flags.contains(PollFlags::IN) { return Ok(false); }
+    let events = card.receive_events().context("read DRM events")?;
+    Ok(events.into_iter().any(|event| matches!(event, control::Event::PageFlip(flip) if flip.crtc == crtc)))
+}
+
+// Experimental continuous native session. One outstanding nonblocking page flip keeps
+// the displayed and pending buffers out of the renderer.
 #[cfg(feature = "native-session")]
 pub fn run_native(
     fd: &OwnedFd,
@@ -346,7 +359,7 @@ pub fn run_native(
     socket: &str,
     config: &atelier_config::Config,
 ) -> Result<()> {
-    use crate::{state::{Atelier, ClientState}, input_router::handle_input};
+    use crate::{state::{Atelier, ClientState}, input_router::handle_input, frame_queue::FrameQueue};
     use drm::{Device as _, ClientCapability};
     use drm::buffer::PlanarBuffer;
     use control::FbCmd2Flags;
@@ -360,7 +373,7 @@ pub fn run_native(
         reexports::wayland_server::{Display, ListeningSocket},
         utils::{DeviceFd, Rectangle, Transform},
     };
-    use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+    use std::{cell::{Cell, RefCell}, collections::HashSet, rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 
     let card = Card(fd);
     card.set_client_capability(ClientCapability::UniversalPlanes, true)?;
@@ -387,7 +400,7 @@ pub fn run_native(
         .map_err(|error| anyhow::anyhow!("initialize native GLES: {error}"))?;
     let mut allocator = GbmAllocator::new(device, GbmBufferFlags::SCANOUT | GbmBufferFlags::RENDERING);
     let mut slots = Vec::new();
-    let mut presented = false;
+    let mut queue = FrameQueue::default();
 
     let outcome = (|| -> Result<()> {
         for _ in 0..2 {
@@ -405,34 +418,63 @@ pub fn run_native(
         let signal = Arc::clone(&running);
         ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
         let input_state = Rc::clone(&state);
+        let input_dirty = Rc::new(Cell::new(false));
+        let event_dirty = Rc::clone(&input_dirty);
         let input_session = session.clone();
         let mut intercepted = HashSet::new();
         let input_token = event_loop.handle().insert_source(crate::native_input::backend(session)?, move |event, _, _| {
             if input_session.is_active() {
                 handle_input(&mut input_state.borrow_mut(), event, &mut intercepted);
+                event_dirty.set(true);
             }
         }).map_err(|error| anyhow::anyhow!("register native input: {error}"))?;
 
         let result = (|| -> Result<()> {
-            let mut next = 0usize;
             let started = Instant::now();
             let color = config.theme.background();
+            let mut pending_since: Option<Instant> = None;
             println!("Atelier native ready: WAYLAND_DISPLAY={socket}");
-            while running.load(Ordering::SeqCst) {
+            while running.load(Ordering::SeqCst) || queue.pending().is_some() {
                 event_loop.dispatch(Duration::from_millis(8), &mut ())
                     .map_err(|error| anyhow::anyhow!("dispatch native events: {error}"))?;
                 if !session.is_active() { bail!("native seat deactivated; exiting instead of resuming an unverified route"); }
-                if !running.load(Ordering::SeqCst) { break; }
+
+                // A completed flip, not submission, releases the old buffer and timestamps clients.
+                if queue.pending().is_some() && flip_completed(&card, route.crtc)? {
+                    queue.completed();
+                    pending_since = None;
+                    let state = state.borrow();
+                    let output = &state.output;
+                    for window in state.space.elements_for_output(output) {
+                        window.send_frame(output, started.elapsed(), None, |_, _| Some(output.clone()));
+                    }
+                }
+                if pending_since.is_some_and(|since| since.elapsed() > Duration::from_secs(1)) {
+                    bail!("timed out waiting for native page flip");
+                }
+                if !running.load(Ordering::SeqCst) {
+                    server.flush_clients()?;
+                    continue;
+                }
                 while let Some(stream) = listener.accept()? {
                     if let Err(error) = server.handle().insert_client(stream, Arc::new(ClientState::default())) {
                         tracing::warn!(?error, "native client connection failed");
                     }
+                    queue.invalidate();
                 }
+                if input_dirty.replace(false) { queue.invalidate(); }
                 {
                     let mut state = state.borrow_mut();
-                    server.dispatch_clients(&mut *state)?;
+                    // Conservative scene invalidation: a client request may alter content,
+                    // stacking, regions or frame callbacks. Idle sessions do not submit.
+                    if server.dispatch_clients(&mut *state)? > 0 { queue.invalidate(); }
                     state.popups.cleanup();
                     state.space.refresh();
+                }
+                server.flush_clients()?;
+                let Some(next) = queue.next() else { continue; };
+                {
+                    let state = state.borrow();
                     let region = state.space.output_geometry(&state.output).context("native output geometry")?;
                     let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
                     let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
@@ -441,23 +483,25 @@ pub fn run_native(
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
                     draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
+                    // A simple high-contrast software pointer until client cursor surfaces are supported.
+                    let x = (state.pointer_position.x as i32).clamp(0, i32::from(width) - 1);
+                    let y = (state.pointer_position.y as i32).clamp(0, i32::from(height) - 1);
+                    for (w, h) in [(3, 16), (11, 3)] {
+                        let w = w.min(i32::from(width) - x);
+                        let h = h.min(i32::from(height) - y);
+                        let cursor = Rectangle::new((x, y).into(), (w, h).into());
+                        frame.draw_solid(cursor, &[Rectangle::from_size(cursor.size)], Color32F::new(1.0, 1.0, 1.0, 1.0))?;
+                    }
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
                 }
                 if !session.is_active() { bail!("seat deactivated before submission"); }
-                let expected = if presented { u64::from(u32::from(slots[1 - next].1)) } else { original };
+                let expected = queue.displayed().map(|slot| u64::from(u32::from(slots[slot].1))).unwrap_or(original);
                 if property(&card, route.plane, "FB_ID")?.1 != expected { bail!("native framebuffer changed outside Atelier"); }
-                // Synchronous commit: no nonblocking flip, so the previous slot is reusable on return.
-                commit_framebuffer(&card, route.plane, u64::from(u32::from(slots[next].1)), false)?;
-                presented = true;
-                next = 1 - next;
-                {
-                    let state = state.borrow();
-                    let output = &state.output;
-                    for window in state.space.elements_for_output(output) {
-                        window.send_frame(output, started.elapsed(), None, |_, _| Some(output.clone()));
-                    }
-                }
-                server.flush_clients()?;
+                let request = framebuffer_request(&card, route.plane, u64::from(u32::from(slots[next].1)))?;
+                card.atomic_commit(control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT, request)
+                    .context("queue native page flip")?;
+                queue.submitted(next);
+                pending_since = Some(Instant::now());
             }
             Ok(())
         })();
@@ -465,7 +509,13 @@ pub fn run_native(
         result
     })();
 
-    if presented {
+    if queue.pending().is_some() {
+        // An outstanding kernel flip may still reference either temporary buffer.
+        // Do not issue another commit or remove those framebuffers; release the seat.
+        if let Err(error) = outcome { eprintln!("Native session error: {error:#}"); }
+        bail!("native page flip remained pending; restoration could not be safely attempted");
+    }
+    if queue.displayed().is_some() {
         let restored = commit_framebuffer(&card, route.plane, original, false).and_then(|_| {
             if property(&card, route.plane, "FB_ID")?.1 != original { bail!("restored framebuffer differs from original"); }
             Ok(())
