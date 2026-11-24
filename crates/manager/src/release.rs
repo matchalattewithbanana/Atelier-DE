@@ -1,7 +1,7 @@
 //! Local release manifest contract. Hashes establish identity, not authenticity.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, env, fs, io::{self, Read}, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{collections::BTreeSet, env, fs, io::{self, Read}, os::unix::fs::{OpenOptionsExt, MetadataExt, PermissionsExt}, path::Path, process::{Command, Stdio}};
 use crate::{catalog, deploy};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,14 +101,69 @@ fn create(source: &Path, version: &str, revision: &str, ids: &[String]) -> Resul
     Ok(release)
 }
 
-fn load(path: &Path) -> Result<ReleaseManifest> {
+fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path).context("open release manifest")?;
-    if !file.metadata()?.is_file() { bail!("release manifest must be a regular file"); }
+        .open(path).with_context(|| format!("open {}", path.display()))?;
+    if !file.metadata()?.is_file() { bail!("expected a regular file"); }
     let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 * 1024 { bail!("release manifest exceeds 64 KiB"); }
-    Ok(serde_json::from_slice(&bytes).context("parse release manifest")?)
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit { bail!("release metadata exceeds size limit"); }
+    Ok(bytes)
+}
+fn load(path: &Path) -> Result<ReleaseManifest> {
+    Ok(serde_json::from_slice(&bounded_file(path, 64 * 1024)?).context("parse release manifest")?)
+}
+
+const SIGNER: &str = "atelier-release";
+const NAMESPACE: &str = "atelier-release-v1";
+const SSH_KEYGEN: &str = "/usr/bin/ssh-keygen";
+
+fn allowed_signer(key: &[u8]) -> Result<String> {
+    let key = std::str::from_utf8(key)?.trim();
+    if key.lines().count() != 1 { bail!("expected one Ed25519 public key"); }
+    let mut fields = key.split_ascii_whitespace();
+    if fields.next() != Some("ssh-ed25519") { bail!("only plain Ed25519 publisher keys are supported"); }
+    let blob = fields.next().context("missing public key blob")?;
+    // Ed25519's SSH wire blob is 51 bytes, encoded as 68 base64 characters.
+    if blob.len() != 68 || !blob.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/')) {
+        bail!("invalid Ed25519 public key encoding");
+    }
+    Ok(format!("{SIGNER} namespaces=\"{NAMESPACE}\" ssh-ed25519 {blob}\n"))
+}
+
+fn authenticate(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<()> {
+    let metadata = fs::metadata(SSH_KEYGEN).context("OpenSSH ssh-keygen is required")?;
+    if !metadata.is_file() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0
+        || metadata.permissions().mode() & 0o111 == 0 {
+        bail!("untrusted system ssh-keygen executable");
+    }
+    // Snapshot the exact bytes to verify, including the signature and public key.
+    // OpenSSH performs cryptography and namespace checking; no shell is invoked.
+    let temp = tempfile::tempdir()?;
+    let allowed = temp.path().join("allowed-signers");
+    let sig = temp.path().join("manifest.sig");
+    let input = temp.path().join("manifest");
+    fs::write(&allowed, allowed_signer(key)?)?;
+    fs::write(&sig, signature)?;
+    fs::write(&input, bytes)?;
+    let result = Command::new(SSH_KEYGEN)
+        .args(["-Y", "verify", "-I", SIGNER, "-n", NAMESPACE, "-f"]).arg(&allowed)
+        .arg("-s").arg(&sig).stdin(Stdio::from(fs::File::open(input)?))
+        .stdout(Stdio::null()).stderr(Stdio::null()).status().context("verify publisher signature")?;
+    if !result.success() { bail!("release signature rejected for the supplied publisher key and namespace"); }
+    Ok(())
+}
+
+pub fn verify_signed(path: &Path, signature: &Path, key: &Path, source: &Path) -> Result<()> {
+    let bytes = bounded_file(path, 64 * 1024)?;
+    let signature = bounded_file(signature, 16 * 1024)?;
+    let key = bounded_file(key, 8 * 1024)?;
+    authenticate(&bytes, &signature, &key)?;
+    let release: ReleaseManifest = serde_json::from_slice(&bytes).context("parse authenticated manifest")?;
+    release.verify_local(source)?;
+    println!("Release {} ({}) signature and local artifact hashes verified against the supplied publisher key.", release.version, release.revision);
+    println!("Trust the public key only after independent authentication. Freshness, revocation, ABI and hardware compatibility are not established.");
+    Ok(())
 }
 
 pub fn generate(args: &[String]) -> Result<()> {
@@ -134,7 +189,6 @@ pub fn verify(path: &Path, source: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     const REV: &str = "0123456789abcdef0123456789abcdef01234567";
     fn artifact(root: &Path, name: &str, bytes: &[u8]) {
         fs::write(root.join(name), bytes).unwrap();
@@ -164,6 +218,45 @@ mod tests {
         release.arch = env::consts::ARCH.into();
         release.artifacts[0].name = "../atelier-shell".into();
         assert!(release.validate().is_err());
+    }
+
+    #[test]
+    fn signer_rejects_policy_injection_and_unsupported_keys() {
+        assert!(allowed_signer(b"ssh-rsa abc").is_err());
+        assert!(allowed_signer(b"ssh-ed25519 abc\nattacker ssh-ed25519 abc").is_err());
+        let blob = "A".repeat(68);
+        let key = format!("ssh-ed25519 {blob} comment");
+        assert_eq!(allowed_signer(key.as_bytes()).unwrap(),
+            format!("atelier-release namespaces=\"atelier-release-v1\" ssh-ed25519 {blob}\n"));
+    }
+
+    #[test]
+    fn openssh_signature_authenticates_exact_bytes_key_and_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = tmp.path().join("publisher");
+        let other = tmp.path().join("other");
+        for path in [&key, &other] {
+            assert!(Command::new(SSH_KEYGEN).args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(path).status().unwrap().success());
+        }
+        let data = tmp.path().join("manifest.json");
+        let bytes = b"fixture release bytes\n";
+        fs::write(&data, bytes).unwrap();
+        let sign = |namespace: &str| {
+            assert!(Command::new(SSH_KEYGEN).args(["-Y", "sign", "-n", namespace, "-f"])
+                .arg(&key).arg(&data).status().unwrap().success());
+            let sig = tmp.path().join("manifest.json.sig");
+            let result = fs::read(&sig).unwrap();
+            fs::remove_file(sig).unwrap();
+            result
+        };
+        let public = fs::read(tmp.path().join("publisher.pub")).unwrap();
+        let wrong = fs::read(tmp.path().join("other.pub")).unwrap();
+        let sig = sign(NAMESPACE);
+        authenticate(bytes, &sig, &public).unwrap();
+        assert!(authenticate(b"modified", &sig, &public).is_err());
+        assert!(authenticate(bytes, &sig, &wrong).is_err());
+        assert!(authenticate(bytes, &sign("other-namespace"), &public).is_err());
     }
 
     #[test]

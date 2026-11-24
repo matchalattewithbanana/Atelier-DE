@@ -1,7 +1,7 @@
 //! Conservative Arch-family package candidates and local dependency checks.
 use crate::{catalog::Plan, Report};
 use anyhow::{bail, Context, Result};
-use std::{fs, io::{self, IsTerminal, Write}, os::unix::fs::{MetadataExt, PermissionsExt}, path::{Path, PathBuf}};
+use std::{fs, io::{self, IsTerminal, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
 use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet}, process::{Command, Output}};
 
@@ -130,13 +130,16 @@ fn checkpoint_root() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()).map(|p| p.join(".local/state")))
         .context("no absolute state or home directory")?;
     let root = base.join("atelier-manager/package-transactions");
-    fs::create_dir_all(&root)?;
-    let metadata = fs::symlink_metadata(&root)?;
+    Ok(root)
+}
+
+fn checkpoint_directory(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
     if !metadata.is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.permissions().mode() & 0o022 != 0 {
         bail!("package checkpoint root is not an owned safe directory");
     }
-    Ok(root)
+    Ok(())
 }
 
 fn snapshot(dir: &Path, name: &str) -> Result<()> {
@@ -170,7 +173,10 @@ pub fn install(plan: &Plan, report: &Report, providers: &[String]) -> Result<()>
     print!("Type 'upgrade and install' to proceed (anything else cancels): "); io::stdout().flush()?;
     let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
     if answer.trim() != "upgrade and install" { println!("Cancelled; no package changes."); return Ok(()); }
-    let dir = tempfile::Builder::new().prefix("transaction-").tempdir_in(checkpoint_root()?)?;
+    let root = checkpoint_root()?;
+    fs::create_dir_all(&root)?;
+    checkpoint_directory(&root)?;
+    let dir = tempfile::Builder::new().prefix("transaction-").tempdir_in(&root)?;
     snapshot(dir.path(), "before.txt")?;
     let mut targets = fs::OpenOptions::new().write(true).create_new(true).open(dir.path().join("targets.txt"))?;
     writeln!(targets, "{}", missing.iter().cloned().collect::<Vec<_>>().join("\n"))?;
@@ -181,17 +187,143 @@ pub fn install(plan: &Plan, report: &Report, providers: &[String]) -> Result<()>
     println!("Package inventory checkpoint: {}", dir.display());
     let result = Command::new(SUDO).args(&args).status();
     let after = snapshot(&dir, "after.txt");
-    match &result {
-        Ok(status) => fs::write(dir.join("outcome.txt"), format!("{status}\n"))?,
-        Err(error) => fs::write(dir.join("outcome.txt"), format!("could not start sudo: {error}\n"))?,
-    }
+    let outcome = match &result {
+        Ok(status) => format!("{status}\n"),
+        Err(error) => format!("could not start sudo: {error}\n"),
+    };
+    record(&dir, "outcome.txt", &outcome)?;
     if let Err(error) = after { eprintln!("Post-transaction inventory unavailable: {error}"); }
-    let status = result.context("launch package transaction")?;
-    if !status.success() { bail!("pacman did not complete successfully; inspect its output and checkpoint at {}. No automatic rollback attempted.", dir.display()); }
-    let remaining = missing_from_output(query("-T", &requested)?, &requested)
-        .context("pacman exited successfully, but final dependency verification is unavailable")?;
-    if !remaining.is_empty() { bail!("packages remain unsatisfied after transaction: {remaining:?}"); }
+    let status = match result {
+        Ok(status) => status,
+        Err(error) => {
+            record(&dir, "verification.txt", "launch-failed\n")?;
+            return Err(error).context("launch package transaction");
+        }
+    };
+    if !status.success() {
+        record(&dir, "verification.txt", "transaction-failed\n")?;
+        bail!("pacman did not complete successfully; inspect its output and checkpoint at {}. No automatic rollback attempted.", dir.display());
+    }
+    let remaining = match query("-T", &requested).ok().and_then(|out| missing_from_output(out, &requested)) {
+        Some(remaining) => remaining,
+        None => {
+            record(&dir, "verification.txt", "verification-unavailable\n")?;
+            bail!("pacman exited successfully, but final dependency verification is unavailable");
+        }
+    };
+    if !remaining.is_empty() {
+        record(&dir, "verification.txt", "dependencies-unsatisfied\n")?;
+        bail!("packages remain unsatisfied after transaction: {remaining:?}");
+    }
+    record(&dir, "verification.txt", "verified\n")?;
     println!("Requested dependencies verified. No Atelier binaries, rice settings or sessions were changed by the manager.");
+    Ok(())
+}
+
+
+// Completion records are individually atomic and durable. A missing verification
+// marker means the final dependency check is not established, even if pacman exited 0.
+fn record(dir: &Path, name: &str, value: &str) -> Result<()> {
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    temp.write_all(value.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(dir.join(name))?;
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+fn checkpoint_file(path: &Path) -> Result<Option<fs::File>> {
+    let file = match fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o022 != 0 {
+        bail!("unsafe checkpoint file: {}", path.display());
+    }
+    Ok(Some(file))
+}
+fn checkpoint_text(path: &Path) -> Result<Option<String>> {
+    let Some(file) = checkpoint_file(path)? else { return Ok(None); };
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 { bail!("checkpoint metadata exceeds 64 KiB"); }
+    Ok(Some(String::from_utf8(bytes)?))
+}
+#[derive(Debug, Serialize)]
+pub(super) struct HistoryEntry {
+    id: String,
+    status: &'static str,
+    targets: Vec<String>,
+    before_inventory: bool,
+    after_inventory: bool,
+    outcome: Option<String>,
+    error: Option<String>,
+}
+fn read_transaction(root: &Path, id: &str) -> Result<HistoryEntry> {
+    let dir = root.join(id);
+    checkpoint_directory(&dir)?;
+    let before = checkpoint_file(&dir.join("before.txt"))?.is_some();
+    let after = checkpoint_file(&dir.join("after.txt"))?.is_some();
+    let targets = checkpoint_text(&dir.join("targets.txt"))?;
+    let outcome = checkpoint_text(&dir.join("outcome.txt"))?;
+    let verification = checkpoint_text(&dir.join("verification.txt"))?;
+    let status = if !before || targets.is_none() { "incomplete-checkpoint" }
+        else if outcome.is_none() { "outcome-unknown" }
+        else {
+            match verification.as_deref().map(str::trim) {
+                Some("verified") => "verified",
+                Some("launch-failed") => "launch-failed",
+                Some("transaction-failed") => "transaction-failed",
+                Some("verification-unavailable") => "verification-unavailable",
+                Some("dependencies-unsatisfied") => "dependencies-unsatisfied",
+                None => "final-verification-unknown",
+                Some(_) => bail!("unknown checkpoint verification marker"),
+            }
+        };
+    Ok(HistoryEntry { id: id.into(), status,
+        targets: targets.unwrap_or_default().lines().map(str::to_owned).collect(),
+        before_inventory: before, after_inventory: after, outcome, error: None })
+}
+fn history_at(root: &Path) -> Result<Vec<HistoryEntry>> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error.into()),
+        Ok(_) => checkpoint_directory(root)?,
+    }
+    let mut ids = BTreeSet::new();
+    for entry in fs::read_dir(root)? {
+        if let Ok(id) = entry?.file_name().into_string() {
+            if id.strip_prefix("transaction-").is_some_and(|suffix| !suffix.is_empty()
+                && suffix.len() <= 64 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())) {
+                ids.insert(id);
+            }
+        }
+    }
+    Ok(ids.into_iter().map(|id| match read_transaction(root, &id) {
+        Ok(entry) => entry,
+        Err(error) => HistoryEntry { id, status: "invalid-checkpoint", targets: vec![],
+            before_inventory: false, after_inventory: false, outcome: None, error: Some(format!("{error:#}")) },
+    }).collect())
+}
+pub(super) fn history() -> Result<Vec<HistoryEntry>> {
+    history_at(&checkpoint_root()?)
+}
+pub fn show_history(json: bool) -> Result<()> {
+    let entries = history()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"schema":1,"transactions":entries}))?);
+    } else {
+        if entries.is_empty() { println!("No package transaction checkpoints."); }
+        for entry in entries {
+            println!("{} [{}] — {}", entry.id, entry.status, entry.targets.join(", "));
+            println!("  Before inventory: {}; after inventory: {}", entry.before_inventory, entry.after_inventory);
+            if let Some(error) = entry.error { println!("  Checkpoint error: {error}"); }
+        }
+        println!("Historical results only; missing markers can indicate interruption or legacy records. No package repair or rollback is performed.");
+    }
     Ok(())
 }
 
@@ -219,6 +351,27 @@ mod tests {
         assert!(transaction_args(&BTreeSet::new()).is_err());
         assert!(transaction_args(&BTreeSet::from(["--noconfirm".into()])).is_err());
         assert!(transaction_args(&BTreeSet::from(["foo;bar".into()])).is_err());
+    }
+    #[test]
+    fn history_distinguishes_interrupted_legacy_and_verified_checkpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("history");
+        assert!(history_at(&root).unwrap().is_empty());
+        assert!(!root.exists());
+        let dir = root.join("transaction-A");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("before.txt"), "gtk4 1\n").unwrap();
+        fs::write(dir.join("targets.txt"), "niri\n").unwrap();
+        assert_eq!(history_at(&root).unwrap()[0].status, "outcome-unknown");
+        record(&dir, "outcome.txt", "exit status: 0\n").unwrap();
+        assert_eq!(history_at(&root).unwrap()[0].status, "final-verification-unknown");
+        record(&dir, "verification.txt", "verified\n").unwrap();
+        assert_eq!(history_at(&root).unwrap()[0].status, "verified");
+        assert!(!history_at(&root).unwrap()[0].after_inventory);
+        assert!(record(&dir, "verification.txt", "transaction-failed\n").is_err());
+        fs::remove_file(dir.join("targets.txt")).unwrap();
+        std::os::unix::fs::symlink(dir.join("before.txt"), dir.join("targets.txt")).unwrap();
+        assert_eq!(history_at(&root).unwrap()[0].status, "invalid-checkpoint");
     }
     #[test]
     fn local_query_is_fail_closed() {

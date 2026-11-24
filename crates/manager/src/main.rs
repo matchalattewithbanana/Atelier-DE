@@ -210,6 +210,7 @@ fn main() -> Result<()> {
     match args.as_slice() {
         [mode, rest @ ..] if mode == "release-manifest" => release::generate(rest)?,
         [mode, manifest, flag, source] if mode == "release-verify" && flag == "--from" => release::verify(Path::new(manifest), Path::new(source))?,
+        [mode, manifest, sig_flag, sig, key_flag, key, from, source] if mode == "release-verify-signed" && sig_flag == "--signature" && key_flag == "--key" && from == "--from" => release::verify_signed(Path::new(manifest), Path::new(sig), Path::new(key), Path::new(source))?,
         [mode] if mode == "session-check" => session::check()?,
         [mode, backend] if mode == "session-launch" && backend == "--nested" => session::launch(false)?,
         [mode, backend, flag] if mode == "session-launch" && backend == "--nested" && flag == "--no-shell" => session::launch(true)?,
@@ -281,6 +282,16 @@ fn main() -> Result<()> {
         }
         [mode, flag, source, products @ ..] if (mode == "update" || mode == "update-plan") && flag == "--from" => deploy::update(Path::new(source), products, mode == "update-plan")?,
         [mode, flag, source, products @ ..] if mode == "stage" && flag == "--from" => { deploy::run(Path::new(source), products)?; }
+        [mode] if mode == "package-history" => packages::show_history(false)?,
+        [mode, flag] if mode == "package-history" && flag == "--json" => packages::show_history(true)?,
+        [mode] if mode == "recovery-status" => {
+            let native = selection::recovery().unwrap_or_else(|error| serde_json::json!({"error":format!("{error:#}")}));
+            let packages = match packages::history() {
+                Ok(entries) => serde_json::json!({"transactions":entries}),
+                Err(error) => serde_json::json!({"error":format!("{error:#}")}),
+            };
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"schema":1,"native":native,"packages":packages}))?);
+        }
         [mode] if mode == "deployments" => selection::list(false)?,
         [mode, flag] if mode == "deployments" && flag == "--json" => selection::list(true)?,
         [mode, id] if mode == "deployment-info" => selection::info(id)?,
@@ -288,7 +299,7 @@ fn main() -> Result<()> {
         [mode, id] if mode == "activate" => selection::activate(Some(id))?,
         [mode] if mode == "rollback" => selection::activate(None)?,
         [mode] if mode == "active-path" => selection::active_path()?,
-        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
+        [flag] if flag == "--help" || flag == "-h" => println!("atelier-manager doctor [--json]\natelier-manager mango-setup --from CHECKOUT [--plan|--rollback]\natelier-manager catalog [--json]\natelier-manager plan PRODUCT [PRODUCT...] [--json]\natelier-manager setup [--json]\natelier-manager setup --install\natelier-manager setup --from BUILD_DIR\natelier-manager setup --packages\natelier-manager packages PRODUCT [PRODUCT...] [--json]\natelier-manager install-packages PRODUCT [PRODUCT...]\natelier-manager stage --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager update-plan | update --from BUILD_DIR PRODUCT [PRODUCT...]\natelier-manager deployments [--json] | deployment-info ID | verify ID | activate ID | rollback | active-path\natelier-manager session-check | session-launch --nested [--no-shell]\natelier-manager package-history [--json] | recovery-status\natelier-manager release-manifest --from BUILD_DIR --version VERSION --revision SHA PRODUCT [PRODUCT...]\natelier-manager release-verify MANIFEST --from BUILD_DIR\natelier-manager release-verify-signed MANIFEST --signature SIG --key PUBLIC_KEY --from BUILD_DIR\nPlain setup is preview-only; setup --install opens the interactive ecosystem menu; setup --packages offers a separately confirmed system package transaction; setup --from offers native staging and selection."),
         _ => bail!("usage: atelier-manager --help"),
     }
     Ok(())
