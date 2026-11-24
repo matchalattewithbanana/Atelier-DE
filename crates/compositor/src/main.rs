@@ -3,6 +3,9 @@
 mod nested;
 mod state;
 mod layout;
+mod input_router;
+#[cfg(feature = "native-input")]
+mod native_input;
 mod hardware;
 #[cfg(feature = "native-seat")]
 mod seat;
@@ -19,6 +22,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut socket = None;
     let mut nested = false;
+    let mut check_input = false;
     let mut probe = false;
     let mut check_seat = false;
     let mut check_gbm = false;
@@ -27,6 +31,7 @@ fn main() -> Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--nested" => nested = true,
+            "--check-input" => check_input = true,
             "--probe-hardware" => probe = true,
             "--check-seat" => check_seat = true,
             "--check-gbm" => check_gbm = true,
@@ -39,6 +44,13 @@ fn main() -> Result<()> {
             }
             other => bail!("unknown argument {other}"),
         }
+    }
+    if check_input {
+        if nested || probe || check_seat || check_gbm || check_render || check_kms || socket.is_some() { bail!("--check-input cannot be combined with other modes"); }
+        #[cfg(feature = "native-input")]
+        return seat::check(seat::Check::Input);
+        #[cfg(not(feature = "native-input"))]
+        bail!("rebuild with --features native-input to check libinput");
     }
     if check_kms {
         if nested || probe || check_seat || check_gbm || check_render || socket.is_some() { bail!("--check-kms cannot be combined with other modes"); }
