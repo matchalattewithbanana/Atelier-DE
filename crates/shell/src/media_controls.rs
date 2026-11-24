@@ -84,7 +84,7 @@ pub fn show(app: &gtk::Application) {
                     let new_players = match result {
                         Ok(snapshot) => {
                             if snapshot.players.is_empty() { status.set_text("No MPRIS media players detected."); }
-                            else if status.text().as_str() == "No MPRIS media players detected." { status.set_text(""); }
+                            else if status.text().as_str() == "No MPRIS media players detected." || status.text().starts_with("Media unavailable:") { status.set_text(""); }
                             snapshot.players
                         }
                         Err(error) => { status.set_text(&format!("Media unavailable: {error}")); Vec::new() }
@@ -94,7 +94,8 @@ pub fn show(app: &gtk::Application) {
                     *players.borrow_mut() = new_players;
                     if changed {
                         choice.remove_all();
-                        for player in players.borrow().iter() { choice.append(Some(&player.id), &player.id); }
+                        let ids: Vec<_> = players.borrow().iter().map(|player| player.id.clone()).collect();
+                        for id in ids { choice.append(Some(&id), &id); }
                         if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) { choice.set_active(Some(0)); }
                     }
                     display(&choice);
