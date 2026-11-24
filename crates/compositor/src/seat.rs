@@ -22,6 +22,8 @@ pub enum Check {
     Kms,
     #[cfg(feature = "native-kms")]
     Atomic,
+    #[cfg(feature = "native-kms")]
+    Present,
 }
 
 pub fn check(kind: Check) -> Result<()> {
@@ -67,6 +69,21 @@ pub fn check(kind: Check) -> Result<()> {
         Check::Kms => crate::kms_check::check(&fd),
         #[cfg(feature = "native-kms")]
         Check::Atomic => crate::kms_check::check_atomic(&fd),
+        #[cfg(feature = "native-kms")]
+        Check::Present => {
+            use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+            let running = Arc::new(AtomicBool::new(true));
+            let signal = Arc::clone(&running);
+            let setup = ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst));
+            match setup {
+                Err(error) => Err(anyhow::anyhow!("install preview signal handler: {error}")),
+                Ok(()) => crate::kms_check::present_test(&fd, || {
+                    event_loop.dispatch(Duration::from_millis(20), &mut ())
+                        .map_err(|error| anyhow::anyhow!("dispatch seat events: {error}"))?;
+                    Ok(session.is_active() && running.load(Ordering::SeqCst))
+                }),
+            }
+        },
     };
     // Always release the seat descriptor, including after allocation/export failure.
     let release_result = session.close(fd).map_err(|error| anyhow::anyhow!("release {}: {error}", device.display()));
@@ -76,7 +93,7 @@ pub fn check(kind: Check) -> Result<()> {
         (Ok(()), Ok(())) => {}
     }
     println!("Seat-mediated DRM open and close succeeded: {}", device.display());
-    println!("No display mode was changed. KMS presentation and input dispatch remain unimplemented.");
+    println!("No display mode was changed. Continuous frame scheduling and input dispatch remain unimplemented.");
     Ok(())
 }
 
