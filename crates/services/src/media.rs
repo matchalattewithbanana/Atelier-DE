@@ -34,8 +34,8 @@ impl MediaAction {
 }
 
 fn run(args: &[&str]) -> Result<Output> {
-    Command::new("playerctl").args(args).env("LC_ALL", "C").output()
-        .context("run playerctl (install it for MPRIS media support)")
+    Command::new("timeout").args(["--kill-after=1s", "3s", "playerctl"]).args(args).env("LC_ALL", "C").output()
+        .context("run playerctl through coreutils timeout (both required for MPRIS support)")
 }
 
 fn valid_id(id: &str) -> bool {
