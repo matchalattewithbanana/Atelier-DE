@@ -126,3 +126,14 @@ See [Native release manifest v1](RELEASE_MANIFEST.md) for local manifest generat
 ## Deployment storage planning
 
 `atelier-manager deployment-cleanup-plan` reports logical artifact sizes and protection reasons for selected/rollback bundles, referenced bases, and incomplete inventories. It never deletes deployments: running processes may still rely on an older bundle even if it is no longer selected. Runtime-use tracking and explicit removal are separate future work.
+
+## Managed runtime leases
+
+```sh
+atelier-manager session-launch --nested
+atelier-manager run-product settings
+atelier-manager run-product shell
+atelier-manager deployment-cleanup-plan
+```
+
+Manager-mediated nested sessions and independent shell/settings/services/notifications launches verify the selected deployment and acquire a shared per-deployment runtime lock under the selection lock. The descriptor survives exec and may be inherited by children, conservatively protecting the bundle until the last holder closes it. No PID files or stale-PID heuristics are used. The report distinguishes managed-in-use, no-managed-lease, untracked and unknown. Do not unlink runtime.lock files. Older binaries, direct executable launches and applications that close inherited descriptors are not covered. No managed lease is not proof that a bundle is unused; deployment removal remains disabled pending an explicit offline removal design. Arguments to run-product are passed literally to the catalog-selected native executable. No session registration, package change or activation occurs.

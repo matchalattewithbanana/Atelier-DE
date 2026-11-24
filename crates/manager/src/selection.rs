@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}};
+use std::{collections::BTreeSet, fs::{self, File, OpenOptions}, io::{self, Read, Write}, os::{fd::AsRawFd, unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt}}, path::{Path, PathBuf}, process::Command};
 use crate::{catalog, deploy::{data_root, ensure_root, Manifest}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,13 +94,18 @@ fn write_selection(root: &Path, state: &Selection) -> Result<()> {
     File::open(root)?.sync_all()?;
     Ok(())
 }
-fn switch(root: &Path, reviewed: &Selection, target: &str) -> Result<()> {
-    ensure_root(root)?;
+fn selection_lock(root: &Path) -> Result<File> {
+    directory(root)?;
     let lock = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(root.join("selection.lock"))?;
     let metadata = lock.metadata()?;
     if !metadata.is_file() || !owned(&metadata) { bail!("invalid deployment selection lock"); }
     FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+fn switch(root: &Path, reviewed: &Selection, target: &str) -> Result<()> {
+    ensure_root(root)?;
+    let _lock = selection_lock(root)?;
     let current = load_selection(root)?;
     if &current != reviewed { bail!("selection changed during review; retry"); }
     manifest(root, target, true)?;
@@ -179,6 +184,90 @@ fn recovery_at(root: &Path) -> Result<serde_json::Value> {
     }))
 }
 
+
+// A shared flock on a stable per-bundle inode survives exec and can be
+// inherited by children. Never unlink or replace a runtime lease file.
+// Absence of a held lock is not proof that unmanaged programs are stopped.
+fn lease_file(bundle: &Path, create: bool) -> Result<File> {
+    directory(bundle)?;
+    let file = OpenOptions::new().read(true).write(true).create(create).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(bundle.join("runtime.lock"))?;
+    let m = file.metadata()?;
+    if !m.is_file() || !owned(&m) || m.nlink() != 1 { bail!("unsafe deployment runtime lock"); }
+    Ok(file)
+}
+fn runtime_status(bundle: &Path) -> &'static str {
+    let file = match lease_file(bundle, false) {
+        Ok(file) => file,
+        Err(error) if error.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::NotFound) => return "untracked",
+        Err(_) => return "unknown",
+    };
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => "no-managed-lease",
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => "managed-in-use",
+        Err(_) => "unknown",
+    }
+}
+
+pub(super) struct LeasedBin { bin: PathBuf, lease: File }
+impl LeasedBin {
+    pub(super) fn path(&self) -> &Path { &self.bin }
+    pub(super) fn exec(self, mut command: Command) -> Result<()> {
+        // Clear CLOEXEC only in the execing process. The lock remains held
+        // across the supervisor's lifetime and inherited child descriptors.
+        inherit_lease(&self.lease)?;
+        Err(command.exec()).context("launch leased Atelier component")
+    }
+}
+fn inherit_lease(file: &File) -> Result<()> {
+    let fd = file.as_raw_fd();
+    // SAFETY: fd belongs to the live File; fcntl only updates descriptor flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 { return Err(io::Error::last_os_error().into()); }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+fn lease_selected(root: &Path, required: &[&str]) -> Result<LeasedBin> {
+    // Serialize selection and lease acquisition; future removal must take
+    // this lock before testing the per-bundle exclusive lease.
+    let _selection = selection_lock(root)?;
+    let id = load_selection(root)?.current.context("no selected deployment")?;
+    let m = manifest(root, &id, true)?;
+    for name in required {
+        if !m.artifacts.iter().any(|a| a.name == *name) {
+            bail!("selected deployment lacks {name}");
+        }
+    }
+    let bundle = root.join(id);
+    let lease = lease_file(&bundle, true)?;
+    FileExt::lock_shared(&lease)?;
+    Ok(LeasedBin { bin: bundle.join("bin"), lease })
+}
+pub(super) fn leased_session(no_shell: bool) -> Result<LeasedBin> {
+    let names = ["atelier-session", "atelier-compositor", "atelier-shell"];
+    lease_selected(&data_root()?, &names[..if no_shell { 2 } else { 3 }])
+}
+
+fn launchable_product(id: &str) -> Result<&'static str> {
+    match id {
+        "shell" | "settings" | "services" | "notifications" => {
+            let p = catalog::PRODUCTS.iter().find(|p| p.id == id).context("missing native catalog entry")?;
+            Ok(p.binaries[0])
+        }
+        _ => bail!("run-product supports shell, settings, services and notifications; use session-launch for the nested desktop"),
+    }
+}
+pub fn run_product(id: &str, args: &[String]) -> Result<()> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run as your desktop user, not root"); }
+    let name = launchable_product(id)?;
+    let leased = lease_selected(&data_root()?, &[name])?;
+    let mut command = Command::new(leased.path().join(name));
+    command.args(args);
+    leased.exec(command)
+}
+
 fn cleanup_report(root: &Path) -> Result<serde_json::Value> {
     let report = inventory(root)?;
     let referenced: BTreeSet<_> = report.deployments.iter().filter_map(|entry| {
@@ -186,15 +275,17 @@ fn cleanup_report(root: &Path) -> Result<serde_json::Value> {
     }).collect();
     let uncertain = report.deployments.iter().any(|entry| entry.manifest.is_none());
     let entries: Vec<_> = report.deployments.iter().map(|entry| {
+        let runtime = runtime_status(&root.join(&entry.id));
         let reason = if entry.role == "current" || entry.role == "previous" { "selected-or-rollback" }
             else if referenced.contains(entry.id.as_str()) { "referenced-base" }
+            else if runtime == "managed-in-use" { "managed-runtime-lease" }
             else if uncertain { "inventory-incomplete" }
             else { "unreferenced-runtime-unknown" };
         let bytes = entry.manifest.as_ref().map(|m| m.artifacts.iter().map(|a| a.bytes).sum::<u64>());
-        serde_json::json!({"id":entry.id,"role":entry.role,"bytes":bytes,"protection":reason,"removable":false})
+        serde_json::json!({"id":entry.id,"role":entry.role,"bytes":bytes,"protection":reason,"runtime":runtime,"removable":false})
     }).collect();
     Ok(serde_json::json!({"schema":1,"deployments":entries,
-        "note":"Read-only planning. Running sessions may use any prior bundle; deletion remains disabled until runtime-use tracking is available."}))
+        "note":"Read-only planning. Managed leases are tracked, but unmanaged and older launches may still use any bundle; deletion remains disabled."}))
 }
 pub fn cleanup_plan() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&cleanup_report(&data_root()?)?)?);
@@ -314,6 +405,45 @@ mod tests {
         switch(root, &second, "deployment-A").unwrap();
         assert_eq!(load_selection(root).unwrap().current.as_deref(), Some("deployment-A"));
         assert!(root.join("deployment-B/bin/atelier-shell").exists());
+    }
+    #[test]
+    fn managed_leases_survive_selection_changes_and_release_on_close() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fixture(root,"deployment-A",b"one");
+        fixture(root,"deployment-B",b"two");
+        switch(root,&Selection::default(),"deployment-A").unwrap();
+        assert_eq!(runtime_status(&root.join("deployment-A")),"untracked");
+        let first = lease_selected(root,&["atelier-shell"]).unwrap();
+        let second = lease_selected(root,&["atelier-shell"]).unwrap();
+        switch(root,&load_selection(root).unwrap(),"deployment-B").unwrap();
+        assert_eq!(runtime_status(&root.join("deployment-A")),"managed-in-use");
+        drop(first);
+        assert_eq!(runtime_status(&root.join("deployment-A")),"managed-in-use");
+        drop(second);
+        assert_eq!(runtime_status(&root.join("deployment-A")),"no-managed-lease");
+        assert!(lease_selected(root,&["atelier-settings"]).is_err());
+    }
+    #[test]
+    fn lease_descriptor_survives_exec_until_child_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lease = lease_file(tmp.path(),true).unwrap();
+        FileExt::lock_shared(&lease).unwrap();
+        inherit_lease(&lease).unwrap();
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        drop(lease);
+        let held = runtime_status(tmp.path());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(held,"managed-in-use");
+        assert_eq!(runtime_status(tmp.path()),"no-managed-lease");
+    }
+    #[test]
+    fn product_launch_is_catalog_restricted() {
+        assert_eq!(launchable_product("settings").unwrap(),"atelier-settings");
+        assert!(launchable_product("desktop").is_err());
+        assert!(launchable_product("session").is_err());
+        assert!(launchable_product("../bin/sh").is_err());
     }
     #[test]
     fn cleanup_report_protects_selection_and_referenced_bases() {

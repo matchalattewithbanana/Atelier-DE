@@ -1,6 +1,6 @@
 //! Verified launch of an experimental nested session from the selected deployment.
 use anyhow::{bail, Context, Result};
-use std::{env, io, os::unix::process::CommandExt, path::{Path, PathBuf}, process::Command};
+use std::{env, path::{Path, PathBuf}, process::Command};
 use crate::selection;
 
 fn user_only() -> Result<()> {
@@ -41,12 +41,12 @@ pub fn check() -> Result<()> {
 pub fn launch(no_shell: bool) -> Result<()> {
     user_only()?;
     host_check()?;
-    let bin = selection::verified_session_bin(no_shell)?;
-    println!("Starting experimental nested Atelier from {}", bin.display());
+    let leased = selection::leased_session(no_shell)?;
+    println!("Starting experimental nested Atelier from {}", leased.path().display());
     println!("The existing graphical session remains the host; close the nested window to exit.");
     // Replace this CLI process so the existing supervisor owns signals and children.
-    let error: io::Error = command(&bin, no_shell).exec();
-    Err(error).context("launch verified Atelier session")
+    let cmd = command(leased.path(), no_shell);
+    leased.exec(cmd)
 }
 
 #[cfg(test)]
