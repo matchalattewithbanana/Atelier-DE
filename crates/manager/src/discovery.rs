@@ -1,7 +1,7 @@
 //! Bounded, read-only discovery of native release candidates. API metadata is untrusted.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Read, os::unix::fs::{MetadataExt, PermissionsExt}, process::{Command, Stdio}};
+use std::{env, fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, PermissionsExt}, process::{Command, Stdio}};
 
 const NATIVE: &str = "matchalattewithbanana/Atelier-DE";
 const GH: &str = "/usr/bin/gh";
@@ -9,25 +9,25 @@ const TIMEOUT: &str = "/usr/bin/timeout";
 const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-struct ApiRelease {
-    id: u64,
+pub(super) struct ApiRelease {
+    pub id: u64,
     tag_name: String,
-    draft: bool,
-    prerelease: bool,
-    assets: Vec<ApiAsset>,
+    pub draft: bool,
+    pub prerelease: bool,
+    pub assets: Vec<ApiAsset>,
 }
 #[derive(Debug, Deserialize)]
-struct ApiAsset {
+pub(super) struct ApiAsset {
     id: u64,
     name: String,
     state: String,
     size: u64,
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct Asset {
-    id: u64,
-    name: String,
-    size: u64,
+pub(super) struct Asset {
+    pub id: u64,
+    pub name: String,
+    pub size: u64,
 }
 #[derive(Debug, Serialize)]
 struct Candidate {
@@ -38,7 +38,7 @@ struct Candidate {
     manifest: Option<Asset>,
     signature: Option<Asset>,
 }
-fn repository(choice: &str) -> Result<&'static str> {
+pub(super) fn repository(choice: &str) -> Result<&'static str> {
     match choice {
         "native" => Ok(NATIVE),
         _ => bail!("unknown release source; native is the only supported release source"),
@@ -51,26 +51,50 @@ fn trusted_tool(path: &str) -> Result<()> {
     }
     Ok(())
 }
-fn fetch(repo: &str) -> Result<Vec<u8>> {
-    if nix::unistd::Uid::effective().is_root() { bail!("run release discovery as your desktop user, not root"); }
+fn request(endpoint: &str, binary: bool, limit: u64, output: &mut impl Write) -> Result<u64> {
+    if nix::unistd::Uid::effective().is_root() { bail!("run release requests as your desktop user, not root"); }
     for path in [GH, TIMEOUT] { trusted_tool(path)?; }
-    let endpoint = format!("repos/{repo}/releases?per_page=20");
-    let mut child = Command::new(TIMEOUT)
-        .args(["--kill-after=2s", "25s", GH, "api", "--hostname", "github.com", "--method", "GET"])
-        .arg(endpoint)
+    let mut command = Command::new(TIMEOUT);
+    command.args(["--kill-after=2s", if binary { "180s" } else { "25s" }, GH, "api", "--hostname", "github.com", "--method", "GET"]);
+    if binary { command.args(["-H", "Accept: application/octet-stream"]); }
+    let mut child = command.arg(endpoint)
         .env("GH_PROMPT_DISABLED", "1").env("GH_PAGER", "cat").env_remove("GH_DEBUG")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().context("launch GitHub release query")?;
-    let mut bytes = Vec::new();
-    let read = child.stdout.take().context("missing query stdout")?
-        .take(MAX_RESPONSE + 1).read_to_end(&mut bytes);
+    let read = match child.stdout.take() {
+        Some(stdout) => io::copy(&mut stdout.take(limit + 1), output),
+        None => Err(io::Error::other("missing query stdout")),
+    };
+    // Closing the pipe and killing on a local write failure avoids waiting for
+    // an abandoned download; timeout also bounds the subprocess lifetime.
+    if read.as_ref().map_or(true, |n| *n > limit) { let _ = child.kill(); }
     let status = child.wait().context("wait for GitHub release query")?;
-    read.context("read GitHub release response")?;
-    if bytes.len() as u64 > MAX_RESPONSE { bail!("release response exceeds 4 MiB"); }
+    let count = read.context("read GitHub release response")?;
+    if count > limit { bail!("release response exceeds size limit"); }
     if !status.success() { bail!("GitHub release query failed ({status}); check network and gh auth status"); }
+    Ok(count)
+}
+fn fetch(repo: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    request(&format!("repos/{repo}/releases?per_page=20"), false, MAX_RESPONSE, &mut bytes)?;
     Ok(bytes)
 }
-fn asset(assets: &[ApiAsset], name: &str, limit: u64) -> Option<Asset> {
+pub(super) fn detail(repo: &str, id: u64, prerelease: bool) -> Result<ApiRelease> {
+    if id == 0 { bail!("invalid release ID"); }
+    let mut bytes = Vec::new();
+    request(&format!("repos/{repo}/releases/{id}"), false, MAX_RESPONSE, &mut bytes)?;
+    let release: ApiRelease = serde_json::from_slice(&bytes)?;
+    if release.id != id || release.draft || (release.prerelease && !prerelease) || release.assets.len() > 1024 {
+        bail!("release is unavailable or outside selected channel");
+    }
+    Ok(release)
+}
+pub(super) fn download(repo: &str, asset: &Asset, output: &mut impl Write) -> Result<()> {
+    let count = request(&format!("repos/{repo}/releases/assets/{}", asset.id), true, asset.size, output)?;
+    if count != asset.size { bail!("asset size mismatch: {}", asset.name); }
+    Ok(())
+}
+pub(super) fn asset(assets: &[ApiAsset], name: &str, limit: u64) -> Option<Asset> {
     let mut matches = assets.iter().filter(|a| a.name == name);
     let a = matches.next()?;
     if matches.next().is_some() || a.id == 0 || a.state != "uploaded" || a.size == 0 || a.size > limit {

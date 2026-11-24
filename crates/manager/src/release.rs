@@ -6,22 +6,24 @@ use crate::{catalog, deploy};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReleaseArtifact {
-    name: String,
-    bytes: u64,
-    sha256: String,
+pub(super) struct ReleaseArtifact {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReleaseManifest {
+pub(super) struct ReleaseManifest {
     schema: u32,
-    version: String,
-    revision: String,
+    pub version: String,
+    pub revision: String,
     os: String,
-    arch: String,
+    pub arch: String,
     products: Vec<String>,
-    artifacts: Vec<ReleaseArtifact>,
+    pub artifacts: Vec<ReleaseArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 fn token(value: &str) -> bool {
@@ -45,7 +47,7 @@ fn expected_products(ids: &[String]) -> Result<(Vec<String>, BTreeSet<&'static s
 
 impl ReleaseManifest {
     fn validate(&self) -> Result<()> {
-        if self.schema != 1 { bail!("unsupported release manifest schema"); }
+        if !matches!((self.schema, self.sequence), (1, None) | (2, Some(1..))) { bail!("unsupported release manifest schema or sequence"); }
         if !token(&self.version) || !lowercase_hex(&self.revision, 40) {
             bail!("invalid release version label or full lowercase Git revision");
         }
@@ -68,11 +70,16 @@ impl ReleaseManifest {
         Ok(())
     }
 
-    fn verify_local(&self, source: &Path) -> Result<()> {
+    pub(super) fn validate_host(&self) -> Result<()> {
         self.validate()?;
         if self.os != env::consts::OS || self.arch != env::consts::ARCH {
             bail!("manifest target does not match this host");
         }
+        Ok(())
+    }
+
+    pub(super) fn verify_local(&self, source: &Path) -> Result<()> {
+        self.validate_host()?;
         let source = source.canonicalize().context("resolve local artifact directory")?;
         if !source.is_dir() { bail!("artifact source must be a directory"); }
         for expected in &self.artifacts {
@@ -96,12 +103,12 @@ fn create(source: &Path, version: &str, revision: &str, ids: &[String]) -> Resul
         artifacts.push(ReleaseArtifact { name: a.name, bytes: a.bytes, sha256: a.sha256 });
     }
     let release = ReleaseManifest { schema: 1, version: version.into(), revision: revision.into(),
-        os: env::consts::OS.into(), arch: env::consts::ARCH.into(), products, artifacts };
+        os: env::consts::OS.into(), arch: env::consts::ARCH.into(), products, artifacts, sequence: None };
     release.validate()?;
     Ok(release)
 }
 
-fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
+pub(super) fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path).with_context(|| format!("open {}", path.display()))?;
     if !file.metadata()?.is_file() { bail!("expected a regular file"); }
@@ -118,7 +125,7 @@ const SIGNER: &str = "atelier-release";
 const NAMESPACE: &str = "atelier-release-v1";
 const SSH_KEYGEN: &str = "/usr/bin/ssh-keygen";
 
-fn allowed_signer(key: &[u8]) -> Result<String> {
+pub(super) fn canonical_key(key: &[u8]) -> Result<String> {
     let key = std::str::from_utf8(key)?.trim();
     if key.lines().count() != 1 { bail!("expected one Ed25519 public key"); }
     let mut fields = key.split_ascii_whitespace();
@@ -128,10 +135,14 @@ fn allowed_signer(key: &[u8]) -> Result<String> {
     if blob.len() != 68 || !blob.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/')) {
         bail!("invalid Ed25519 public key encoding");
     }
-    Ok(format!("{SIGNER} namespaces=\"{NAMESPACE}\" ssh-ed25519 {blob}\n"))
+    Ok(format!("ssh-ed25519 {blob}"))
 }
 
-fn authenticate(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<()> {
+fn allowed_signer(key: &[u8]) -> Result<String> {
+    Ok(format!("{SIGNER} namespaces=\"{NAMESPACE}\" {}\n", canonical_key(key)?))
+}
+
+pub(super) fn authenticate(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<()> {
     let metadata = fs::metadata(SSH_KEYGEN).context("OpenSSH ssh-keygen is required")?;
     if !metadata.is_file() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0
         || metadata.permissions().mode() & 0o111 == 0 {
@@ -168,6 +179,15 @@ pub fn verify_signed(path: &Path, signature: &Path, key: &Path, source: &Path) -
 
 pub fn generate(args: &[String]) -> Result<()> {
     match args {
+        [from, source, version_flag, version, revision_flag, revision, sequence_flag, sequence, products @ ..]
+            if from == "--from" && version_flag == "--version" && revision_flag == "--revision" && sequence_flag == "--sequence" => {
+                let mut release = create(Path::new(source), version, revision, products)?;
+                release.schema = 2;
+                release.sequence = Some(sequence.parse().context("invalid release sequence")?);
+                release.validate()?;
+                println!("{}", serde_json::to_string_pretty(&release)?);
+                Ok(())
+            }
         [from, source, version_flag, version, revision_flag, revision, products @ ..]
             if from == "--from" && version_flag == "--version" && revision_flag == "--revision" => {
                 let release = create(Path::new(source), version, revision, products)?;
