@@ -9,6 +9,8 @@ native-seat = ["smithay/backend_session_libseat", "smithay/backend_udev", "dep:r
 
 native-gbm = ["native-seat", "smithay/backend_gbm"]
 
+native-kms = ["native-gbm", "smithay/backend_drm"]
+
 [dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }
 atelier-config.workspace = true
