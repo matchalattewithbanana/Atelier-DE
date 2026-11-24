@@ -510,9 +510,103 @@ impl WallpaperReview{
     }
 }
 
+pub(super) const LAYOUT_FIELDS:&[(&str,&str,&str)]=&[
+    ("bar.compact","Compact panel","Panel"),
+    ("bar.showWindowTitle","Show active window title","Panel"),
+    ("bar.showDate","Show date beside clock","Panel"),
+    ("dock.enabled","Enable dock","Dock"),
+    ("dock.hideFullscreen","Hide dock on fullscreen","Dock"),
+    ("widgets.calendar","Calendar","Dashboard widgets"),
+    ("widgets.media","Media controls","Dashboard widgets"),
+    ("widgets.focusTimer","Focus timer","Dashboard widgets"),
+    ("widgets.system","System information","Dashboard widgets"),
+];
+#[derive(Deserialize)]
+struct LayoutState{
+    schema:u32,
+    sha256:String,
+    values:std::collections::BTreeMap<String,serde_json::Value>,
+}
+pub(super) struct LayoutReview{
+    path:PathBuf,
+    target:String,
+    state:LayoutState,
+}
+pub(super) fn layout_pins(text:&str)->Result<Vec<String>>{
+    let mut pins=Vec::new();
+    for raw in text.lines().map(str::trim).filter(|s|!s.is_empty()){
+        if raw.len()>256 || !raw.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'.')){
+            bail!("Invalid desktop application ID: {raw}");
+        }
+        let lower=raw.to_ascii_lowercase();
+        let id=lower.strip_suffix(".desktop").unwrap_or(&lower);
+        if !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric) || pins.iter().any(|p|p==id){
+            bail!("Empty or duplicate desktop application ID: {raw}");
+        }
+        pins.push(id.to_owned());
+        if pins.len()>64{bail!("At most 64 pinned applications");}
+    }
+    Ok(pins)
+}
+pub(super) fn review_layout(path:&Path,target:&str)->Result<LayoutReview>{
+    if live_desktop_present(){bail!("close all Mango Atelier sessions before editing layout");}
+    let checkout=Checkout::open(path)?;
+    let state:LayoutState=serde_json::from_slice(&checkout.run(target,&["layout-review","inspect"],"180s")?)
+        .context("unsupported layout review API; update Mango Atelier")?;
+    if state.schema!=1 || state.sha256.len()!=64 || !state.sha256.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))
+        || state.values.len()!=LAYOUT_FIELDS.len()+1 || LAYOUT_FIELDS.iter().any(|(key,_,_)|state.values.get(*key).and_then(|v|v.as_bool()).is_none()){
+        bail!("invalid layout review response");
+    }
+    let pins:Vec<String>=serde_json::from_value(state.values.get("dock.pins").context("missing dock pins")?.clone())?;
+    if pins.len()>64 || pins.iter().any(|p|p.is_empty()||p.len()>256||p.chars().any(char::is_control)){bail!("invalid saved dock pins");}
+    Ok(LayoutReview{path:checkout.root,target:target.into(),state})
+}
+impl LayoutReview{
+    pub(super) fn enabled(&self,key:&str)->bool{self.state.values[key].as_bool().unwrap_or(false)}
+    pub(super) fn pins(&self)->String{
+        self.state.values["dock.pins"].as_array().into_iter().flatten().filter_map(|v|v.as_str()).collect::<Vec<_>>().join("\n")
+    }
+    pub(super) fn changes(&self,toggles:&[bool],pins:&str)->Result<std::collections::BTreeMap<String,serde_json::Value>>{
+        if toggles.len()!=LAYOUT_FIELDS.len(){bail!("invalid layout field set");}
+        let mut edits=std::collections::BTreeMap::new();
+        for ((key,_,_),enabled) in LAYOUT_FIELDS.iter().zip(toggles){
+            if self.enabled(key)!=*enabled{edits.insert((*key).into(),serde_json::json!(enabled));}
+        }
+        // Do not normalize or materialize defaults unless the pin list was edited.
+        if pins!=self.pins(){
+            let value=serde_json::json!(layout_pins(pins)?);
+            if value!=self.state.values["dock.pins"]{edits.insert("dock.pins".into(),value);}
+        }
+        Ok(edits)
+    }
+    pub(super) fn apply(self,toggles:Vec<bool>,pins:String)->Result<String>{
+        if live_desktop_present(){bail!("close all Mango Atelier sessions before editing layout");}
+        let edits=self.changes(&toggles,&pins)?;
+        if edits.is_empty(){return Ok("No layout changes.".into());}
+        let checkout=Checkout::open(&self.path)?;
+        let fingerprint=format!("--expected-sha256={}",self.state.sha256);
+        let payload=format!("--edits-json={}",serde_json::to_string(&edits)?);
+        let output=checkout.run(&self.target,&["layout-review","apply",&fingerprint,&payload],"180s")?;
+        let result:serde_json::Value=serde_json::from_slice(&output)?;
+        match result["status"].as_str(){
+            Some("saved") if result["recovery"].as_str().is_some_and(valid_snapshot_id)=>Ok(format!("Layout saved. Recovery snapshot: {}. Changes take effect on next login.",result["recovery"].as_str().unwrap())),
+            Some("unchanged")=>Ok("No layout changes saved.".into()),
+            _=>bail!("Unknown layout result; inspect Rice backups before retrying"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordered_layout_pins_are_normalized_and_validated(){
+        assert_eq!(layout_pins("Foot.desktop\nFirefox\n").unwrap(),vec!["foot","firefox"]);
+        assert!(layout_pins("Firefox\nfirefox.desktop").is_err());
+        assert!(layout_pins("/bin/sh").is_err());
+        assert!(layout_pins(".desktop").is_err());
+        assert!(layout_pins("").unwrap().is_empty());
+    }
     #[test]
     fn wallpaper_operations_validate_output_and_paths(){
         assert!(wallpaper_args(WallpaperMode::Image,"DP-1","relative.png").is_err());
