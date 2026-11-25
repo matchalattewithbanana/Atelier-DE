@@ -77,6 +77,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         }
         let mut timing = metrics.begin_frame();
         let damage = Rectangle::from_size(size);
+        timing.repaint(damage,damage);
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
             let elements = crate::scene::elements(&state,renderer,&mut shaders,color)?;
