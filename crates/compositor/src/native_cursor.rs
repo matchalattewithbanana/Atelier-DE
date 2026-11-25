@@ -178,8 +178,11 @@ fn bounded_file(data:&[u8])->bool{
 
 impl CursorTheme {
     pub fn load(renderer:&mut GlesRenderer)->Self{
-        let name=std::env::var("XCURSOR_THEME").ok().filter(|s|!s.is_empty()).unwrap_or_else(||"default".into());
-        let size=requested_size(std::env::var("XCURSOR_SIZE").ok().as_deref());
+        let prefs=atelier_config::appearance_path().and_then(|path|atelier_config::Appearance::load(&path)).map(|a|a.cursor).unwrap_or_default();
+        let (name,size)=if prefs.theme.is_empty(){
+            (std::env::var("XCURSOR_THEME").ok().filter(|s|!s.is_empty()).unwrap_or_else(||"default".into()),
+                requested_size(std::env::var("XCURSOR_SIZE").ok().as_deref()))
+        }else{(prefs.theme,prefs.size)};
         let mut theme=Self{theme:xcursor::CursorTheme::load(&name),size,cache:Vec::new(),next_frame:None};
         theme.ensure(renderer,CursorIcon::Default);
         theme

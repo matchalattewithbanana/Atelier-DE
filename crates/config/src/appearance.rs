@@ -158,11 +158,48 @@ impl Motion{
     pub fn is_default(&self)->bool{*self==Self::default()}
 }
 
+/// Local cursor preferences; blank theme preserves the session environment.
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct CursorPreferences{
+    pub theme:String,
+    pub size:u32,
+}
+impl Default for CursorPreferences{
+    fn default()->Self{Self{theme:String::new(),size:24}}
+}
+impl CursorPreferences{
+    pub fn validate(&self)->Result<()>{
+        if self.theme.len()>128||self.theme=="."||self.theme==".."||
+            !self.theme.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'|b' ')){
+            bail!("cursor theme must be a local theme name, not a path");
+        }
+        if !(8..=128).contains(&self.size){bail!("cursor size must be 8–128");}
+        Ok(())
+    }
+    pub fn is_default(&self)->bool{self==&Self::default()}
+    /// Explicit preferences take precedence; inherit the environment if unset.
+    pub fn apply_to(&self,command:&mut std::process::Command){
+        if !self.theme.is_empty(){
+            command.env("XCURSOR_THEME",&self.theme).env("XCURSOR_SIZE",self.size.to_string());
+        }
+    }
+}
+pub const CURSOR_PRESETS:&[&str]=&[
+    "Bibata-Modern-Ice","Bibata-Modern-Classic","Bibata-Modern-Amber",
+    "Bibata-Original-Ice","Bibata-Original-Classic","Bibata-Original-Amber",
+    "Bibata-Modern-Ice-Right","Bibata-Modern-Classic-Right","Bibata-Modern-Amber-Right",
+    "Bibata-Original-Ice-Right","Bibata-Original-Classic-Right","Bibata-Original-Amber-Right",
+    "GoogleDot-Black","GoogleDot-White","GoogleDot-Blue","GoogleDot-Red",
+];
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
     pub version:u32,
     pub accent:String,
+    #[serde(skip_serializing_if="CursorPreferences::is_default")]
+    pub cursor:CursorPreferences,
     pub panel_height:u32,
     pub panel_spacing:u32,
     pub button_radius:u32,
@@ -199,7 +236,7 @@ pub struct Appearance {
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
-    fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
+    fn default()->Self{Self{version:1,accent:String::new(),cursor:CursorPreferences::default(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
         show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,window_rules:crate::WindowRules::default(),backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),motion:Motion::default(),shell_palette:None}}
 }
 impl Appearance{
@@ -211,6 +248,7 @@ impl Appearance{
         for (name,value,min,max) in [("Panel minimum height",self.panel_height,32,80),("Panel spacing",self.panel_spacing,0,24),("Button radius",self.button_radius,0,24),("Launcher icon size",self.launcher_icon_size,16,64),("Dock icon size",self.dock_icon_size,16,64)]{
             if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
         }
+        self.cursor.validate()?;
         validate_dock_pins(&self.dock_pins)?;
         self.widgets.validate()?;
         self.window_spacing.validate()?;
@@ -527,5 +565,23 @@ mod tests{
         for (accent,fg) in [("#000000","#ffffff"),("#ffffff","#000000")]{
             assert!(Appearance{accent:accent.into(),..Appearance::default()}.css().unwrap().contains(&format!("color: {fg}")));
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests{
+    use super::*;
+    #[test]
+    fn cursor_preferences_are_backward_compatible_and_validate(){
+        let old:Appearance=toml::from_str("version = 1").unwrap();
+        assert_eq!(old.cursor,CursorPreferences::default());
+        for theme in CURSOR_PRESETS{assert!(CursorPreferences{theme:(*theme).into(),size:24}.validate().is_ok());}
+        for theme in ["../escape","/absolute",".","..","bad\nname"]{assert!(CursorPreferences{theme:theme.into(),size:24}.validate().is_err());}
+        assert!(CursorPreferences{theme:"default".into(),size:129}.validate().is_err());
+        let mut appearance=old;appearance.cursor=CursorPreferences{theme:"GoogleDot-Blue".into(),size:32};
+        let decoded:Appearance=toml::from_str(&toml::to_string(&appearance).unwrap()).unwrap();
+        assert_eq!(decoded.cursor,appearance.cursor);
+        let mut command=std::process::Command::new("test");decoded.cursor.apply_to(&mut command);
+        assert!(command.get_envs().any(|(key,value)|key=="XCURSOR_THEME"&&value.is_some_and(|v|v=="GoogleDot-Blue")));
     }
 }

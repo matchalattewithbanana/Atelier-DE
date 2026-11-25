@@ -37,8 +37,15 @@ fn main() -> Result<()> {
     let path = runtime.join(&socket);
     if fs::symlink_metadata(&path).is_ok() { bail!("session socket already exists: {}", path.display()); }
 
+    let cursor=if options.backend=="--native"{
+        atelier_config::appearance_path().and_then(|path|atelier_config::Appearance::load(&path))
+            .map(|appearance|appearance.cursor).unwrap_or_else(|error|{eprintln!("Cursor preferences unavailable: {error:#}");Default::default()})
+    }else{atelier_config::CursorPreferences::default()};
     let mut children = Children::default();
-    children.compositor = Some(component("atelier-compositor").args([options.backend, "--socket", &socket]).spawn().context("start atelier-compositor (build the workspace first)")?);
+    let mut compositor=component("atelier-compositor");
+    compositor.args([options.backend,"--socket",&socket]);
+    cursor.apply_to(&mut compositor);
+    children.compositor=Some(compositor.spawn().context("start atelier-compositor (build the workspace first)")?);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if !running.load(Ordering::SeqCst) { return Ok(()); }
@@ -50,7 +57,8 @@ fn main() -> Result<()> {
 
     println!("Atelier session ready; WAYLAND_DISPLAY={socket}");
     if let Some(profile) = &shell {
-        children.shell = Some(wayland_child(profile, &socket).spawn().context("start selected shell")?);
+        let mut command=wayland_child(profile,&socket);cursor.apply_to(&mut command);
+        children.shell=Some(command.spawn().context("start selected shell")?);
     }
     let mut restart_times = Vec::new();
     while running.load(Ordering::SeqCst) {
@@ -65,7 +73,8 @@ fn main() -> Result<()> {
                 if restart_times.len() < 3 {
                     restart_times.push(Instant::now());
                     eprintln!("Atelier shell exited ({status}); restarting ({}/3)", restart_times.len());
-                    children.shell = Some(wayland_child(shell.as_ref().context("missing shell profile")?, &socket).spawn().context("restart selected shell")?);
+                    let mut command=wayland_child(shell.as_ref().context("missing shell profile")?,&socket);cursor.apply_to(&mut command);
+                    children.shell=Some(command.spawn().context("restart selected shell")?);
                 } else {
                     eprintln!("Shell restart limit reached; compositor remains active");
                 }
