@@ -58,7 +58,7 @@ fn query(category:&str,keywords:&str)->Result<String>{
     }
     Ok(format!("topic:{topic} is:public archived:false fork:false {keywords}").trim_end().to_owned())
 }
-fn valid_repo(name:&str)->bool{
+pub(super) fn valid_repo(name:&str)->bool{
     let Some((owner,repo))=name.split_once('/')else{return false;};
     !owner.is_empty()&&owner.len()<=39&&owner.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')
         &&!repo.is_empty()&&repo.len()<=100&&repo!="."&&repo!=".."

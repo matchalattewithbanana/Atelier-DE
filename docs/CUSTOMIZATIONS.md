@@ -52,3 +52,7 @@ Select one category in the Customization catalog and choose Discover online (Git
 ## Local cursor visual previews
 
 Manager → Cursor previews displays six installed XCursor shapes (default, link, text, wait, horizontal resize, move), nearest requested nominal size, first frame and hotspot. Custom installed names are accepted. This reads direct local theme assets using the same bounded image decoder as the native compositor. Missing or invalid shapes are identified, not substituted; runtime theme inheritance may supply additional shapes. No download, execution, GTK cursor override or appearance write occurs. SDDM and other visual previews remain separate future work.
+
+## Save a community reference
+
+Online result cards offer Review and save reference. Review the exact metadata and type the requested confirmation; the existing registry transaction retains its previous-version backup and stale-review protection. CLI: `atelier-manager customizations register-source cursor owner/repository`. The stable custom ID is derived from category and case-insensitive GitHub repository name, and duplicate references in the same category are refused. Targets stay unspecified. This saves a reference, not a clone, installation or trust grant. The CLI may register a repository name without fetching or checking its existence.
