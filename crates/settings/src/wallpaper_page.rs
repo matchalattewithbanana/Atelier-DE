@@ -28,18 +28,18 @@ fn paths(view:&gtk::TextView)->Vec<String>{
 }
 #[derive(Clone)]
 struct Fields{
-    image:gtk::Entry,fit:gtk::ComboBoxText,enabled:gtk::CheckButton,interval:gtk::SpinButton,playlist:gtk::TextView,
+    image:gtk::Entry,fit:gtk::ComboBoxText,enabled:gtk::CheckButton,interval:gtk::SpinButton,playlist:gtk::TextView,blur:gtk::SpinButton,
 }
 impl Fields{
     fn populate(&self,a:&Appearance){
-        self.image.set_text(&a.wallpaper_path);
+        self.image.set_text(&a.wallpaper_path);self.blur.set_value(a.wallpaper_blur as f64);
         self.fit.set_active_id(Some(match a.wallpaper_fit{WallpaperFit::Cover=>"cover",WallpaperFit::Contain=>"contain",WallpaperFit::Stretch=>"stretch"}));
         self.enabled.set_active(a.wallpaper_slideshow.is_some());
         self.interval.set_value(a.wallpaper_slideshow.as_ref().map_or(5,|s|s.interval_minutes) as f64);
         self.playlist.buffer().set_text(&a.wallpaper_slideshow.as_ref().map_or(String::new(),|s|s.images.join("\n")));
     }
     fn collect(&self,a:&Appearance)->anyhow::Result<Appearance>{
-        let mut next=a.clone();next.wallpaper_path=self.image.text().to_string();
+        let mut next=a.clone();next.wallpaper_path=self.image.text().to_string();next.wallpaper_blur=self.blur.value_as_int() as u32;
         next.wallpaper_fit=match self.fit.active_id().as_deref(){Some("contain")=>WallpaperFit::Contain,Some("stretch")=>WallpaperFit::Stretch,_=>WallpaperFit::Cover};
         next.wallpaper_slideshow=self.enabled.is_active().then(||WallpaperSlideshow{images:paths(&self.playlist),interval_minutes:self.interval.value_as_int() as u32});
         next.validate()?;Ok(next)
@@ -70,6 +70,7 @@ pub fn build(parent:&gtk::Box){
     let image=gtk::Entry::new();image.set_placeholder_text(Some("Absolute image path; blank uses solid background"));form.append(&image);
     let browse=gtk::Button::with_label("Choose image directly");choose(&browse,&image,false);form.append(&browse);
     let fit=gtk::ComboBoxText::new();for (id,label) in [("cover","Fill (crop)"),("contain","Fit (letterbox)"),("stretch","Stretch")]{fit.append(Some(id),label);}fit.set_active_id(Some("cover"));form.append(&fit);
+    form.append(&description("Static wallpaper blur (0 disables; not live window backdrop blur)"));let blur=gtk::SpinButton::with_range(0.0,24.0,1.0);form.append(&blur);
     let picture=gtk::Picture::new();picture.set_can_shrink(true);picture.set_content_fit(gtk::ContentFit::Contain);picture.set_size_request(240,160);form.append(&picture);
     let preview=gtk::Button::with_label("Preview selected image");form.append(&preview);
     let clear=gtk::Button::with_label("Use solid background");form.append(&clear);
@@ -85,7 +86,7 @@ pub fn build(parent:&gtk::Box){
     let previous=gtk::Button::with_label("Load previous wallpaper preferences into draft");form.append(&previous);
     let save=gtk::Button::with_label("Save wallpaper preferences");save.add_css_class("suggested-action");save.set_sensitive(false);form.append(&save);
     let status=description("Local images remain in their original location. Changes apply after saving.");status.set_selectable(true);parent.append(&status);
-    let fields=Fields{image:image.clone(),fit,enabled,interval,playlist:playlist.clone()};
+    let fields=Fields{image:image.clone(),fit,enabled,interval,playlist:playlist.clone(),blur:blur.clone()};
     let baseline=Rc::new(RefCell::new(None::<AppearanceReview>));let catalog=Rc::new(RefCell::new(Vec::<String>::new()));
     {let (gallery,catalog)=(gallery.downgrade(),catalog.clone());folder.connect_changed(move|_|{catalog.borrow_mut().clear();if let Some(g)=gallery.upgrade(){g.remove_all();}});}
     {let (form,folder,gallery,status,catalog)=(form.downgrade(),folder.downgrade(),gallery.downgrade(),status.downgrade(),catalog.clone());scan.connect_clicked(move|_|{
@@ -127,10 +128,10 @@ pub fn build(parent:&gtk::Box){
         let state=baseline.borrow();let Some(r)=state.as_ref()else{return;};
         match r.previous(){Ok(a)=>{fields.populate(&a);status.set_text("Previous wallpaper and slideshow preferences loaded into draft.");}Err(e)=>status.set_text(&format!("{e:#}"))}
     });}
-    {let (form,image,picture,status)=(form.downgrade(),image.downgrade(),picture.downgrade(),status.downgrade());preview.connect_clicked(move|_|{
+    {let (form,image,picture,status,blur)=(form.downgrade(),image.downgrade(),picture.downgrade(),status.downgrade(),blur.downgrade());preview.connect_clicked(move|_|{
         let (Some(f),Some(i),Some(s))=(form.upgrade(),image.upgrade(),status.upgrade())else{return;};
-        let path=PathBuf::from(i.text().as_str());s.set_text("Decoding preview…");
-        let (picture,status)=(picture.clone(),status.clone());work(&f,move||wallpaper::decode(&path,480),move|result|{
+        let path=PathBuf::from(i.text().as_str());let Some(blur)=blur.upgrade()else{return;};let strength=blur.value_as_int() as u32;s.set_text("Decoding preview…");
+        let (picture,status)=(picture.clone(),status.clone());work(&f,move||wallpaper::decode_background(&path,strength),move|result|{
             if let (Some(p),Some(s))=(picture.upgrade(),status.upgrade()){match result{Ok(r)=>{p.set_paintable(Some(&texture(r)));s.set_text("Preview only; desktop unchanged.");}Err(e)=>s.set_text(&format!("Preview rejected: {e:#}"))}}
         });
     });}
@@ -144,7 +145,7 @@ pub fn build(parent:&gtk::Box){
                 for path in &playlist.images{wallpaper::validate_candidate(std::path::Path::new(path))?;}
                 playlist.images.first().cloned()
             }else if next.wallpaper_path.is_empty(){None}else{Some(next.wallpaper_path.clone())};
-            let raster=first.map(|p|wallpaper::decode(std::path::Path::new(&p),480)).transpose()?;
+            let raster=first.map(|p|wallpaper::decode_background(std::path::Path::new(&p),next.wallpaper_blur)).transpose()?;
             Ok((next,raster))
         },move|result|{
             if let Some(s)=status.upgrade(){match result{

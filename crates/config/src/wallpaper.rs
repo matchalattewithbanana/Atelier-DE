@@ -29,6 +29,17 @@ pub fn decode(path:&Path,max_edge:u32)->Result<Raster>{
     let rgba=image.into_rgba8();let (width,height)=rgba.dimensions();
     Ok(Raster{width,height,rgba:rgba.into_raw()})
 }
+/// Optional static wallpaper blur, not compositor backdrop blur.
+pub fn decode_background(path:&Path,strength:u32)->Result<Raster>{
+    if strength>24{bail!("wallpaper blur must be 0–24");}
+    if strength==0{return decode(path,4096);}
+    // Limit working pixels and sigma for the CPU filter. Blur only on image
+    // or strength changes, never every compositor frame.
+    let r=decode(path,1536)?;
+    let image=image::RgbaImage::from_raw(r.width,r.height,r.rgba).ok_or_else(||anyhow::anyhow!("invalid raster dimensions"))?;
+    let blurred=image::imageops::blur(&image,strength as f32);
+    Ok(Raster{width:r.width,height:r.height,rgba:blurred.into_raw()})
+}
 /// Non-recursive local catalog. Never follow a final symlink or decode
 /// arbitrary directory contents. A candidate still needs decode validation.
 pub fn gallery(folder:&Path)->Result<Vec<String>>{
@@ -76,6 +87,15 @@ pub fn palette_seed(path:&Path)->Result<[u8;3]>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn wallpaper_blur_softens_edges(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("edge.png");
+        image::RgbaImage::from_fn(64,32,|x,_|if x<32{image::Rgba([0,0,0,255])}else{image::Rgba([255,255,255,255])}).save(&path).unwrap();
+        let plain=decode_background(&path,0).unwrap();let soft=decode_background(&path,4).unwrap();
+        assert_eq!(plain.rgba[(16*64+31)*4],0);
+        assert!(soft.rgba[(16*64+31)*4]>0&&soft.rgba[(16*64+31)*4]<255);
+        assert!(decode_background(&path,25).is_err());
+    }
     #[test]
     fn gallery_is_sorted_and_excludes_symlinks_and_subdirectories(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path();

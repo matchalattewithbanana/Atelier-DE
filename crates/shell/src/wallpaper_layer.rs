@@ -26,19 +26,21 @@ impl Rotation{
         playlist.images[self.index].clone()
     }
 }
+#[derive(Clone,PartialEq,Eq)]
+struct ImageKey{path:String,blur:u32}
 type DecodeResult=anyhow::Result<wallpaper::Raster>;
 #[derive(Default)]
 pub struct WallpaperLayer{
     rotation:Rotation,
     surface:Option<(gtk::ApplicationWindow,gtk::Picture)>,
-    displayed:Option<String>,
-    attempted:Option<String>,
-    pending:Option<(String,mpsc::Receiver<DecodeResult>)>,
+    displayed:Option<ImageKey>,
+    attempted:Option<ImageKey>,
+    pending:Option<(ImageKey,mpsc::Receiver<DecodeResult>)>,
 }
 impl WallpaperLayer{
     pub fn update(&mut self,app:&gtk::Application,prefs:&Appearance){
         let path=self.rotation.target(prefs,Instant::now(),self.pending.is_some());
-        let path=path.as_str();let fit=prefs.wallpaper_fit;
+        let key=ImageKey{path,blur:prefs.wallpaper_blur};let path=key.path.as_str();let fit=prefs.wallpaper_fit;
         if path.is_empty(){
             self.clear_surface();self.attempted=None;
         }
@@ -46,7 +48,7 @@ impl WallpaperLayer{
         // when the user has cleared or changed the path during decoding.
         if let Some((requested,receiver))=self.pending.take(){
             match receiver.try_recv(){
-                Ok(result) if requested==path&&!path.is_empty()=>{
+                Ok(result) if requested==key&&!path.is_empty()=>{
                     match result{
                         Ok(raster)=>{self.show(app,raster,fit);self.displayed=Some(requested);}
                         Err(error)=>eprintln!("Native wallpaper rejected; retaining previous background: {error:#}"),
@@ -62,14 +64,14 @@ impl WallpaperLayer{
             if picture.content_fit()!=fit{picture.set_content_fit(fit);}
         }
         if path.is_empty()||self.pending.is_some(){return;}
-        if self.displayed.as_deref()==Some(path){
-            self.attempted=Some(path.into());return;
+        if self.displayed.as_ref()==Some(&key){
+            self.attempted=Some(key.clone());return;
         }
-        if self.attempted.as_deref()==Some(path){return;}
-        self.attempted=Some(path.into());
-        let (tx,rx)=mpsc::sync_channel(1);let source=PathBuf::from(path);
-        std::thread::spawn(move||{let _=tx.send(wallpaper::decode(&source,4096));});
-        self.pending=Some((path.into(),rx));
+        if self.attempted.as_ref()==Some(&key){return;}
+        self.attempted=Some(key.clone());
+        let (tx,rx)=mpsc::sync_channel(1);let source=PathBuf::from(path);let blur=key.blur;
+        std::thread::spawn(move||{let _=tx.send(wallpaper::decode_background(&source,blur));});
+        self.pending=Some((key,rx));
     }
     fn show(&mut self,app:&gtk::Application,raster:wallpaper::Raster,fit:WallpaperFit){
         let texture=gtk::gdk::MemoryTexture::new(raster.width as i32,raster.height as i32,gtk::gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(raster.rgba),raster.width as usize*4);

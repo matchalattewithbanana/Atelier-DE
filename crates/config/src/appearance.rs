@@ -113,6 +113,33 @@ impl WindowShadow{
     pub fn is_default(&self)->bool{*self==Self::default()}
 }
 
+/// Percentage opacity. Shell values affect backgrounds only, not text/icons.
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct Transparency{
+    pub focused:u32,
+    pub unfocused:u32,
+    pub panel:u32,
+    pub dock:u32,
+    pub widgets:u32,
+}
+impl Default for Transparency{
+    fn default()->Self{Self{focused:100,unfocused:100,panel:100,dock:100,widgets:100}}
+}
+impl Transparency{
+    pub fn validate(&self)->Result<()>{
+        if [self.focused,self.unfocused].iter().any(|n|!(70..=100).contains(n))
+            ||[self.panel,self.dock,self.widgets].iter().any(|n|!(65..=100).contains(n)){
+            bail!("window opacity must be 70–100%, shell background opacity 65–100%");
+        }
+        Ok(())
+    }
+    pub fn is_default(&self)->bool{*self==Self::default()}
+    pub fn window_alpha(&self,focused:bool,special:bool)->f32{
+        if special{1.0}else{(if focused{self.focused}else{self.unfocused}) as f32/100.0}
+    }
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -135,16 +162,18 @@ pub struct Appearance {
     pub dock_pins:Vec<String>,
     pub wallpaper_path:String,
     pub wallpaper_fit:WallpaperFit,
+    pub wallpaper_blur:u32,
     pub wallpaper_slideshow:Option<WallpaperSlideshow>,
     pub widgets:DesktopWidgets,
     pub window_spacing:WindowSpacing,
     pub window_border:WindowBorder,
     pub window_shadow:WindowShadow,
+    pub transparency:Transparency,
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),transparency:Transparency::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -160,6 +189,8 @@ impl Appearance{
         self.window_spacing.validate()?;
         self.window_border.validate()?;
         self.window_shadow.validate()?;
+        self.transparency.validate()?;
+        if self.wallpaper_blur>24{bail!("wallpaper blur must be 0–24");}
         if let Some(slideshow)=&self.wallpaper_slideshow{slideshow.validate()?;}
         if let Some(palette)=&self.shell_palette{palette.validate()?;}
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
@@ -180,6 +211,14 @@ impl Appearance{
         css.push_str(" .atelier-dock button.running-task { border-bottom: 2px solid currentColor; }");
         css.push_str(&format!(" .atelier-widget {{ background: @theme_bg_color; border-radius: {}px; padding: 12px; }} .atelier-widget button {{ border-radius: {}px; }}",self.button_radius,self.button_radius));
         if let Some(palette)=&self.shell_palette{css.push_str(&palette.css()?);}
+        // Explicit transparent layer roots avoid an opaque GTK window backing.
+        css.push_str(" window.atelier-panel-layer, window.atelier-dock-layer, window.atelier-widget-layer { background: transparent; }");
+        let color=self.shell_palette.as_ref().map_or("@theme_bg_color",|p|p.surface.as_str());
+        for (class,opacity) in [("atelier-panel",self.transparency.panel),("atelier-dock",self.transparency.dock),("atelier-widget",self.transparency.widgets)]{
+            if opacity<100{
+                css.push_str(&format!(" .{class} {{ background-image: none; background-color: alpha({color}, {:.2}); }}",opacity as f64/100.0));
+            }
+        }
         Ok(css)
     }
 }
@@ -336,6 +375,17 @@ mod tests{
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
         let target=dir.path().join("other.toml");fs::write(&target,"version=1").unwrap();
         std::os::unix::fs::symlink(&target,&path).unwrap();assert!(Appearance::load(&path).is_err());
+    }
+    #[test]
+    fn transparency_and_blur_validation(){
+        let a=Appearance{transparency:Transparency{focused:95,unfocused:80,panel:75,dock:85,widgets:90},wallpaper_blur:12,..Appearance::default()};
+        assert_eq!(a.transparency.window_alpha(false,false),0.8);
+        assert_eq!(a.transparency.window_alpha(false,true),1.0);
+        assert!(a.css().unwrap().contains("alpha(@theme_bg_color, 0.75)"));
+        assert!(Appearance{wallpaper_blur:25,..a.clone()}.validate().is_err());
+        assert!(Transparency{focused:69,..a.transparency}.validate().is_err());
+        assert!(Transparency{dock:101,..a.transparency}.validate().is_err());
+        let bytes=encoded(&a).unwrap();assert_eq!(decode(Some(&bytes)).unwrap(),a);
     }
     #[test]
     fn shadow_preferences_round_trip(){

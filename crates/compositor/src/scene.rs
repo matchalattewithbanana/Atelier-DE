@@ -77,7 +77,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer)->Result<Vec<SceneElem
     for window in state.space.elements().rev(){
         let Some(geometry)=state.space.element_geometry(window)else{continue;};
         let origin=geometry.loc-window.geometry().loc-bounds.loc;
-        result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),1.0));
+        result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),state.window_alpha(window)));
         if let Some((border,focused))=state.window_border(window){
             let color=border.color(focused)?;
             for strip in strips(geometry,clip,border.width){

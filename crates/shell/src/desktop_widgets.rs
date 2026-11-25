@@ -78,6 +78,7 @@ fn system_summary()->String{
 pub fn build(app:&gtk::Application,prefs:&DesktopWidgets)->Option<gtk::ApplicationWindow>{
     if !prefs.enabled||prefs.validate().is_err(){return None;}
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier widgets").decorated(false).resizable(false).build();
+    window.add_css_class("atelier-widget-layer");
     window.init_layer_shell();window.set_namespace(Some("atelier-desktop-widgets"));window.set_layer(Layer::Bottom);
     window.set_anchor(Edge::Top,true);
     let edge=match prefs.position{WidgetPosition::TopLeft=>Edge::Left,WidgetPosition::TopRight=>Edge::Right};
