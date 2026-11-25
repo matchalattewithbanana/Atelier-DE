@@ -406,7 +406,7 @@ pub fn run_native(
     socket: &str,
     config: &atelier_config::Config,
 ) -> Result<()> {
-    use crate::{state::{Atelier, ClientState}, input_router::handle_input, frame_queue::FrameQueue};
+    use crate::{state::{Atelier, ClientState}, input_router::handle_input, frame_queue::{FrameQueue,InputDamage}};
     use drm::{Device as _, ClientCapability};
     use drm::buffer::PlanarBuffer;
     use control::FbCmd2Flags;
@@ -428,7 +428,7 @@ pub fn run_native(
     let (route, original) = active_route(&card)?;
     let (width, height) = route.mode.size();
     let size = (i32::from(width), i32::from(height)).into();
-    let damage = Rectangle::from_size(size);
+    let output_damage = Rectangle::from_size(size);
 
     let mut server = Display::<Atelier>::new()?;
     let mut compositor = Atelier::new_for_output(&server.handle(), config.layout, "ATELIER-DRM-1", "Native DRM display")?;
@@ -468,14 +468,20 @@ pub fn run_native(
         let signal = Arc::clone(&running);
         ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
         let input_state = Rc::clone(&state);
-        let input_dirty = Rc::new(Cell::new(false));
+        let input_dirty = Rc::new(Cell::new(InputDamage::None));
         let event_dirty = Rc::clone(&input_dirty);
         let input_session = session.clone();
         let mut intercepted = HashSet::new();
         let input_token = event_loop.handle().insert_source(crate::native_input::backend(session)?, move |event, _, _| {
             if input_session.is_active() {
-                handle_input(&mut input_state.borrow_mut(), event, &mut intercepted);
-                event_dirty.set(true);
+                let mut state=input_state.borrow_mut();
+                use smithay::backend::input::InputEvent;
+                let motion=matches!(&event,InputEvent::PointerMotion{..}|InputEvent::PointerMotionAbsolute{..});
+                let ungrabbed=state.seat.get_pointer().is_some_and(|p|!p.is_grabbed());
+                handle_input(&mut state,event,&mut intercepted);
+                let still_ungrabbed=state.seat.get_pointer().is_some_and(|p|!p.is_grabbed());
+                let change=if motion&&ungrabbed&&still_ungrabbed{InputDamage::Cursor}else{InputDamage::Scene};
+                event_dirty.set(event_dirty.get().max(change));
             }
         }).map_err(|error| anyhow::anyhow!("register native input: {error}"))?;
 
@@ -510,6 +516,8 @@ pub fn run_native(
                         bail!("native monitor route changed; restart after reconnecting");
                     }
                     last_route_check = Instant::now();
+                    // Periodic conservative baseline, without forcing idle flips.
+                    queue.forget_damage_history();
                 }
                 if !running.load(Ordering::SeqCst) {
                     server.flush_clients()?;
@@ -521,7 +529,11 @@ pub fn run_native(
                     }
                     queue.invalidate();
                 }
-                if input_dirty.replace(false) { queue.invalidate(); }
+                match input_dirty.replace(InputDamage::None){
+                    InputDamage::None=>{},
+                    InputDamage::Cursor=>queue.invalidate_cursor(),
+                    InputDamage::Scene=>queue.invalidate(),
+                }
                 {
                     let mut state = state.borrow_mut();
                     workspace_control.poll(&mut state, started.elapsed().as_millis() as u32)?;
@@ -535,8 +547,13 @@ pub fn run_native(
                 server.flush_clients()?;
                 let Some(next) = queue.next() else { continue; };
                 let mut timing = metrics.begin_frame();
+                let cursor_bounds;
                 {
                     let state = state.borrow();
+                    let x=(state.pointer_position.x as i32).clamp(0,i32::from(width)-1);
+                    let y=(state.pointer_position.y as i32).clamp(0,i32::from(height)-1);
+                    cursor_bounds=Rectangle::new((x,y).into(),(11.min(i32::from(width)-x),16.min(i32::from(height)-y)).into());
+                    let damage=queue.damage(next,output_damage,cursor_bounds);
                     let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
                     let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
@@ -546,8 +563,6 @@ pub fn run_native(
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
                     draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
                     // A simple high-contrast software pointer until client cursor surfaces are supported.
-                    let x = (state.pointer_position.x as i32).clamp(0, i32::from(width) - 1);
-                    let y = (state.pointer_position.y as i32).clamp(0, i32::from(height) - 1);
                     for (w, h) in [(3, 16), (11, 3)] {
                         let w = w.min(i32::from(width) - x);
                         let h = h.min(i32::from(height) - y);
@@ -563,7 +578,7 @@ pub fn run_native(
                 let request = framebuffer_request(&card, route.plane, u64::from(u32::from(slots[next].1)))?;
                 card.atomic_commit(control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT, request)
                     .context("queue native page flip")?;
-                queue.submitted(next);
+                queue.submitted(next,cursor_bounds);
                 pending_since = Some(Instant::now());
                 metrics.submitted(timing);
             }
