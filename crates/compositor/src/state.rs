@@ -47,6 +47,7 @@ pub struct Atelier {
     pub output: Output,
     pub popups: PopupManager,
     pub pointer_position: Point<f64, Logical>,
+    cursor_status: CursorImageStatus,
     cascade: usize,
     pending: Vec<ToplevelSurface>,
     layout: atelier_config::Layout,
@@ -98,10 +99,23 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cursor_status: CursorImageStatus::default_named(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
+    }
+
+    #[cfg(feature = "native-session")]
+    pub(crate) fn cursor_status(&self)->&CursorImageStatus{&self.cursor_status}
+
+    #[cfg(feature = "native-session")]
+    pub(crate) fn send_cursor_frames(&self,time:std::time::Duration){
+        use smithay::reexports::wayland_server::Resource;
+        if let CursorImageStatus::Surface(surface)=&self.cursor_status{
+            if surface.is_alive(){
+                smithay::desktop::utils::send_frames_surface_tree(surface,&self.output,time,None,|_,_|Some(self.output.clone()));
+            }
+        }
     }
 
     pub fn take_scene_dirty(&mut self) -> bool {
@@ -521,8 +535,12 @@ impl SeatHandler for Atelier {
         let client = focused.and_then(|surface| surface.client());
         set_data_device_focus(&self.display, seat, client);
     }
-    // Host cursor remains visible; client cursor surfaces are not rendered in this milestone.
-    fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
+    fn cursor_image(&mut self, _: &Seat<Self>, status: CursorImageStatus) {
+        // Smithay validates client focus, serial and surface role before this callback.
+        // Even an unchanged surface may have a new hotspot.
+        self.cursor_status=status;
+        self.scene_dirty=true;
+    }
 }
 impl SelectionHandler for Atelier { type SelectionUserData = (); }
 impl DataDeviceHandler for Atelier { fn data_device_state(&self) -> &DataDeviceState { &self.data_device } }

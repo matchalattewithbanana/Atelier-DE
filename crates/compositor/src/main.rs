@@ -11,6 +11,8 @@ mod workspace_control;
 mod frame_queue;
 #[cfg(any(feature = "native-session", test))]
 mod client_damage;
+#[cfg(feature = "native-session")]
+mod native_cursor;
 mod input_router;
 #[cfg(feature = "native-input")]
 mod native_input;

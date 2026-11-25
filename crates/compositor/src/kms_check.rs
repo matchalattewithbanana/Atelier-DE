@@ -513,6 +513,7 @@ pub fn run_native(
                     metrics.flip_completed(pending_since.take());
                     let state = state.borrow();
                     state.send_frames(started.elapsed());
+                    state.send_cursor_frames(started.elapsed());
                 }
                 if pending_since.is_some_and(|since| since.elapsed() > Duration::from_secs(1)) {
                     bail!("timed out waiting for native page flip");
@@ -559,29 +560,33 @@ pub fn run_native(
                 let mut timing = metrics.begin_frame();
                 let cursor_bounds;
                 let snapshot;
+                let custom_cursor;
                 {
                     let state = state.borrow();
-                    let x=(state.pointer_position.x as i32).clamp(0,i32::from(width)-1);
-                    let y=(state.pointer_position.y as i32).clamp(0,i32::from(height)-1);
-                    cursor_bounds=Rectangle::new((x,y).into(),(11.min(i32::from(width)-x),16.min(i32::from(height)-y)).into());
-                    let fallback=queue.damage(next,output_damage,cursor_bounds);
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
-                    snapshot=client_damage.capture(&elements,cursor_bounds);
-                    let damage=client_damage.damage(next,output_damage,fallback,snapshot.as_ref(),&elements);
+                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size);
+                    cursor_bounds=cursor.default_bounds();
+                    custom_cursor=!cursor.is_default();
+                    let damage=if !custom_cursor{
+                        let fallback=queue.damage(next,output_damage,cursor_bounds);
+                        snapshot=client_damage.capture(&elements,cursor_bounds);
+                        client_damage.damage(next,output_damage,fallback,snapshot.as_ref(),&elements)
+                    }else{
+                        // Arbitrary cursor surface trees may extend outside the
+                        // default glyph. Do not reuse the ordinary cursor baseline.
+                        queue.forget_damage_history();
+                        client_damage.reset();
+                        snapshot=None;
+                        output_damage
+                    };
                     timing.repaint(damage,output_damage);
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
                     draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
-                    // A simple high-contrast software pointer until client cursor surfaces are supported.
-                    for (w, h) in [(3, 16), (11, 3)] {
-                        let w = w.min(i32::from(width) - x);
-                        let h = h.min(i32::from(height) - y);
-                        let cursor = Rectangle::new((x, y).into(), (w, h).into());
-                        frame.draw_solid(cursor, &[Rectangle::from_size(cursor.size)], Color32F::new(1.0, 1.0, 1.0, 1.0))?;
-                    }
+                    cursor.draw(&mut frame,output_damage)?;
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
                 }
                 timing.render_ready();
@@ -592,6 +597,7 @@ pub fn run_native(
                 card.atomic_commit(control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT, request)
                     .context("queue native page flip")?;
                 queue.submitted(next,cursor_bounds);
+                if custom_cursor{queue.forget_damage_history();}
                 client_damage.submitted(next,snapshot);
                 pending_since = Some(Instant::now());
                 metrics.submitted(timing);
