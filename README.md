@@ -374,3 +374,7 @@ Manager → Cursor previews renders six static samples from installed XCursor th
 ### SDDM static previews and local preparation
 
 Manager → Login themes inspects local SDDM theme files, displays a bounded static screenshot when available, and can prepare a separate user-owned copy after reviewing its fingerprint. The CLI supports `login-theme inspect --from DIR` and `login-theme prepare --from DIR`. Preparation never executes QML or changes the system login manager. See docs/CUSTOMIZATIONS.md for limits and staging paths.
+
+### SDDM selection and recovery (administrator CLI)
+
+Preview an installed theme with `atelier-manager login-theme selection-plan NAME`. A separately installed root-owned Manager binary can explicitly select a trusted installed theme or restore the previous managed override using `login-theme select NAME` and `login-theme rollback-selection`. The commands never restart or switch the login manager, refuse competing higher-precedence configuration and keep a recovery checkpoint. See docs/CUSTOMIZATIONS.md for privilege and recovery restrictions. User-local staged themes are not automatically installed system-wide.

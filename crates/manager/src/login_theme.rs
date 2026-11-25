@@ -112,6 +112,11 @@ fn inspect_snapshot(source:&Path,s:&Snapshot)->Result<Review>{
     Ok(Review{info:Inspection{source:source.into(),name,fingerprint:s.fingerprint(),bytes:s.total,
         files:s.files.keys().cloned().collect(),main:m.main,screenshot,preview_status},preview})
 }
+/// Validate the declared local QML entry point without decoding any raster.
+/// Used by the administrator selection review only after ownership checks.
+pub(super) fn validate_entrypoint(source:&Path)->Result<()>{
+    Snapshot::read(source)?.metadata()?;Ok(())
+}
 pub(super) fn inspect(source:&Path)->Result<Review>{
     // Normalize the source once. Refuse symlink at the selected root.
     if !source.is_absolute()||!fs::symlink_metadata(source)?.is_dir(){bail!("choose an absolute real SDDM theme directory");}
@@ -157,6 +162,9 @@ impl Review{
     }
 }
 pub(super) fn run(args:&[String])->Result<()>{
+    if args.first().is_some_and(|a|matches!(a.as_str(),"selection-plan"|"select"|"rollback-selection")){
+        return crate::login_selection::run(args);
+    }
     let (prepare,path)=match args{
         [action,flag,path] if flag=="--from"&&matches!(action.as_str(),"inspect"|"prepare")=>(action=="prepare",path),
         _=>bail!("use login-theme inspect --from DIR | prepare --from DIR"),
