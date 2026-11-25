@@ -5,6 +5,6 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-atelier-config.workspace = true
-gtk.workspace = true
+atelier-config = { workspace = true, features = ["wallpaper"] }
+gtk = { workspace = true, features = ["v4_8"] }
 atelier-services = { path = "../services" }

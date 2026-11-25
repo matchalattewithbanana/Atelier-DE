@@ -1,6 +1,7 @@
 //! Native settings application. Writes shared user preferences only.
 mod network_page;
 mod appearance_page;
+mod wallpaper_page;
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
@@ -11,9 +12,9 @@ fn main() -> glib::ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let initial_page = match args.as_slice() {
         [] => "appearance".to_owned(),
-        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
+        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "wallpaper", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("atelier-settings [--page appearance|shell-appearance|applications|session|network|power|audio|bluetooth|about]");
+            println!("atelier-settings [--page appearance|shell-appearance|wallpaper|applications|session|network|power|audio|bluetooth|about]");
             return glib::ExitCode::SUCCESS;
         }
         _ => { eprintln!("Invalid settings page; use --help."); return glib::ExitCode::FAILURE; }
@@ -117,6 +118,8 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     appearance.append(&themes);
     let native_appearance = page(&stack, "shell-appearance", "Shell appearance", "Native panel and launcher preferences. This page has its own save and recovery controls; the window footer saves the separate general settings.");
     appearance_page::build(&native_appearance);
+    let wallpaper=page(&stack,"wallpaper","Wallpaper","Native desktop background. Save separately from general preferences; restart the shell to apply.");
+    wallpaper_page::build(&wallpaper);
 
     let applications = page(&stack, "applications", "Applications", "Set the terminal that Atelier launches. This only changes Atelier's own preference.");
     let terminal_label = gtk::Label::new(Some("Terminal executable (name or absolute path)"));

@@ -1,8 +1,10 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
 mod appearance;
+#[cfg(feature = "wallpaper")]
+pub mod wallpaper;
 pub mod tasks;
-pub use appearance::{appearance_path, Appearance, AppearanceReview};
+pub use appearance::{appearance_path, Appearance, AppearanceReview, WallpaperFit};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

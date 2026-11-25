@@ -3,6 +3,10 @@ use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use std::{fs,io::{Read,Write},path::{Path,PathBuf}};
 
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum WallpaperFit { #[default] Cover, Contain, Stretch }
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -23,10 +27,12 @@ pub struct Appearance {
     pub dock_hide_fullscreen:bool,
     pub dock_icon_size:u32,
     pub dock_pins:Vec<String>,
+    pub wallpaper_path:String,
+    pub wallpaper_fit:WallpaperFit,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new()}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -38,6 +44,7 @@ impl Appearance{
             if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
         }
         validate_dock_pins(&self.dock_pins)?;
+        if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
     }
     pub fn load(path:&Path)->Result<Self>{decode(read(path)?.as_deref())}

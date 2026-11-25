@@ -17,13 +17,13 @@ impl Fields{
         for (field,value) in [(&self.height,p.panel_height),(&self.spacing,p.panel_spacing),(&self.radius,p.button_radius),(&self.icons,p.launcher_icon_size)]{field.set_value(value as f64);}
         for (field,value) in self.toggles.iter().zip([p.show_date,p.show_battery,p.show_media,p.show_notifications,p.show_audio,p.show_terminal]){field.set_active(value);}
     }
-    fn collect(&self)->Appearance{
+    fn collect(&self,baseline:&Appearance)->Appearance{
         let buffer=self.pins.buffer();let pins=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
         Appearance{dock_enabled:self.dock.is_active(),dock_auto_hide:self.auto_hide.is_active(),dock_hide_fullscreen:self.hide_fullscreen.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
             dock_pins:pins.lines().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect(),accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
             button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
             show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
-            show_notifications:self.toggles[3].is_active(),show_audio:self.toggles[4].is_active(),show_terminal:self.toggles[5].is_active(),..Appearance::default()}
+            show_notifications:self.toggles[3].is_active(),show_audio:self.toggles[4].is_active(),show_terminal:self.toggles[5].is_active(),..baseline.clone()}
     }
 }
 fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64)->gtk::SpinButton{
@@ -93,7 +93,8 @@ pub fn build(parent:&gtk::Box){
     });}
     save.connect_clicked(move |_|{
         let mut baseline=state.borrow_mut();let Some(r)=baseline.as_mut()else{return;};
-        match r.save(fields.collect()){
+        let next=fields.collect(&r.value);
+        match r.save(next){
             Ok(true)=>status.set_text("Appearance saved. Previous profile retained. Restart the shell to apply."),
             Ok(false)=>status.set_text("No appearance changes."),
             Err(e)=>status.set_text(&format!("Save failed: {e:#}")),
