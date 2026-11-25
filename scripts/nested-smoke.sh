@@ -96,11 +96,12 @@ if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
             cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2
             exit 1
         fi
-        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" && grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier panel backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier dock backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier widgets backdrop rendered' "$test_runtime/session.log"; then break; fi
+        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" && grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier panel backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier dock backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier widgets backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier antialiased rounded window rendered' "$test_runtime/session.log"; then break; fi
         sleep 0.1
     done
     grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
     grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
+    grep -q 'Atelier antialiased rounded window rendered' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
     grep -q "Atelier widget card input region published" "$test_runtime/panel.log" || { cat "$test_runtime/panel.log" "$test_runtime/session.log" >&2; exit 1; }
     for role in panel dock widgets; do
         grep -q "Atelier $role backdrop rendered" "$test_runtime/session.log" || { cat "$test_runtime/panel.log" "$test_runtime/session.log" >&2; exit 1; }
