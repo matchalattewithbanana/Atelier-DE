@@ -300,6 +300,10 @@ impl Dispatch<ExtSessionLockSurfaceV1,()> for Atelier{
 }
 
 #[cfg(test)]
+#[path = "lock_wire_tests.rs"]
+mod wire_tests;
+
+#[cfg(test)]
 mod tests{
     use super::*;
     #[test]
