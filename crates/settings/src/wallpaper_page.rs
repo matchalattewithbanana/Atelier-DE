@@ -76,7 +76,7 @@ pub fn build(parent:&gtk::Box){
                             if let Some(next)=next.clone(){
                                 let mut baseline=baseline.borrow_mut();
                                 if let Some(r)=baseline.as_mut(){match r.save(next){
-                                    Ok(true)=>status.set_text("Wallpaper saved; previous appearance retained. Restart the shell to apply."),
+                                    Ok(true)=>status.set_text("Wallpaper saved; previous appearance retained. Updated native shell applies wallpaper live."),
                                     Ok(false)=>status.set_text("No changes."),
                                     Err(e)=>status.set_text(&format!("Save failed: {e:#}. Reload before retrying.")),
                                 }}

@@ -120,9 +120,9 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     appearance.append(&themes);
     let native_appearance = page(&stack, "shell-appearance", "Shell appearance", "Native panel and launcher preferences. This page has its own save and recovery controls; the window footer saves the separate general settings.");
     appearance_page::build(&native_appearance);
-    let wallpaper=page(&stack,"wallpaper","Wallpaper","Native desktop background. Save separately from general preferences; restart the shell to apply.");
+    let wallpaper=page(&stack,"wallpaper","Wallpaper","Native desktop background. Saved changes apply to the running updated native shell.");
     wallpaper_page::build(&wallpaper);
-    let widgets=page(&stack,"widgets","Desktop widgets","Choose a native desktop widget group. Save explicitly, then restart the shell.");
+    let widgets=page(&stack,"widgets","Desktop widgets","Choose a native desktop widget group. Saved changes apply to the running updated native shell.");
     widgets_page::build(&widgets);
     let windows=page(&stack,"windows","Window appearance","Native grid spacing. Saved changes apply to a running updated compositor.");
     windows_page::build(&windows);

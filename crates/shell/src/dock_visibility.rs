@@ -4,7 +4,17 @@ use gtk::{glib,prelude::*};
 use gtk4_layer_shell::{Edge,KeyboardMode,Layer,LayerShell};
 use std::{cell::{Cell,RefCell},rc::Rc,time::{Duration,Instant}};
 
-pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefCell<Option<TaskSnapshot>>>,auto_hide:bool,hide_fullscreen:bool){
+pub struct Visibility{
+    source:Option<glib::SourceId>,
+    reveal:Option<gtk::ApplicationWindow>,
+}
+impl Visibility{
+    pub fn stop(&mut self){
+        if let Some(source)=self.source.take(){source.remove();}
+        if let Some(window)=self.reveal.take(){window.destroy();}
+    }
+}
+pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefCell<Option<TaskSnapshot>>>,auto_hide:bool,hide_fullscreen:bool)->Visibility{
     let hover=Rc::new(Cell::new(false));
     let deadline=Rc::new(Cell::new(Instant::now()));
     let reveal=if auto_hide{
@@ -27,9 +37,10 @@ pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefC
         dock.set_visible(false);window.present();Some(window)
     }else{None};
     let dock=dock.downgrade();
+    let owned_reveal=reveal.clone();
     let mut suppressed=false;
-    glib::timeout_add_local(Duration::from_millis(100),move||{
-        let Some(dock)=dock.upgrade()else{if let Some(strip)=&reveal{strip.close();}return glib::ControlFlow::Break;};
+    let source=glib::timeout_add_local(Duration::from_millis(100),move||{
+        let Some(dock)=dock.upgrade()else{return glib::ControlFlow::Continue;};
         let fullscreen=hide_fullscreen&&snapshot.borrow().as_ref().and_then(|s|s.fullscreen_active).unwrap_or(false);
         if fullscreen{
             if !suppressed{hover.set(false);dock.set_visible(false);if let Some(strip)=&reveal{strip.set_visible(false);}suppressed=true;}
@@ -41,4 +52,5 @@ pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefC
         }
         glib::ControlFlow::Continue
     });
+    Visibility{source:Some(source),reveal:owned_reveal}
 }

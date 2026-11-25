@@ -87,6 +87,7 @@ pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>)
         if live_power.borrow().show_battery { update_power(&label); }else{label.set_visible(false);}
         glib::ControlFlow::Continue
     });
+    let layers_live=live.clone();
     let mut last_panel=appearance.clone();
     let bar_weak=bar.downgrade();
     let mut tick = move || {
@@ -117,11 +118,7 @@ pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>)
 
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
-    if crate::task_backend::TaskBackend::detect().is_some() {
-        crate::wallpaper_layer::start(app,&window,&appearance);
-        crate::desktop_widgets::start(app,&window,&appearance.widgets);
-    }
-    if appearance.dock_enabled { crate::dock::build(app, &appearance); }
+    crate::desktop_layers::start(app,&window,layers_live);
     if popups { crate::notification_toast::start(app, &window); }
 }
 

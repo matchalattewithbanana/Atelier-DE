@@ -82,7 +82,7 @@ pub fn build(parent:&gtk::Box){
     {
         let (fields,state,status,enable)=(fields.clone(),state.clone(),status.clone(),enable.clone());
         reload.connect_clicked(move |_|match AppearanceReview::load(&path){
-            Ok(review)=>{fields.populate(&review.value);*state.borrow_mut()=Some(review);enable(true);status.set_text("Draft loaded. Colors, radius and panel controls update live; dock structure and existing launcher icon sizes require reopening or restart.");}
+            Ok(review)=>{fields.populate(&review.value);*state.borrow_mut()=Some(review);enable(true);status.set_text("Draft loaded. Colors, radius, panel and dock preferences update live; reopen the launcher for its icon size.");}
             Err(e)=>{state.borrow_mut().take();enable(false);status.set_text(&format!("Load failed; existing files unchanged: {e:#}"));}
         });
     }
@@ -95,7 +95,7 @@ pub fn build(parent:&gtk::Box){
         let mut baseline=state.borrow_mut();let Some(r)=baseline.as_mut()else{return;};
         let next=fields.collect(&r.value);
         match r.save(next){
-            Ok(true)=>status.set_text("Appearance saved. Colors, radius and panel controls update live. Restart shell for dock structure; reopen launcher for icon size."),
+            Ok(true)=>status.set_text("Appearance saved. Updated shell applies panel and dock preferences live. Reopen launcher for icon size."),
             Ok(false)=>status.set_text("No appearance changes."),
             Err(e)=>status.set_text(&format!("Save failed: {e:#}")),
         }
