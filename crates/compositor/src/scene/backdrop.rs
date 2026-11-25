@@ -1,5 +1,5 @@
-//! First bounded backdrop pass. Renderer-owned scratch texture, one focused
-//! window, no recursive blurring, no CPU readback.
+//! Bounded backdrop passes, separate renderer-owned scratch textures for
+//! focused window, panel and dock. No recursive blur or CPU readback.
 use super::SceneElement;
 use smithay::{
     backend::{allocator::Fourcc,renderer::{
@@ -14,38 +14,48 @@ const MAX_PIXELS:i64=4_194_304;
 fn supported(size:Size<i32,Physical>)->bool{
     size.w>0&&size.h>0&&i64::from(size.w)*i64::from(size.h)<=MAX_PIXELS
 }
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub(crate) enum BlurTarget{Focused,Panel,Dock}
+impl BlurTarget{
+    pub const COUNT:usize=3;
+    pub fn slot(self)->usize{match self{Self::Focused=>0,Self::Panel=>1,Self::Dock=>2}}
+    fn name(self)->&'static str{match self{Self::Focused=>"focused",Self::Panel=>"panel",Self::Dock=>"dock"}}
+}
 #[derive(Default)]
 pub(super) struct Backdrop{
     program:Option<GlesTexProgram>,
-    scratch:Option<(Size<i32,Physical>,GlesTexture)>,
+    scratch:[Option<(Size<i32,Physical>,GlesTexture)>;BlurTarget::COUNT],
     disabled:bool,
-    logged:bool,
+    logged:[bool;BlurTarget::COUNT],
 }
 impl Backdrop{
-    pub fn release(&mut self){self.scratch=None;}
-    pub fn render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32)->Option<TextureShaderElement>{
-        if self.disabled||strength==0||!supported(size){self.release();return None;}
-        match self.try_render(renderer,size,color,behind,strength){
+    pub fn retain(&mut self,active:[bool;BlurTarget::COUNT]){
+        for (slot,keep) in self.scratch.iter_mut().zip(active){if !keep{*slot=None;}}
+    }
+    pub fn render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->Option<TextureShaderElement>{
+        if self.disabled||strength==0||!supported(size){return None;}
+        match self.try_render(renderer,size,color,behind,strength,target){
             Ok(element)=>{
-                if !self.logged{println!("Atelier focused backdrop rendered");self.logged=true;}
+                if !self.logged[target.slot()]{println!("Atelier {} backdrop rendered",target.name());self.logged[target.slot()]=true;}
                 Some(element)
             }
             Err(error)=>{
-                tracing::warn!(?error,"focused backdrop unavailable; retaining plain transparency");
-                self.disabled=true;self.release();None
+                tracing::warn!(?error,?target,"backdrop unavailable; retaining plain transparency");
+                self.disabled=true;self.retain([false;BlurTarget::COUNT]);None
             }
         }
     }
-    fn try_render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32)->anyhow::Result<TextureShaderElement>{
+    fn try_render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->anyhow::Result<TextureShaderElement>{
         if self.program.is_none(){
             self.program=Some(renderer.compile_custom_texture_shader(include_str!("backdrop.frag"),&[UniformName::new("step_uv",UniformType::_2f)])?);
         }
-        if self.scratch.as_ref().is_none_or(|(current,_)|*current!=size){
-            self.release();
+        let slot=&mut self.scratch[target.slot()];
+        if slot.as_ref().is_none_or(|(current,_)|*current!=size){
+            *slot=None;
             let texture:GlesTexture=renderer.create_buffer(Fourcc::Abgr8888,(size.w,size.h).into())?;
-            self.scratch=Some((size,texture));
+            *slot=Some((size,texture));
         }
-        let (_,texture)=self.scratch.as_mut().expect("scratch allocated");
+        let (_,texture)=slot.as_mut().expect("scratch allocated");
         {
             let mut target=renderer.bind(texture)?;
             // Normal orientation for a texture: y=0 corresponds to its
@@ -70,6 +80,11 @@ impl Backdrop{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn distinct_slots_for_each_role(){
+        assert_eq!([BlurTarget::Focused.slot(),BlurTarget::Panel.slot(),BlurTarget::Dock.slot()],[0,1,2]);
+        assert_eq!(MAX_PIXELS*4*BlurTarget::COUNT as i64,48*1024*1024);
+    }
     #[test]
     fn limits_scratch_allocation(){
         assert!(supported((2560,1440).into()));assert!(!supported((3840,2160).into()));

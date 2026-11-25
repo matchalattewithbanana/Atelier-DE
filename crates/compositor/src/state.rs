@@ -58,6 +58,9 @@ pub struct Atelier {
     shadow:atelier_config::WindowShadow,
     corner_radius:u32,
     backdrop_blur:u32,
+    panel_backdrop_blur:u32,
+    dock_backdrop_blur:u32,
+    shell_radius:u32,
     transparency:atelier_config::Transparency,
     appearance_monitor:Option<atelier_config::AppearanceMonitor>,
     next_task_id: u64,
@@ -91,7 +94,7 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,backdrop_blur:appearance.backdrop_blur,transparency:appearance.transparency,
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
@@ -117,6 +120,14 @@ impl Atelier {
         }
     }
 
+    pub(crate) fn shell_backdrop(&self,namespace:&str)->Option<(crate::scene::BlurTarget,u32,u32)>{
+        use crate::scene::BlurTarget;
+        match namespace{
+            "atelier-panel" if self.transparency.panel<100&&self.panel_backdrop_blur>0=>Some((BlurTarget::Panel,self.panel_backdrop_blur,0)),
+            "atelier-dock" if self.transparency.dock<100&&self.dock_backdrop_blur>0=>Some((BlurTarget::Dock,self.dock_backdrop_blur,self.shell_radius)),
+            _=>None,
+        }
+    }
     pub(crate) fn window_backdrop_blur(&self,window:&Window)->u32{
         if self.focused.as_ref()==Some(window)&&self.placement(window).is_none()&&self.window_alpha(window)<1.0{
             self.backdrop_blur
@@ -221,10 +232,10 @@ impl Atelier {
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         let Some(monitor)=self.appearance_monitor.as_mut()else{return false;};
         match monitor.poll(){
-            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.backdrop_blur!=self.backdrop_blur||appearance.transparency!=self.transparency=>{
+            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.backdrop_blur!=self.backdrop_blur||appearance.panel_backdrop_blur!=self.panel_backdrop_blur||appearance.dock_backdrop_blur!=self.dock_backdrop_blur||appearance.button_radius!=self.shell_radius||appearance.transparency!=self.transparency=>{
                 let geometry=appearance.window_spacing!=self.spacing||appearance.window_border.width!=self.border.width;
                 let input_changed=geometry||appearance.window_corner_radius!=self.corner_radius;
-                self.spacing=appearance.window_spacing;self.border=appearance.window_border;self.shadow=appearance.window_shadow;self.corner_radius=appearance.window_corner_radius;self.backdrop_blur=appearance.backdrop_blur;self.transparency=appearance.transparency;
+                self.spacing=appearance.window_spacing;self.border=appearance.window_border;self.shadow=appearance.window_shadow;self.corner_radius=appearance.window_corner_radius;self.backdrop_blur=appearance.backdrop_blur;self.panel_backdrop_blur=appearance.panel_backdrop_blur;self.dock_backdrop_blur=appearance.dock_backdrop_blur;self.shell_radius=appearance.button_radius;self.transparency=appearance.transparency;
                 if geometry{self.reflow();}self.scene_dirty=true;input_changed
             }
             Err(error)=>{tracing::warn!(?error,"retaining last valid native appearance");false}

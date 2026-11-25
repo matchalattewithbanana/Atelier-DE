@@ -2,6 +2,7 @@
 //! their own window, never a global overlay.
 use crate::{state::Atelier,layout::Tile};
 mod backdrop;
+pub(crate) use backdrop::BlurTarget;
 use anyhow::{Context,Result};
 use smithay::{
     backend::renderer::{
@@ -164,25 +165,42 @@ fn relative_outline(content:Rectangle<i32,Logical>,strip:Rectangle<i32,Logical>,
     let b=i64::from(border.min(8));
     [(x-b) as f32,(y-b) as f32,(x+i64::from(content.size.w)+b) as f32,(y+i64::from(content.size.h)+b) as f32]
 }
+#[derive(Clone,Copy)]
+struct BlurRequest{
+    target:BlurTarget,index:usize,geometry:Rectangle<i32,Logical>,radius:u32,strength:u32,
+}
+fn add_blur(requests:&mut Vec<BlurRequest>,request:BlurRequest){
+    // One request per role (including duplicate client namespaces).
+    // Since discovery is front-to-back, keep the frontmost eligible surface.
+    if !requests.iter().any(|r|r.target==request.target){requests.push(request);}
+}
 pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShaders,color:[f32;4])->Result<Vec<SceneElement>>{
     let output=&state.output;
     let bounds=state.space.output_geometry(output).context("unmapped output")?;
     let scale=output.current_scale().fractional_scale();
     let map=layer_map_for_output(output);
     let mut result=Vec::new();
-    let mut blur=None;
+    let mut blurs=Vec::new();
     // Render layer roots at their actual arranged origin (bbox can include
     // negative subsurface offsets). Match input routing's layer ordering.
-    let mut layers=|levels:&[Layer],result:&mut Vec<SceneElement>,renderer:&mut GlesRenderer|{
+    let layers=|levels:&[Layer],result:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,blurs:&mut Vec<BlurRequest>|{
         for &level in levels{
             for layer in map.layers_on(level).rev(){
                 let Some(geometry)=map.layer_geometry(layer)else{continue;};
                 let origin=geometry.loc-layer.bbox().loc-bounds.loc;
+                let first=result.len();
                 result.extend(layer.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),1.0));
+                // Restrict blur to known shell namespaces and mapped content.
+                // Namespace is a rendering hint, not an authorization claim.
+                if result.len()>first&&geometry.overlaps(bounds){
+                    if let Some((target,strength,radius))=state.shell_backdrop(layer.namespace()){
+                        add_blur(blurs,BlurRequest{target,index:result.len(),geometry,radius,strength});
+                    }
+                }
             }
         }
     };
-    layers(&[Layer::Overlay,Layer::Top],&mut result,renderer);
+    layers(&[Layer::Overlay,Layer::Top],&mut result,renderer,&mut blurs);
     let clip=map.non_exclusive_zone();
     for window in state.space.elements().rev(){
         let Some(geometry)=state.space.element_geometry(window)else{continue;};
@@ -239,23 +257,28 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         }
         let strength=state.window_backdrop_blur(window);
         if strength>0&&geometry.overlaps(bounds){
-            blur=Some((result.len(),geometry,radius,strength));
+            add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength});
         }
     }
-    layers(&[Layer::Bottom,Layer::Background],&mut result,renderer);
-    // Snapshot only content behind the focused window, not its own
-    // surfaces, decorations or any higher layers. Never sample the target
-    // being written. One optional offscreen pass per frame.
-    if let Some((index,geometry,radius,strength))=blur{
-        if scale==1.0{
-            let size=bounds.size.to_physical(1);
-            if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[index..],strength){
-                let regions=rounded_regions(geometry,radius).into_iter().filter_map(|r|r.intersection(bounds))
+    layers(&[Layer::Bottom,Layer::Background],&mut result,renderer,&mut blurs);
+    // Prepare from the ORIGINAL unblurred scene. Each pass gets a distinct
+    // scratch texture; no feedback, overwritten snapshots or recursive blur.
+    let mut insertions=Vec::new();
+    let mut active=[false;BlurTarget::COUNT];
+    if scale==1.0{
+        let size=bounds.size.to_physical(1);
+        for request in blurs{
+            if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],request.strength,request.target){
+                active[request.target.slot()]=true;
+                let regions=rounded_regions(request.geometry,request.radius).into_iter().filter_map(|r|r.intersection(bounds))
                     .map(|mut r|{r.loc-=bounds.loc;r}).collect();
-                result.insert(index,SceneElement::from(Masked{inner,regions,scale}));
+                insertions.push((request.index,SceneElement::from(Masked{inner,regions,scale})));
             }
         }
-    }else{shaders.backdrop.release();}
+    }
+    shaders.backdrop.retain(active);
+    // Reverse insertion preserves the original indices for all requests.
+    for (index,element) in insertions.into_iter().rev(){result.insert(index,element);}
     Ok(result)
 }
 #[cfg(test)]
@@ -314,6 +337,17 @@ mod tests{
         for (i,r) in regions.iter().enumerate(){assert!(regions[i+1..].iter().all(|o|!r.overlaps(*o)));assert!(border.iter().all(|b|!r.overlaps(*b)));}
         for (i,r) in border.iter().enumerate(){assert_eq!(r.intersection(clip),Some(*r));assert!(border[i+1..].iter().all(|b|!r.overlaps(*b)));}
         let tiny=Rectangle::new((0,0).into(),(1,1).into());assert_eq!(rounded_regions(tiny,24),vec![tiny]);
+    }
+    #[test]
+    fn blur_requests_are_bounded_and_preserve_scene_indices(){
+        let geometry=Rectangle::new((0,0).into(),(50,40).into());
+        let mut requests=Vec::new();
+        for (target,index) in [(BlurTarget::Panel,2),(BlurTarget::Dock,4),(BlurTarget::Panel,6),(BlurTarget::Focused,9)]{
+            add_blur(&mut requests,BlurRequest{target,index,geometry,radius:0,strength:8});
+        }
+        assert_eq!(requests.iter().map(|r|r.index).collect::<Vec<_>>(),vec![2,4,9]);
+        let mut scene=vec![0;10];for request in requests.into_iter().rev(){scene.insert(request.index,request.index);}
+        assert_eq!(scene.iter().filter(|&&i|i!=0).copied().collect::<Vec<_>>(),vec![2,4,9]);
     }
     #[test]
     fn tiny_tiles_retain_positive_content(){
