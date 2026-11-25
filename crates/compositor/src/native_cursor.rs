@@ -3,7 +3,7 @@ use crate::state::Atelier;
 use smithay::{
     backend::renderer::{
         element::{Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
-        gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture},utils::draw_render_elements,Color32F,Frame,Renderer,ImportMem,
+        gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture},utils::draw_render_elements,Color32F,Renderer,ImportMem,
     },
     input::pointer::{CursorImageStatus,CursorImageSurfaceData},
     reexports::wayland_server::Resource,
@@ -147,7 +147,7 @@ impl NativeCursor {
     pub fn draw(&self,frame:&mut GlesFrame<'_,'_>,output:Rectangle<i32,Physical>)->Result<(),GlesError>{
         match &self.image{
             Image::Hidden=>Ok(()),
-            Image::Theme(element)=>{draw_render_elements(frame,1.0,std::slice::from_ref(element),&[output])?;Ok(())}
+            Image::Theme(element)=>{draw_render_elements::<GlesRenderer,_,_>(frame,1.0,std::slice::from_ref(element),&[output])?;Ok(())}
             Image::Client(elements)=>{draw_render_elements(frame,1.0,elements,&[output])?;Ok(())}
             Image::Default=>{
                 for (w,h) in [(3,16),(11,3)]{
