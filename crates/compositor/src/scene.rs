@@ -107,12 +107,13 @@ impl<E:RenderElement<GlesRenderer>> Masked<E>{
     /// Snapshot draws use a smaller physical output, while the logical
     /// rounded shape is unchanged. Transform the mask by the same scale
     /// as the scene, not by the rounded size of an individual surface.
-    fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>)->Result<(),GlesError>{
+    fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>,origin:Point<i32,Physical>)->Result<(),GlesError>{
         let mut clipped=Vec::new();
         let scale=Scale::from((self.scale*factor.x,self.scale*factor.y));
         for region in self.regions.iter(){
             let mut region=region.to_physical_precise_round(scale);
             if region.size.w<=0||region.size.h<=0{continue;}
+            region.loc-=origin;
             region.loc-=dst.loc;
             for d in damage{if let Some(hit)=region.intersection(*d){clipped.push(hit);}}
         }
@@ -122,7 +123,7 @@ impl<E:RenderElement<GlesRenderer>> Masked<E>{
 }
 impl<E:RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for Masked<E>{
     fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
-        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0))
+        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0),(0,0).into())
     }
 }
 /// Shader mask in output-local logical coordinates. Only the framebuffer
@@ -181,21 +182,30 @@ impl Element for RoundedSurface{
     fn kind(&self)->Kind{self.masked.kind()}
 }
 impl RoundedSurface{
-    pub(super) fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>)->Result<(),GlesError>{
+    pub(super) fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>,origin:Point<i32,Physical>)->Result<(),GlesError>{
+        // Cropped snapshots keep the same global sample grid. Shift the
+        // mask's logical origin to match the local framebuffer coordinates.
+        let mut mask=self.mask;
+        if origin.x!=0||origin.y!=0{
+            // Compact targets are only used for exact half-resolution,
+            // normal-orientation scale-1 snapshots.
+            mask.rect.loc.x-=origin.x*2;
+            mask.rect.loc.y-=origin.y*2;
+        }
         if let (Some(program),WaylandSurfaceTexture::Texture(texture),Some(uniforms))=(
-            &self.program,self.masked.inner.texture(),self.mask.uniforms(factor,frame.transformation())){
+            &self.program,self.masked.inner.texture(),mask.uniforms(factor,frame.transformation())){
             // The shader multiplies premultiplied RGBA by edge coverage.
             // Retain all damage so fractional corner pixels can be drawn.
             // Explicit program applies to this draw only.
             frame.render_texture_from_to(texture,src,dst,damage,&[],self.transform(),self.alpha(),Some(program),&uniforms)
         }else{
-            self.masked.draw_scaled(frame,src,dst,damage,factor)
+            self.masked.draw_scaled(frame,src,dst,damage,factor,origin)
         }
     }
 }
 impl RenderElement<GlesRenderer> for RoundedSurface{
     fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
-        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0))
+        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0),(0,0).into())
     }
 }
 pub fn inset_tile(tile:Tile,width:u32)->Tile{

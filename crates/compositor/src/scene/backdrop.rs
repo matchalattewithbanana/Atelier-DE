@@ -8,7 +8,7 @@ use smithay::{
         gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture,GlesTexProgram,Uniform,UniformName,UniformType,UniformValue,element::TextureShaderElement},
         utils::{draw_render_elements,CommitCounter},
     }},
-    utils::{Buffer,Logical,Physical,Rectangle,Scale,Size,Transform},
+    utils::{Buffer,Logical,Physical,Point,Rectangle,Scale,Size,Transform},
 };
 const MAX_PIXELS:i64=4_194_304;
 const MAX_OUTPUT_EDGE:i32=8192;
@@ -32,8 +32,7 @@ impl SnapshotPlan{
     /// Repaint the bounding box of all visible destination regions, including
     /// the furthest shader tap and a conservative scratch-space guard for
     /// linear filtering, rounded geometry and mediump texture coordinates.
-    /// Keep the texture and projection full-sized: stale pixels outside
-    /// this rectangle are never intentionally sampled.
+    /// Pixels outside this rectangle are never intentionally sampled.
     fn damage(&self,regions:&[Rectangle<i32,Logical>],strength:u32)->Option<Rectangle<i32,Physical>>{
         let mut left=i64::from(self.output.w);
         let mut top=i64::from(self.output.h);
@@ -65,6 +64,32 @@ impl SnapshotPlan{
         let b=((((bottom+radius).min(oh)*sh+oh-1)/oh)+GUARD).min(sh);
         Some(Rectangle::new((l as i32,t as i32).into(),((r-l) as i32,(b-t) as i32).into()))
     }
+    /// Compact textures use the original half-resolution pixel grid, not
+    /// a new scaling ratio. Odd output sizes retain the full projection
+    /// because crop edges would map to fractional destination coordinates.
+    fn target(&self,damage:Rectangle<i32,Physical>)->SnapshotTarget{
+        let crop=if self.output.w%2==0&&self.output.h%2==0{
+            // Quantise allocation extents to reduce size churn during moves.
+            const TILE:i32=64;
+            let x=damage.loc.x/TILE*TILE;
+            let y=damage.loc.y/TILE*TILE;
+            let right=((damage.loc.x+damage.size.w+TILE-1)/TILE*TILE).min(self.scratch.w);
+            let bottom=((damage.loc.y+damage.size.h+TILE-1)/TILE*TILE).min(self.scratch.h);
+            Rectangle::new((x,y).into(),(right-x,bottom-y).into())
+        }else{Rectangle::from_size(self.scratch)};
+        let mut local_damage=damage;local_damage.loc-=crop.loc;
+        let (destination,logical_size)=if self.output.w%2==0&&self.output.h%2==0{
+            ((f64::from(crop.loc.x)*2.0,f64::from(crop.loc.y)*2.0),
+                (crop.size.w*2,crop.size.h*2).into())
+        }else{((0.0,0.0),self.output)};
+        SnapshotTarget{crop,damage:local_damage,destination,logical_size}
+    }
+}
+struct SnapshotTarget{
+    crop:Rectangle<i32,Physical>,
+    damage:Rectangle<i32,Physical>,
+    destination:(f64,f64),
+    logical_size:Size<i32,Physical>,
 }
 /// Scale geometry and source mapping through Smithay. Opaque regions are
 /// deliberately not advertised: fractional edge rounding must not hide
@@ -73,17 +98,18 @@ struct SnapshotElement<'a>{
     source:&'a SceneElement,
     scaled:RescaleRenderElement<&'a SceneElement>,
     factor:Scale<f64>,
+    origin:Point<i32,Physical>,
 }
 impl<'a> SnapshotElement<'a>{
-    fn new(source:&'a SceneElement,factor:Scale<f64>)->Self{
-        Self{source,scaled:RescaleRenderElement::from_element(source,(0,0).into(),factor),factor}
+    fn new(source:&'a SceneElement,factor:Scale<f64>,origin:Point<i32,Physical>)->Self{
+        Self{source,scaled:RescaleRenderElement::from_element(source,(0,0).into(),factor),factor,origin}
     }
 }
 impl Element for SnapshotElement<'_>{
     fn id(&self)->&Id{self.scaled.id()}
     fn current_commit(&self)->CommitCounter{self.scaled.current_commit()}
     fn src(&self)->Rectangle<f64,Buffer>{self.scaled.src()}
-    fn geometry(&self,scale:Scale<f64>)->Rectangle<i32,Physical>{self.scaled.geometry(scale)}
+    fn geometry(&self,scale:Scale<f64>)->Rectangle<i32,Physical>{let mut rect=self.scaled.geometry(scale);rect.loc-=self.origin;rect}
     fn transform(&self)->Transform{self.scaled.transform()}
     fn alpha(&self)->f32{self.scaled.alpha()}
     fn kind(&self)->Kind{self.scaled.kind()}
@@ -92,8 +118,8 @@ impl RenderElement<GlesRenderer> for SnapshotElement<'_>{
     fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
         if dst.size.w<=0||dst.size.h<=0{return Ok(());}
         match self.source{
-            SceneElement::Rounded(masked)=>masked.draw_scaled(frame,src,dst,damage,self.factor),
-            SceneElement::Backdrop(masked)=>masked.draw_scaled(frame,src,dst,damage,self.factor),
+            SceneElement::Rounded(masked)=>masked.draw_scaled(frame,src,dst,damage,self.factor,self.origin),
+            SceneElement::Backdrop(masked)=>masked.draw_scaled(frame,src,dst,damage,self.factor,self.origin),
             _=>self.scaled.draw(frame,src,dst,damage,&[]),
         }
     }
@@ -120,7 +146,8 @@ impl Backdrop{
         if self.disabled||strength==0{return None;}
         let plan=SnapshotPlan::new(size)?;
         let damage=plan.damage(regions,strength)?;
-        match self.try_render(renderer,plan,damage,color,behind,strength,target){
+        let snapshot=plan.target(damage);
+        match self.try_render(renderer,plan,snapshot,color,behind,strength,target){
             Ok(element)=>{
                 if !self.logged[target.slot()]{println!("Atelier {} backdrop rendered",target.name());self.logged[target.slot()]=true;}
                 Some(element)
@@ -131,11 +158,12 @@ impl Backdrop{
             }
         }
     }
-    fn try_render(&mut self,renderer:&mut GlesRenderer,plan:SnapshotPlan,damage:Rectangle<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->anyhow::Result<TextureShaderElement>{
+    fn try_render(&mut self,renderer:&mut GlesRenderer,plan:SnapshotPlan,snapshot:SnapshotTarget,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->anyhow::Result<TextureShaderElement>{
         if self.program.is_none(){
             self.program=Some(renderer.compile_custom_texture_shader(include_str!("backdrop.frag"),&[UniformName::new("step_uv",UniformType::_2f)])?);
         }
-        let size=plan.scratch;
+        let size=snapshot.crop.size;
+        let damage=snapshot.damage;
         let slot=&mut self.scratch[target.slot()];
         if slot.as_ref().is_none_or(|(current,_)|*current!=size){
             *slot=None;
@@ -149,7 +177,7 @@ impl Backdrop{
             // first row. Final presentation uses each backend's transform.
             let mut frame=renderer.render(&mut target,size,Transform::Normal)?;
             frame.clear(Color32F::new(color[0],color[1],color[2],1.0),&[damage])?;
-            let scaled:Vec<_>=behind.iter().map(|element|SnapshotElement::new(element,plan.factor))
+            let scaled:Vec<_>=behind.iter().map(|element|SnapshotElement::new(element,plan.factor,snapshot.crop.loc))
                 .filter(|element|element.geometry(Scale::from(1.0)).overlaps(damage)).collect();
             draw_render_elements(&mut frame,1.0,&scaled,&[damage])?;
             let _fence=frame.finish()?;
@@ -157,13 +185,13 @@ impl Backdrop{
         // Same renderer/context, ordered GL commands. The scratch texture
         // is never bound as the destination of its own sampling pass.
         let element=TextureRenderElement::from_static_texture(
-            Id::new(),renderer.context_id(),(0.0,0.0),texture.clone(),1,Transform::Normal,
+            Id::new(),renderer.context_id(),snapshot.destination,texture.clone(),1,Transform::Normal,
             Some(1.0),Some(Rectangle::from_size((f64::from(size.w),f64::from(size.h)).into())),
-            Some((plan.output.w,plan.output.h).into()),None,Kind::Unspecified,
+            Some((snapshot.logical_size.w,snapshot.logical_size.h).into()),None,Kind::Unspecified,
         );
         let radius=strength.min(16) as f32;
         Ok(TextureShaderElement::new(element,self.program.as_ref().expect("program compiled").clone(),
-            vec![Uniform::new("step_uv",UniformValue::_2f(radius/plan.output.w as f32,radius/plan.output.h as f32))]))
+            vec![Uniform::new("step_uv",UniformValue::_2f(radius/snapshot.logical_size.w as f32,radius/snapshot.logical_size.h as f32))]))
     }
 }
 #[cfg(test)]
@@ -207,6 +235,32 @@ mod tests{
         let edge=Rectangle::new((1918,1078).into(),(1,1).into());
         let d=plan.damage(&[edge],16).unwrap();
         assert_eq!(d.loc.x+d.size.w,960);assert_eq!(d.loc.y+d.size.h,540);
+    }
+    #[test]
+    fn compact_targets_preserve_grid_and_bound_memory(){
+        let plan=SnapshotPlan::new((1920,1080).into()).unwrap();
+        let panel=Rectangle::new((0,0).into(),(1920,40).into());
+        let damage=plan.damage(&[panel],16).unwrap();
+        let target=plan.target(damage);
+        assert_eq!(target.crop,Rectangle::new((0,0).into(),(960,64).into()));
+        assert_eq!(target.damage,damage);
+        assert_eq!(target.destination,(0.0,0.0));
+        assert_eq!(target.logical_size,(1920,128).into());
+        let dock=Rectangle::new((760,1000).into(),(400,80).into());
+        let damage=plan.damage(&[dock],16).unwrap();
+        let target=plan.target(damage);
+        assert_eq!(target.crop,Rectangle::new((320,448).into(),(320,92).into()));
+        assert_eq!(target.destination,(640.0,896.0));
+        assert_eq!(target.logical_size,(640,184).into());
+        assert_eq!(target.damage.loc+target.crop.loc,damage.loc);
+        assert_eq!(target.damage.size,damage.size);
+        assert_eq!(target.crop.intersection(damage),Some(damage));
+        let odd=SnapshotPlan::new((1919,1079).into()).unwrap();
+        let damage=odd.damage(&[dock],16).unwrap();
+        let target=odd.target(damage);
+        assert_eq!(target.crop,Rectangle::from_size(odd.scratch));
+        assert_eq!(target.logical_size,odd.output);
+        assert_eq!(target.damage,damage);
     }
     #[test]
     fn limits_scratch_allocation(){
