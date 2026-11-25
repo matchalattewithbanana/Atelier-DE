@@ -435,10 +435,12 @@ pub fn run_native(
         let result = (|| -> Result<()> {
             let started = Instant::now();
             let color = config.theme.background();
+            let mut metrics = crate::frame_metrics::FrameMetrics::new("native");
             let mut pending_since: Option<Instant> = None;
             let mut last_route_check = Instant::now();
             println!("Atelier native ready: WAYLAND_DISPLAY={socket}");
             while running.load(Ordering::SeqCst) || queue.pending().is_some() {
+                metrics.report_due();
                 event_loop.dispatch(Duration::from_millis(8), &mut ())
                     .map_err(|error| anyhow::anyhow!("dispatch native events: {error}"))?;
                 if !session.is_active() { bail!("native seat deactivated; exiting instead of resuming an unverified route"); }
@@ -446,7 +448,7 @@ pub fn run_native(
                 // A completed flip, not submission, releases the old buffer and timestamps clients.
                 if queue.pending().is_some() && flip_completed(&card, route.crtc)? {
                     queue.completed();
-                    pending_since = None;
+                    metrics.flip_completed(pending_since.take());
                     let state = state.borrow();
                     state.send_frames(started.elapsed());
                 }
@@ -485,11 +487,13 @@ pub fn run_native(
                 }
                 server.flush_clients()?;
                 let Some(next) = queue.next() else { continue; };
+                let mut timing = metrics.begin_frame();
                 {
                     let state = state.borrow();
                     let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
                     let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
+                    timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
@@ -505,6 +509,7 @@ pub fn run_native(
                     }
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
                 }
+                timing.render_ready();
                 if !session.is_active() { bail!("seat deactivated before submission"); }
                 let expected = queue.displayed().map(|slot| u64::from(u32::from(slots[slot].1))).unwrap_or(original);
                 if property(&card, route.plane, "FB_ID")?.1 != expected { bail!("native framebuffer changed outside Atelier"); }
@@ -513,6 +518,7 @@ pub fn run_native(
                     .context("queue native page flip")?;
                 queue.submitted(next);
                 pending_since = Some(Instant::now());
+                metrics.submitted(timing);
             }
             Ok(())
         })();
