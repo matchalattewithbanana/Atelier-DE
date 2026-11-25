@@ -2,7 +2,7 @@
 use crate::state::Atelier;
 use smithay::{
     backend::renderer::{
-        element::{Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
+        element::{Element,Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
         gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture},utils::draw_render_elements,Color32F,Frame,Renderer,ImportMem,
     },
     input::pointer::{CursorImageStatus,CursorImageSurfaceData},
@@ -26,6 +26,30 @@ pub struct NativeCursor {
 
 fn hotspot_origin(position:Point<i32,Physical>,hotspot:(i32,i32))->Point<i32,Physical>{
     (position.x.saturating_sub(hotspot.0),position.y.saturating_sub(hotspot.1)).into()
+}
+
+// Use i64 while clipping client-provided geometry so extreme coordinates
+// cannot overflow the envelope calculation. Never guess invalid extents.
+fn cursor_envelope(geometries:impl IntoIterator<Item=Rectangle<i32,Physical>>,output:Rectangle<i32,Physical>,
+    empty:Rectangle<i32,Physical>)->Option<Rectangle<i32,Physical>>{
+    let mut bounds:Option<(i64,i64,i64,i64)>=None;
+    let ox=i64::from(output.loc.x);let oy=i64::from(output.loc.y);
+    let or=ox+i64::from(output.size.w);let ob=oy+i64::from(output.size.h);
+    for rect in geometries{
+        if rect.size.w<0||rect.size.h<0{return None;}
+        if rect.size.w==0||rect.size.h==0{continue;}
+        let x=i64::from(rect.loc.x);let y=i64::from(rect.loc.y);
+        let l=x.max(ox);let t=y.max(oy);
+        let r=(x+i64::from(rect.size.w)).min(or);
+        let b=(y+i64::from(rect.size.h)).min(ob);
+        if l>=r||t>=b{continue;}
+        bounds=Some(match bounds{Some((a,c,d,e))=>(a.min(l),c.min(t),d.max(r),e.max(b)),None=>(l,t,r,b)});
+    }
+    match bounds{
+        Some((l,t,r,b))=>Some(Rectangle::new((i32::try_from(l).ok()?,i32::try_from(t).ok()?).into(),
+            (i32::try_from(r-l).ok()?,i32::try_from(b-t).ok()?).into())),
+        None=>Some(empty),
+    }
 }
 
 /// A single immutable default-theme image, imported once per renderer.
@@ -140,9 +164,22 @@ impl NativeCursor {
         };
         Self{position,output,image}
     }
-    pub fn is_default(&self)->bool{matches!(&self.image,Image::Default)}
-    pub fn default_bounds(&self)->Rectangle<i32,Physical>{
-        Rectangle::new(self.position,(11.min(self.output.w-self.position.x),16.min(self.output.h-self.position.y)).into())
+    /// A conservative envelope of everything drawn by this cursor.
+    /// None means uncertain geometry and forces a full-frame baseline.
+    /// Hidden or fully offscreen cursors retain a single harmless pixel
+    /// at the pointer position to keep the existing damage API nonempty.
+    pub fn bounds(&self)->Option<Rectangle<i32,Physical>>{
+        let output=Rectangle::from_size(self.output);
+        let empty=Rectangle::new(self.position,(1,1).into());
+        match &self.image{
+            Image::Default=>Some(Rectangle::new(self.position,(11.min(self.output.w-self.position.x),16.min(self.output.h-self.position.y)).into())),
+            Image::Hidden=>Some(empty),
+            Image::Theme(element)=>cursor_envelope(std::iter::once(element.geometry(Scale::from(1.0))),output,empty),
+            Image::Client(elements)=>{
+                if elements.len()>64{return None;}
+                cursor_envelope(elements.iter().map(|e|e.geometry(Scale::from(1.0))),output,empty)
+            }
+        }
     }
     pub fn draw(&self,frame:&mut GlesFrame<'_,'_>,output:Rectangle<i32,Physical>)->Result<(),GlesError>{
         match &self.image{
@@ -171,6 +208,17 @@ mod tests{
         assert_eq!(file_pixels_to_rgba(&[20,40,60,128,0,0,0,0]),vec![60,40,20,128,0,0,0,0]);
         assert!(!bounded_file(&[]));
         assert!(!bounded_file(b"Xcur"));
+    }
+    #[test]
+    fn cursor_envelope_clips_and_unions_surface_trees(){
+        let rect=|x,y,w,h|Rectangle::new((x,y).into(),(w,h).into());
+        let output=rect(0,0,100,80);
+        let empty=rect(20,20,1,1);
+        assert_eq!(cursor_envelope([rect(-10,-5,30,25),rect(18,15,12,12)],output,empty),Some(rect(0,0,30,27)));
+        assert_eq!(cursor_envelope([rect(90,70,32,32)],output,empty),Some(rect(90,70,10,10)));
+        assert_eq!(cursor_envelope([rect(i32::MAX-1,0,100,10)],output,empty),Some(empty));
+        assert_eq!(cursor_envelope([],output,empty),Some(empty));
+        assert!(cursor_envelope([rect(0,0,-1,10)],output,empty).is_none());
     }
     #[test]
     fn cursor_hotspots_allow_offscreen_origins_without_integer_overflow(){

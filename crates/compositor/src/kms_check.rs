@@ -650,15 +650,15 @@ pub fn run_native(
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
                     let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&cursor_theme);
-                    cursor_bounds=cursor.default_bounds();
-                    custom_cursor=!cursor.is_default();
+                    let bounds=cursor.bounds();
+                    custom_cursor=bounds.is_none();
+                    cursor_bounds=bounds.unwrap_or(output_damage);
                     let damage=if !custom_cursor{
                         let fallback=queue.damage(next,output_damage,cursor_bounds);
                         snapshot=client_damage.capture(&elements,cursor_bounds);
                         client_damage.damage(next,output_damage,fallback,snapshot.as_ref(),&elements)
                     }else{
-                        // Arbitrary cursor surface trees may extend outside the
-                        // default glyph. Do not reuse the ordinary cursor baseline.
+                        // Uncertain cursor geometry cannot establish a retained baseline.
                         queue.forget_damage_history();
                         client_damage.reset();
                         snapshot=None;
@@ -670,7 +670,7 @@ pub fn run_native(
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
                     draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
-                    cursor.draw(&mut frame,output_damage)?;
+                    cursor.draw(&mut frame,damage)?;
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
                 }
                 timing.render_ready();
