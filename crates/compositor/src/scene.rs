@@ -12,7 +12,7 @@ use smithay::{
     },
     desktop::{layer_map_for_output,PopupManager},
     utils::{Buffer,Logical,Physical,Point,Rectangle,Scale,Transform},
-    wayland::shell::wlr_layer::Layer,
+    wayland::{compositor::{with_states,SurfaceAttributes,RectangleKind},shell::wlr_layer::Layer},
 };
 render_elements!{
     pub SceneElement<=GlesRenderer>;
@@ -175,9 +175,29 @@ fn relative_outline(content:Rectangle<i32,Logical>,strip:Rectangle<i32,Logical>,
     let b=i64::from(border.min(8));
     [(x-b) as f32,(y-b) as f32,(x+i64::from(content.size.w)+b) as f32,(y+i64::from(content.size.h)+b) as f32]
 }
-#[derive(Clone,Copy)]
+#[derive(Clone)]
 struct BlurRequest{
     target:BlurTarget,index:usize,geometry:Rectangle<i32,Logical>,radius:u32,strength:u32,
+    explicit_regions:Option<Vec<Rectangle<i32,Logical>>>,
+}
+/// Only accept a small, additive, non-overlapping region. Never interpret
+/// absent/default input regions as the full widget group. The namespace
+/// merely opts into this rendering convention, not a privileged protocol.
+fn widget_regions(rects:&[(RectangleKind,Rectangle<i32,Logical>)],origin:Point<i32,Logical>,geometry:Rectangle<i32,Logical>,bounds:Rectangle<i32,Logical>)->Option<Vec<Rectangle<i32,Logical>>>{
+    if rects.is_empty()||rects.len()>256{return None;}
+    let mut result=Vec::new();
+    let clip=geometry.intersection(bounds)?;
+    for (kind,rect) in rects{
+        if !matches!(kind,RectangleKind::Add)||rect.size.w<=0||rect.size.h<=0{return None;}
+        let x=rect.loc.x.checked_add(origin.x)?;let y=rect.loc.y.checked_add(origin.y)?;
+        x.checked_add(rect.size.w)?;y.checked_add(rect.size.h)?;
+        let rect=Rectangle::new((x,y).into(),rect.size);
+        if let Some(hit)=rect.intersection(clip){
+            if result.iter().any(|other:&Rectangle<i32,Logical>|other.overlaps(hit)){return None;}
+            result.push(hit);
+        }
+    }
+    (!result.is_empty()).then_some(result)
 }
 fn add_blur(requests:&mut Vec<BlurRequest>,request:BlurRequest){
     // One request per role (including duplicate client namespaces).
@@ -204,7 +224,17 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 // Namespace is a rendering hint, not an authorization claim.
                 if result.len()>first&&geometry.overlaps(bounds){
                     if let Some((target,strength,radius))=state.shell_backdrop(layer.namespace()){
-                        add_blur(blurs,BlurRequest{target,index:result.len(),geometry,radius,strength});
+                        let explicit_regions=if target==BlurTarget::Widgets{
+                            let surface_origin=geometry.loc-layer.bbox().loc;
+                            let regions=with_states(layer.wl_surface(),|states|{
+                                let mut cached=states.cached_state.get::<SurfaceAttributes>();
+                                let current=cached.current();
+                                current.input_region.as_ref().and_then(|region|widget_regions(&region.rects,surface_origin,geometry,bounds))
+                            });
+                            if regions.is_none(){continue;}
+                            regions
+                        }else{None};
+                        add_blur(blurs,BlurRequest{target,index:result.len(),geometry,radius,strength,explicit_regions});
                     }
                 }
             }
@@ -267,7 +297,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         }
         let strength=state.window_backdrop_blur(window);
         if strength>0&&geometry.overlaps(bounds){
-            add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength});
+            add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength,explicit_regions:None});
         }
     }
     layers(&[Layer::Bottom,Layer::Background],&mut result,renderer,&mut blurs);
@@ -280,7 +310,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         for request in blurs{
             if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],request.strength,request.target){
                 active[request.target.slot()]=true;
-                let regions=rounded_regions(request.geometry,request.radius).into_iter().filter_map(|r|r.intersection(bounds))
+                let regions=request.explicit_regions.unwrap_or_else(||rounded_regions(request.geometry,request.radius)).into_iter().filter_map(|r|r.intersection(bounds))
                     .map(|mut r|{r.loc-=bounds.loc;r}).collect();
                 insertions.push((request.index,SceneElement::from(Masked{inner,regions,scale})));
             }
@@ -349,11 +379,25 @@ mod tests{
         let tiny=Rectangle::new((0,0).into(),(1,1).into());assert_eq!(rounded_regions(tiny,24),vec![tiny]);
     }
     #[test]
+    fn widget_blur_regions_preserve_gaps_and_reject_complex_input(){
+        let geometry=Rectangle::new((10,20).into(),(100,100).into());
+        let bounds=Rectangle::new((0,0).into(),(200,200).into());
+        let first=Rectangle::new((0,0).into(),(100,40).into());
+        let second=Rectangle::new((0,50).into(),(100,40).into());
+        let rects=[(RectangleKind::Add,first),(RectangleKind::Add,second)];
+        let regions=widget_regions(&rects,geometry.loc,geometry,bounds).unwrap();
+        assert_eq!(regions.len(),2);
+        assert!(!regions.iter().any(|r|r.contains((50,65).into())));
+        assert!(widget_regions(&[],geometry.loc,geometry,bounds).is_none());
+        assert!(widget_regions(&[(RectangleKind::Subtract,first)],geometry.loc,geometry,bounds).is_none());
+        assert!(widget_regions(&[(RectangleKind::Add,first),(RectangleKind::Add,first)],geometry.loc,geometry,bounds).is_none());
+    }
+    #[test]
     fn blur_requests_are_bounded_and_preserve_scene_indices(){
         let geometry=Rectangle::new((0,0).into(),(50,40).into());
         let mut requests=Vec::new();
         for (target,index) in [(BlurTarget::Panel,2),(BlurTarget::Dock,4),(BlurTarget::Panel,6),(BlurTarget::Focused,9)]{
-            add_blur(&mut requests,BlurRequest{target,index,geometry,radius:0,strength:8});
+            add_blur(&mut requests,BlurRequest{target,index,geometry,radius:0,strength:8,explicit_regions:None});
         }
         assert_eq!(requests.iter().map(|r|r.index).collect::<Vec<_>>(),vec![2,4,9]);
         let mut scene=vec![0;10];for request in requests.into_iter().rev(){scene.insert(request.index,request.index);}
