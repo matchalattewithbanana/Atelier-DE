@@ -1,4 +1,4 @@
-//! Portable visual settings only: never import machine-local paths, pins or commands.
+//! Portable visual settings only: never import machine-local paths, pins, application rules or commands.
 use crate::{Appearance,WindowBorder,WindowSpacing,WindowShadow,Transparency};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
