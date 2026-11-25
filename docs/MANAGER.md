@@ -199,3 +199,7 @@ The optional Panel, dock & widgets page edits Classic layout toggles and ordered
 Appearance Studio supports wallpaper-derived dark and light color drafts via the reviewed Classic integration. Color generation never applies settings automatically.
 
 The optional Custom rices page reviews and registers trusted local manifests, or unregisters unselected custom profiles without deleting their files. See [Mango integration](MANGO_INTEGRATION.md).
+
+## Native appearance
+
+Native appearance opens the selected verified `settings` product using the existing managed runtime lease via `run-product settings --page shell-appearance`. The independent native Settings app owns appearance persistence and recovery; the Manager does not duplicate the editor or touch Classic settings. Requires an updated selected native Settings build; older deployments may reject the page argument. Restart the shell after saving. See the README for supported fields.

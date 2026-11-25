@@ -6,18 +6,20 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::{rc::Rc, process::Command, time::Duration};
 
 pub fn build(app: &gtk::Application, popups: bool) {
+    let appearance = crate::native_appearance();
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_application_prefer_dark_theme(config.theme.is_dark());
     }
-    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).default_height(40).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).default_height(appearance.panel_height as i32).build();
     window.init_layer_shell();
     window.set_namespace(Some("atelier-panel"));
     window.set_layer(Layer::Top);
     for edge in [Edge::Left, Edge::Right, Edge::Top] { window.set_anchor(edge, true); }
     window.set_keyboard_mode(KeyboardMode::None);
     window.auto_exclusive_zone_enable();
-    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, appearance.panel_spacing as i32);
+    bar.set_size_request(-1, appearance.panel_height as i32);
     bar.set_margin_start(12); bar.set_margin_end(12); bar.set_margin_top(4); bar.set_margin_bottom(4);
     bar.add_css_class("atelier-panel");
 
@@ -61,32 +63,34 @@ pub fn build(app: &gtk::Application, popups: bool) {
     let media = gtk::Button::with_label("Media");
     let app_ref = app.downgrade();
     media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::media_controls::show(&app); } });
-    bar.append(&media);
+    bar.append(&media); media.set_visible(appearance.show_media);
     let notifications = gtk::Button::with_label("Notifications");
     let app_ref = app.downgrade();
     notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::notification_centre::show(&app); } });
-    bar.append(&notifications);
+    bar.append(&notifications); notifications.set_visible(appearance.show_notifications);
     let audio = gtk::Button::with_label("Audio");
     audio.connect_clicked(move |_| { let mut command = component("atelier-settings"); command.args(["--page", "audio"]); spawn(command); });
-    bar.append(&audio);
+    bar.append(&audio); audio.set_visible(appearance.show_audio);
     let terminal = gtk::Button::with_label("Terminal");
     let terminal_path = config.terminal.clone();
     terminal.connect_clicked(move |_| spawn(Command::new(&terminal_path)));
-    bar.append(&terminal);
+    bar.append(&terminal); terminal.set_visible(appearance.show_terminal);
     let settings = gtk::Button::with_label("Settings");
     settings.connect_clicked(move |_| spawn(component("atelier-settings")));
     bar.append(&settings);
 
-    update_power(&battery);
+    if appearance.show_battery { update_power(&battery); } else { battery.set_visible(false); }
+    let show_battery = appearance.show_battery;
     let battery_weak = battery.downgrade();
     glib::timeout_add_local(Duration::from_secs(5), move || {
         let Some(label) = battery_weak.upgrade() else { return glib::ControlFlow::Break; };
-        update_power(&label);
+        if show_battery { update_power(&label); }
         glib::ControlFlow::Continue
     });
+    let show_date = appearance.show_date;
     let tick = move || {
         if let Ok(now) = glib::DateTime::now_local() {
-            if let Ok(text) = now.format("%a %d %b · %H:%M") { clock.set_text(&text); }
+            if let Ok(text) = now.format(if show_date { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
         }
         let snapshot = backend.snapshot();
         for (index, button) in workspaces.iter().enumerate() {
@@ -103,11 +107,6 @@ pub fn build(app: &gtk::Application, popups: bool) {
         glib::ControlFlow::Continue
     });
 
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(".atelier-panel { background: @theme_bg_color; padding: 2px; } .atelier-panel button { border-radius: 10px; padding: 3px 12px; }");
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-    }
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
     if popups { crate::notification_toast::start(app, &window); }

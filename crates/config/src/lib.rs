@@ -1,5 +1,8 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
+mod appearance;
+pub use appearance::{appearance_path, Appearance, AppearanceReview};
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{env, fs, io::Write, path::{Path, PathBuf}, process::Command};

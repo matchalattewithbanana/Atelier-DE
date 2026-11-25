@@ -1,6 +1,6 @@
 //! Native Wayland client; does not import Smithay or compositor internals.
 
-use atelier_config::{component, config_path, Config};
+use atelier_config::{appearance_path, component, config_path, Appearance, Config};
 use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 mod media_controls;
@@ -40,6 +40,11 @@ fn main() -> glib::ExitCode {
     }));
     let app = gtk::Application::builder().application_id("org.atelier.Shell").flags(gio::ApplicationFlags::NON_UNIQUE).build();
     app.connect_activate(move |app| {
+        let appearance = native_appearance();
+        if let Ok(css) = appearance.css() {
+            let provider = gtk::CssProvider::new(); provider.load_from_data(&css);
+            if let Some(display) = gtk::gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
+        }
         #[cfg(feature = "layer-panel")]
         if use_panel && gtk4_layer_shell::is_supported() { panel::build(app, requested_popups); return; }
         let _ = use_panel;
@@ -48,7 +53,15 @@ fn main() -> glib::ExitCode {
     app.run_with_args(&["atelier-shell"])
 }
 
+fn native_appearance() -> Appearance {
+    match appearance_path().and_then(|path| Appearance::load(&path)) {
+        Ok(value) => value,
+        Err(error) => { eprintln!("Native appearance unavailable: {error:#}"); Appearance::default() }
+    }
+}
+
 fn build_shell(app: &gtk::Application) {
+    let appearance = native_appearance();
     let loaded = config_path().and_then(|path| Config::load(&path));
     let (config, config_warning) = match loaded {
         Ok(config) => (config, String::new()),
@@ -58,6 +71,7 @@ fn build_shell(app: &gtk::Application) {
 
     let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Desktop Shell").default_width(580).default_height(540).build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    content.add_css_class("atelier-launcher");
     content.set_margin_top(24); content.set_margin_bottom(24); content.set_margin_start(24); content.set_margin_end(24);
     let title = gtk::Label::new(Some("Atelier")); title.add_css_class("title-1"); title.set_xalign(0.0);
     let description = gtk::Label::new(Some("Your workspace")); description.add_css_class("dim-label"); description.set_xalign(0.0);
@@ -66,7 +80,7 @@ fn build_shell(app: &gtk::Application) {
     let status = gtk::Label::new(Some(&config_warning)); status.set_wrap(true); status.set_xalign(0.0); status.add_css_class("dim-label");
     let shortcuts = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let terminal = gtk::Button::with_label("Terminal"); terminal.set_hexpand(true);
-    let settings = gtk::Button::with_label("Settings"); settings.set_hexpand(true);
+    let settings = gtk::Button::with_label("Settings"); settings.set_hexpand(true); settings.add_css_class("suggested-action");
     let terminal_path = config.terminal.clone();
     let message = status.clone();
     terminal.connect_clicked(move |_| match Command::new(&terminal_path).spawn() {
@@ -101,7 +115,7 @@ fn build_shell(app: &gtk::Application) {
         let row = gtk::ListBoxRow::new();
         let button = gtk::Button::new(); button.add_css_class("flat");
         let item = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let icon = app_info.icon().map(|icon| gtk::Image::from_gicon(&icon)).unwrap_or_else(|| gtk::Image::from_icon_name("application-x-executable")); icon.set_pixel_size(32);
+        let icon = app_info.icon().map(|icon| gtk::Image::from_gicon(&icon)).unwrap_or_else(|| gtk::Image::from_icon_name("application-x-executable")); icon.set_pixel_size(appearance.launcher_icon_size as i32);
         let label = gtk::Label::new(Some(&name)); label.set_xalign(0.0); label.set_hexpand(true);
         item.append(&icon); item.append(&label); button.set_child(Some(&item)); row.set_child(Some(&button));
         let message = status.clone();

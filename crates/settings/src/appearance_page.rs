@@ -1,0 +1,69 @@
+//! Independent native appearance draft and previous-version recovery.
+use atelier_config::{appearance_path,Appearance,AppearanceReview};
+use gtk::prelude::*;
+use std::{cell::RefCell,rc::Rc};
+use super::description;
+
+#[derive(Clone)]
+struct Fields{
+    accent:gtk::Entry,height:gtk::SpinButton,spacing:gtk::SpinButton,radius:gtk::SpinButton,icons:gtk::SpinButton,
+    toggles:Vec<gtk::CheckButton>,
+}
+impl Fields{
+    fn populate(&self,p:&Appearance){
+        self.accent.set_text(&p.accent);
+        for (field,value) in [(&self.height,p.panel_height),(&self.spacing,p.panel_spacing),(&self.radius,p.button_radius),(&self.icons,p.launcher_icon_size)]{field.set_value(value as f64);}
+        for (field,value) in self.toggles.iter().zip([p.show_date,p.show_battery,p.show_media,p.show_notifications,p.show_audio,p.show_terminal]){field.set_active(value);}
+    }
+    fn collect(&self)->Appearance{
+        Appearance{accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
+            button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
+            show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
+            show_notifications:self.toggles[3].is_active(),show_audio:self.toggles[4].is_active(),show_terminal:self.toggles[5].is_active(),..Appearance::default()}
+    }
+}
+fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64)->gtk::SpinButton{
+    let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
+    let label=description(title);label.set_hexpand(true);row.append(&label);
+    let spin=gtk::SpinButton::with_range(min,max,1.0);row.append(&spin);parent.append(&row);spin
+}
+pub fn build(parent:&gtk::Box){
+    let path=match appearance_path(){Ok(p)=>p,Err(e)=>{parent.append(&description(&format!("{e:#}")));return;}};
+    let accent=gtk::Entry::new();accent.set_placeholder_text(Some("#RRGGBB or blank for GTK default"));parent.append(&description("Accent for highlighted native shell buttons"));parent.append(&accent);
+    let height=spin(parent,"Panel minimum height",32.0,80.0);
+    let spacing=spin(parent,"Panel item spacing",0.0,24.0);
+    let radius=spin(parent,"Button radius",0.0,24.0);
+    let icons=spin(parent,"Launcher icon size",16.0,64.0);
+    let toggles:Vec<_>=["Show date","Show battery","Show media button","Show notifications button","Show audio button","Show terminal button"].iter().map(|title|{let field=gtk::CheckButton::with_label(title);parent.append(&field);field}).collect();
+    let fields=Fields{accent,height,spacing,radius,icons,toggles};
+    let status=description("Load saved appearance to begin.");status.set_selectable(true);
+    let reload=gtk::Button::with_label("Load saved appearance");
+    let defaults=gtk::Button::with_label("Preview defaults");
+    let previous=gtk::Button::with_label("Load previous appearance into draft");
+    let save=gtk::Button::with_label("Save native appearance");save.add_css_class("suggested-action");
+    for button in [&reload,&defaults,&previous,&save]{parent.append(button);}parent.append(&status);
+    let state=Rc::new(RefCell::new(None::<AppearanceReview>));
+    let enable={let (defaults,previous,save)=(defaults.downgrade(),previous.downgrade(),save.downgrade());Rc::new(move|enabled|{for button in [&defaults,&previous,&save]{if let Some(b)=button.upgrade(){b.set_sensitive(enabled);}}})};
+    enable(false);
+    {
+        let (fields,state,status,enable)=(fields.clone(),state.clone(),status.clone(),enable.clone());
+        reload.connect_clicked(move |_|match AppearanceReview::load(&path){
+            Ok(review)=>{fields.populate(&review.value);*state.borrow_mut()=Some(review);enable(true);status.set_text("Draft loaded. Changes apply when the shell restarts.");}
+            Err(e)=>{state.borrow_mut().take();enable(false);status.set_text(&format!("Load failed; existing files unchanged: {e:#}"));}
+        });
+    }
+    {let (fields,status)=(fields.clone(),status.clone());defaults.connect_clicked(move |_|{fields.populate(&Appearance::default());status.set_text("Defaults in draft only.");});}
+    {let (fields,state,status)=(fields.clone(),state.clone(),status.clone());previous.connect_clicked(move |_|{
+        let baseline=state.borrow();let Some(r)=baseline.as_ref()else{return;};
+        match r.previous(){Ok(value)=>{fields.populate(&value);status.set_text("Previous appearance loaded into draft. Save to restore.");},Err(e)=>status.set_text(&format!("{e:#}"))}
+    });}
+    save.connect_clicked(move |_|{
+        let mut baseline=state.borrow_mut();let Some(r)=baseline.as_mut()else{return;};
+        match r.save(fields.collect()){
+            Ok(true)=>status.set_text("Appearance saved. Previous profile retained. Restart the shell to apply."),
+            Ok(false)=>status.set_text("No appearance changes."),
+            Err(e)=>status.set_text(&format!("Save failed: {e:#}")),
+        }
+    });
+    reload.emit_clicked();
+}

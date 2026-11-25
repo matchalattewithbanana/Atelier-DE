@@ -176,3 +176,7 @@ For a protocol/socket smoke test in a disposable nested X11 session, install `xo
 ## Roadmap
 
 Read [the native architecture and milestone gates](docs/architecture.md). Direct DRM/KMS, libseat, real panel surfaces, secure screen locking, workspaces/tiling, output management, native settings live updates and production session services are separate upcoming milestones. No support for these is implied by the current alpha.
+
+### Native shell appearance
+
+Open `atelier-settings --page shell-appearance` for a separate native appearance profile at `${XDG_CONFIG_HOME:-$HOME/.config}/atelier-de/appearance.toml`. Customize the shell highlight accent, panel minimum height/spacing, button radius, launcher icon size and date/battery/media/notifications/audio/terminal panel visibility. Save explicitly; a previous profile is retained and can be loaded into a draft and saved to restore. The shared configuration crate validates values and rechecks exact saved bytes under an advisory lock. Existing `settings.toml` and Classic rice files remain independent. Restart the native shell to apply; actual panel height may exceed the minimum to fit widgets. Native appearance does not change compositor wallpaper or window borders. Uses a recent stable Rust toolchain (standard-library file locking requires Rust 1.89+).
