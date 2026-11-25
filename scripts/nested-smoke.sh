@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
     mkdir -p -- "$test_runtime/config/atelier-de"
-    printf 'version = 1\nbackdrop_blur = 8\npanel_backdrop_blur = 8\ndock_backdrop_blur = 8\nwidget_backdrop_blur = 8\ndock_enabled = true\nwindow_corner_radius = 12\n[transparency]\nfocused = 85\npanel = 82\ndock = 82\nwidgets = 88\n[widgets]\nenabled = true\nclock = true\ncalendar = true\n[window_shadow]\nradius = 24\nopacity = 40\n' > "$test_runtime/config/atelier-de/appearance.toml"
+    printf 'version = 1\nbackdrop_blur = 8\npanel_backdrop_blur = 8\ndock_backdrop_blur = 8\nwidget_backdrop_blur = 8\ndock_enabled = true\nwindow_corner_radius = 12\n[window_border]\nwidth = 2\n[transparency]\nfocused = 85\npanel = 82\ndock = 82\nwidgets = 88\n[widgets]\nenabled = true\nclock = true\ncalendar = true\n[window_shadow]\nradius = 24\nopacity = 40\n' > "$test_runtime/config/atelier-de/appearance.toml"
 fi
 env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" LIBGL_ALWAYS_SOFTWARE=1 target/debug/atelier-session --nested --no-shell >"$test_runtime/session.log" 2>&1 &
 supervisor=$!
@@ -96,11 +96,12 @@ if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
             cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2
             exit 1
         fi
-        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" && grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier panel backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier dock backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier widgets backdrop rendered' "$test_runtime/session.log"; then break; fi
+        if grep -q 'Atelier rounded border shader ready' "$test_runtime/session.log" && grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" && grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier panel backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier dock backdrop rendered' "$test_runtime/session.log" && grep -q 'Atelier widgets backdrop rendered' "$test_runtime/session.log"; then break; fi
         sleep 0.1
     done
     grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
     grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
+    grep -q 'Atelier rounded border shader ready' "$test_runtime/session.log" || { cat "$test_runtime/session.log" >&2; exit 1; }
     grep -q "Atelier widget card input region published" "$test_runtime/panel.log" || { cat "$test_runtime/panel.log" "$test_runtime/session.log" >&2; exit 1; }
     for role in panel dock widgets; do
         grep -q "Atelier $role backdrop rendered" "$test_runtime/session.log" || { cat "$test_runtime/panel.log" "$test_runtime/session.log" >&2; exit 1; }
