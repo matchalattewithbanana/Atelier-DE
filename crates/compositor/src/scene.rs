@@ -86,16 +86,26 @@ impl<E:Element> Element for Masked<E>{
     fn alpha(&self)->f32{self.inner.alpha()}
     fn kind(&self)->Kind{self.inner.kind()}
 }
-impl<E:RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for Masked<E>{
-    fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
+impl<E:RenderElement<GlesRenderer>> Masked<E>{
+    /// Snapshot draws use a smaller physical output, while the logical
+    /// rounded shape is unchanged. Transform the mask by the same scale
+    /// as the scene, not by the rounded size of an individual surface.
+    fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>)->Result<(),GlesError>{
         let mut clipped=Vec::new();
+        let scale=Scale::from((self.scale*factor.x,self.scale*factor.y));
         for region in &self.regions{
-            let mut region=region.to_physical_precise_round(self.scale);
+            let mut region=region.to_physical_precise_round(scale);
+            if region.size.w<=0||region.size.h<=0{continue;}
             region.loc-=dst.loc;
             for d in damage{if let Some(hit)=region.intersection(*d){clipped.push(hit);}}
         }
         if clipped.is_empty(){return Ok(());}
         self.inner.draw(frame,src,dst,&clipped,&[])
+    }
+}
+impl<E:RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for Masked<E>{
+    fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
+        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0))
     }
 }
 pub fn inset_tile(tile:Tile,width:u32)->Tile{
