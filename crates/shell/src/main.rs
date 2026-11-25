@@ -13,6 +13,8 @@ mod workspace_backend;
 mod notification_toast;
 #[cfg(feature = "layer-panel")]
 mod dock;
+#[cfg(feature = "layer-panel")]
+mod task_backend;
 mod applications;
 
 fn main() -> glib::ExitCode {
