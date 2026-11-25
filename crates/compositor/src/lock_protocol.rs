@@ -41,6 +41,7 @@ struct AcceptedSurface{
     root:WlSurface,
     configure:Configure,
     committed:bool,
+    invalid:bool,
 }
 #[derive(Default)]
 pub(super) struct Protocol{
@@ -149,11 +150,28 @@ impl Atelier{
             Some((size.w,size.h))
         })
     }
+    // Validate the request at submission time as well as after application:
+    // a delayed surface transaction must not be legitimized by a later ack.
+    fn validate_lock_commit(&mut self,root:&WlSurface){
+        use ext_session_lock_surface_v1::Error;
+        let Some(s)=self.lock_protocol.surface.as_mut().filter(|s|s.root==*root)else{return;};
+        if s.invalid{return;}
+        let removed=with_states(root,|states|{
+            matches!(states.cached_state.get::<SurfaceAttributes>().pending().buffer,Some(BufferAssignment::Removed))
+        });
+        let error=if !s.configure.acked{Some(Error::CommitBeforeFirstAck)}
+            else if removed{Some(Error::NullBuffer)}else{None};
+        if let Some(error)=error{
+            s.invalid=true;s.role.post_error(error,"invalid lock surface commit submission");
+            self.scene_dirty=true;
+        }
+    }
     // Called after Smithay processes the root commit, before any render or
     // input dispatch. A failed commit removes the accepted role immediately.
     pub(super) fn lock_root_committed(&mut self,root:&WlSurface){
         use ext_session_lock_surface_v1::Error;
         let Some(s)=self.lock_protocol.surface.as_mut().filter(|s|s.root==*root)else{return;};
+        if s.invalid{let id=s.role.id();self.clear_role(&id);return;}
         let size=Self::buffer_size(root);
         let error=if !s.configure.acked{Some(Error::CommitBeforeFirstAck)}
             else if size.is_none(){Some(Error::NullBuffer)}
@@ -168,7 +186,7 @@ impl Atelier{
         let owner=self.lock_protocol.owner.as_ref()?;
         if self.desktop_visible()||!owner.is_alive()||!self.session_lock.owns_request(&owner.id()){return None;}
         let s=self.lock_protocol.surface.as_ref()?;
-        if !s.role.is_alive()||!s.root.is_alive()||!s.committed{return None;}
+        if !s.role.is_alive()||!s.root.is_alive()||!s.committed||s.invalid{return None;}
         let mode=self.output.current_mode()?;
         if s.configure.size!=(mode.size.w,mode.size.h)||!s.configure.matches(Self::buffer_size(&s.root)){return None;}
         Some(&s.root)
@@ -248,7 +266,8 @@ impl Dispatch<ExtSessionLockV1,()> for Atelier{
                 let serial:u32=SERIAL_COUNTER.next_serial().into();
                 let size=(mode.size.w,mode.size.h);
                 role.configure(serial,size.0 as u32,size.1 as u32);
-                state.lock_protocol.surface=Some(AcceptedSurface{role,root:surface,configure:Configure{serial,size,acked:false},committed:false});
+                compositor::add_pre_commit_hook::<Atelier,_>(&surface,|state,_,root|state.validate_lock_commit(root));
+                state.lock_protocol.surface=Some(AcceptedSurface{role,root:surface,configure:Configure{serial,size,acked:false},committed:false,invalid:false});
                 state.scene_dirty=true;
             }
             _=>{}
@@ -266,6 +285,7 @@ impl Dispatch<ExtSessionLockSurfaceV1,()> for Atelier{
             Request::Destroy=>state.clear_role(&role.id()),
             Request::AckConfigure{serial}=>{
                 let Some(s)=state.lock_protocol.surface.as_mut().filter(|s|s.role.id()==role.id())else{return;};
+                if s.invalid{return;}
                 if !s.configure.ack(serial){
                     role.post_error(Error::InvalidSerial,"unknown or repeated configure serial");
                     state.clear_role(&role.id());
