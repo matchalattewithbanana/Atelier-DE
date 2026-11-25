@@ -7,6 +7,32 @@ use std::{fs,io::{Read,Write},path::{Path,PathBuf}};
 #[serde(rename_all="kebab-case")]
 pub enum WallpaperFit { #[default] Cover, Contain, Stretch }
 
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum WidgetPosition { #[default] TopLeft, TopRight }
+
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct DesktopWidgets {
+    pub enabled:bool,
+    pub position:WidgetPosition,
+    pub width:u32,
+    pub clock:bool,
+    pub calendar:bool,
+    pub media:bool,
+    pub system:bool,
+}
+impl Default for DesktopWidgets {
+    fn default()->Self{Self{enabled:false,position:WidgetPosition::TopLeft,width:280,clock:true,calendar:true,media:false,system:false}}
+}
+impl DesktopWidgets {
+    pub fn validate(&self)->Result<()>{
+        if !(220..=360).contains(&self.width){bail!("widget group width must be 220–360");}
+        if self.enabled && !(self.clock||self.calendar||self.media||self.system){bail!("enable at least one widget or disable the group");}
+        Ok(())
+    }
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -29,10 +55,11 @@ pub struct Appearance {
     pub dock_pins:Vec<String>,
     pub wallpaper_path:String,
     pub wallpaper_fit:WallpaperFit,
+    pub widgets:DesktopWidgets,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default()}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -44,6 +71,7 @@ impl Appearance{
             if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
         }
         validate_dock_pins(&self.dock_pins)?;
+        self.widgets.validate()?;
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
     }
@@ -60,6 +88,7 @@ impl Appearance{
         }
         css.push_str(&format!(" .atelier-dock {{ background: @theme_bg_color; border-radius: {}px; padding: 6px; }} .atelier-dock button {{ border-radius: {}px; padding: 6px; }}",self.button_radius,self.button_radius));
         css.push_str(" .atelier-dock button.running-task { border-bottom: 2px solid currentColor; }");
+        css.push_str(&format!(" .atelier-widget {{ background: @theme_bg_color; border-radius: {}px; padding: 12px; }} .atelier-widget button {{ border-radius: {}px; }}",self.button_radius,self.button_radius));
         Ok(css)
     }
 }
@@ -144,6 +173,19 @@ mod tests{
         assert_eq!(Appearance::load(&path).unwrap(),next);
         let previous=a.previous().unwrap();a.save(previous).unwrap();
         assert_eq!(a.previous().unwrap(),next);
+    }
+    #[test]
+    fn widget_preferences_round_trip_and_reject_empty_groups(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let mut next=review.value.clone();next.wallpaper_path="/home/user/wall.png".into();
+        next.widgets=DesktopWidgets{enabled:true,position:WidgetPosition::TopRight,width:320,clock:false,calendar:true,media:true,system:true};
+        review.save(next.clone()).unwrap();
+        assert_eq!(Appearance::load(&path).unwrap(),next);
+        assert!(!review.previous().unwrap().widgets.enabled);
+        let invalid=DesktopWidgets{enabled:true,clock:false,calendar:false,media:false,system:false,..DesktopWidgets::default()};
+        assert!(invalid.validate().is_err());
+        assert!(DesktopWidgets{width:500,..DesktopWidgets::default()}.validate().is_err());
     }
     #[test]
     fn dock_pins_round_trip_and_validate(){
