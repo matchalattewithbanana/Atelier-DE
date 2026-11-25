@@ -1,7 +1,7 @@
 //! Native shell appearance, independent of the legacy settings.toml and rice formats.
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
-use std::{fs,io::{Read,Write},path::{Path,PathBuf}};
+use std::{fs,io::{Read,Write},os::unix::fs::OpenOptionsExt,path::{Path,PathBuf},time::{Duration,Instant}};
 
 #[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="kebab-case")]
@@ -124,13 +124,14 @@ pub fn validate_dock_pins(pins:&[String])->Result<()>{
 }
 pub fn appearance_path()->Result<PathBuf>{Ok(crate::config_path()?.with_file_name("appearance.toml"))}
 fn read(path:&Path)->Result<Option<Vec<u8>>>{
-    match fs::symlink_metadata(path){
-        Ok(m) if !m.is_file()||m.len()>65536=>bail!("appearance must be a regular file up to 64 KiB"),
-        Ok(_)=>{},
+    let file=match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path){
+        Ok(file)=>file,
         Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(None),
         Err(e)=>return Err(e.into()),
-    }
-    let mut bytes=Vec::new();fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+    };
+    let meta=file.metadata()?;
+    if !meta.is_file()||meta.len()>65536{bail!("appearance must be a regular file up to 64 KiB");}
+    let mut bytes=Vec::new();file.take(65537).read_to_end(&mut bytes)?;
     if bytes.len()>65536{bail!("appearance file exceeds size limit");}
     Ok(Some(bytes))
 }
@@ -145,6 +146,46 @@ fn replace(path:&Path,bytes:&[u8])->Result<()>{
     temp.write_all(bytes)?;temp.as_file().sync_all()?;temp.persist(path)?;
     fs::File::open(parent)?.sync_all()?;Ok(())
 }
+/// Rate-limited observer of the native appearance profile. A bad or missing
+/// replacement never instructs a running consumer to discard its last valid
+/// settings. Changed invalid bytes and persistent read errors are reported
+/// once; valid replacements resume observation automatically.
+pub struct AppearanceMonitor{
+    path:PathBuf,
+    last_check:Option<Instant>,
+    observed:Option<Option<Vec<u8>>>,
+    last_error:Option<String>,
+    had_file:bool,
+    current:Option<Appearance>,
+}
+impl AppearanceMonitor{
+    pub fn new(path:PathBuf)->Self{
+        Self{path,last_check:None,observed:None,last_error:None,had_file:false,current:None}
+    }
+    pub fn poll(&mut self)->Result<Option<Appearance>>{
+        if self.last_check.is_some_and(|t|t.elapsed()<Duration::from_millis(500)){return Ok(None);}
+        self.last_check=Some(Instant::now());
+        self.check()
+    }
+    fn check(&mut self)->Result<Option<Appearance>>{
+        let bytes=match read(&self.path){
+            Ok(bytes)=>{self.last_error=None;bytes}
+            Err(error)=>{
+                let message=error.to_string();
+                if self.last_error.as_ref()==Some(&message){return Ok(None);}
+                self.last_error=Some(message);return Err(error);
+            }
+        };
+        if self.observed.as_ref()==Some(&bytes){return Ok(None);}
+        self.observed=Some(bytes.clone());
+        if bytes.is_none()&&self.had_file{bail!("appearance disappeared; retaining last valid settings");}
+        let value=decode(bytes.as_deref())?;
+        self.had_file|=bytes.is_some();
+        if self.current.as_ref()==Some(&value){return Ok(None);}
+        self.current=Some(value.clone());
+        Ok(Some(value))
+    }
+}
 pub struct AppearanceReview{path:PathBuf,bytes:Option<Vec<u8>>,pub value:Appearance}
 impl AppearanceReview{
     pub fn load(path:&Path)->Result<Self>{let bytes=read(path)?;let value=decode(bytes.as_deref())?;Ok(Self{path:path.into(),bytes,value})}
@@ -158,7 +199,9 @@ impl AppearanceReview{
         fs::create_dir_all(parent)?;
         let lock_path=self.path.with_file_name("appearance.lock");
         if fs::symlink_metadata(&lock_path).is_ok_and(|m|!m.is_file()){bail!("unsafe appearance lock");}
-        let lock=fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)?;
+        let lock=fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+            .mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(lock_path)?;
+        if !lock.metadata()?.is_file(){bail!("unsafe appearance lock");}
         // Standard-library advisory file lock; released when the descriptor drops.
         lock.lock()?;
         if read(&self.path)?!=self.bytes{bail!("Appearance changed elsewhere; reload before saving");}
@@ -189,6 +232,30 @@ mod tests{
         assert_eq!(Appearance::load(&path).unwrap(),next);
         let previous=a.previous().unwrap();a.save(previous).unwrap();
         assert_eq!(a.previous().unwrap(),next);
+    }
+    #[test]
+    fn observer_keeps_last_valid_and_recovers(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut monitor=AppearanceMonitor::new(path.clone());
+        assert_eq!(monitor.check().unwrap(),Some(Appearance::default()));
+        assert_eq!(monitor.check().unwrap(),None);
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let next=Appearance{accent:"#123456".into(),window_spacing:WindowSpacing{inner_gap:8,outer_gap:12},..Appearance::default()};
+        review.save(next.clone()).unwrap();
+        assert_eq!(monitor.check().unwrap(),Some(next.clone()));
+        fs::write(&path,"accent='not a color'").unwrap();
+        assert!(monitor.check().is_err());assert_eq!(monitor.check().unwrap(),None);
+        assert_eq!(monitor.current.as_ref(),Some(&next));
+        fs::remove_file(&path).unwrap();assert!(monitor.check().is_err());
+        assert_eq!(monitor.check().unwrap(),None);
+        replace(&path,&encoded(&Appearance::default()).unwrap()).unwrap();
+        assert_eq!(monitor.check().unwrap(),Some(Appearance::default()));
+    }
+    #[test]
+    fn appearance_reader_refuses_symlink(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let target=dir.path().join("other.toml");fs::write(&target,"version=1").unwrap();
+        std::os::unix::fs::symlink(&target,&path).unwrap();assert!(Appearance::load(&path).is_err());
     }
     #[test]
     fn window_spacing_round_trip(){

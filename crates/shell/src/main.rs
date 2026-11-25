@@ -51,17 +51,43 @@ fn main() -> glib::ExitCode {
     }));
     let app = gtk::Application::builder().application_id("org.atelier.Shell").flags(gio::ApplicationFlags::NON_UNIQUE).build();
     app.connect_activate(move |app| {
-        let appearance = native_appearance();
-        if let Ok(css) = appearance.css() {
-            let provider = gtk::CssProvider::new(); provider.load_from_data(&css);
-            if let Some(display) = gtk::gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
-        }
+        let appearance=watch_appearance(app);
         #[cfg(feature = "layer-panel")]
-        if use_panel && gtk4_layer_shell::is_supported() { panel::build(app, requested_popups); return; }
-        let _ = use_panel;
+        if use_panel && gtk4_layer_shell::is_supported() { panel::build(app, requested_popups, appearance.clone()); return; }
+        let _ = (use_panel, appearance);
         build_shell(app);
     });
     app.run_with_args(&["atelier-shell"])
+}
+
+/// Install one stylesheet provider and update it in place after valid saves.
+/// Panel geometry consumes the same last-good profile; no duplicate watcher.
+fn watch_appearance(app:&gtk::Application)->std::rc::Rc<std::cell::RefCell<Appearance>>{
+    use std::{rc::Rc,cell::RefCell,time::Duration};
+    let value=Rc::new(RefCell::new(native_appearance()));
+    let provider=gtk::CssProvider::new();
+    if let Ok(css)=value.borrow().css(){provider.load_from_data(&css);}
+    if let Some(display)=gtk::gdk::Display::default(){
+        gtk::style_context_add_provider_for_display(&display,&provider,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    if let Ok(path)=appearance_path(){
+        let mut monitor=atelier_config::AppearanceMonitor::new(path);
+        let weak=app.downgrade();let current=value.clone();
+        glib::timeout_add_local(Duration::from_millis(500),move||{
+            if weak.upgrade().is_none(){return glib::ControlFlow::Break;}
+            match monitor.poll(){
+                Ok(Some(next))=>{
+                    if *current.borrow()!=next{
+                        if let Ok(css)=next.css(){provider.load_from_data(&css);*current.borrow_mut()=next;}
+                    }
+                }
+                Err(error)=>eprintln!("Retaining last valid native shell appearance: {error:#}"),
+                _=>{}
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+    value
 }
 
 fn native_appearance() -> Appearance {

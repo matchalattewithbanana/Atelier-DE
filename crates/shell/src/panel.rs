@@ -1,17 +1,17 @@
 //! Optional GTK layer-shell panel; the searchable launcher stays a normal window.
-use atelier_config::{component, config_path, Config};
+use atelier_config::{component, config_path, Appearance, Config};
 use crate::workspace_backend::{installed_helper, WorkspaceBackend};
 use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::{rc::Rc, process::Command, time::Duration};
+use std::{cell::RefCell,rc::Rc, process::Command, time::Duration};
 
-pub fn build(app: &gtk::Application, popups: bool) {
-    let appearance = crate::native_appearance();
+pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>) {
+    let appearance = live.borrow().clone();
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_application_prefer_dark_theme(config.theme.is_dark());
     }
-    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).default_height(appearance.panel_height as i32).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).build();
     window.init_layer_shell();
     window.set_namespace(Some("atelier-panel"));
     window.set_layer(Layer::Top);
@@ -80,17 +80,25 @@ pub fn build(app: &gtk::Application, popups: bool) {
     bar.append(&settings);
 
     if appearance.show_battery { update_power(&battery); } else { battery.set_visible(false); }
-    let show_battery = appearance.show_battery;
+    let live_power=live.clone();
     let battery_weak = battery.downgrade();
     glib::timeout_add_local(Duration::from_secs(5), move || {
         let Some(label) = battery_weak.upgrade() else { return glib::ControlFlow::Break; };
-        if show_battery { update_power(&label); }
+        if live_power.borrow().show_battery { update_power(&label); }else{label.set_visible(false);}
         glib::ControlFlow::Continue
     });
-    let show_date = appearance.show_date;
-    let tick = move || {
+    let mut last_panel=appearance.clone();
+    let bar_weak=bar.downgrade();
+    let mut tick = move || {
+        let current=live.borrow();
+        if *current!=last_panel{
+            if let Some(bar)=bar_weak.upgrade(){bar.set_spacing(current.panel_spacing as i32);bar.set_size_request(-1,current.panel_height as i32);}
+            media.set_visible(current.show_media);notifications.set_visible(current.show_notifications);audio.set_visible(current.show_audio);terminal.set_visible(current.show_terminal);
+            if current.show_battery!=last_panel.show_battery{if current.show_battery{update_power(&battery);}else{battery.set_visible(false);}}
+            last_panel=current.clone();
+        }
         if let Ok(now) = glib::DateTime::now_local() {
-            if let Ok(text) = now.format(if show_date { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
+            if let Ok(text) = now.format(if current.show_date { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
         }
         let snapshot = backend.snapshot();
         for (index, button) in workspaces.iter().enumerate() {

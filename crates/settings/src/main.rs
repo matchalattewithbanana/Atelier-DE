@@ -124,7 +124,7 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     wallpaper_page::build(&wallpaper);
     let widgets=page(&stack,"widgets","Desktop widgets","Choose a native desktop widget group. Save explicitly, then restart the shell.");
     widgets_page::build(&widgets);
-    let windows=page(&stack,"windows","Window appearance","Native grid spacing. Changes require a compositor session restart.");
+    let windows=page(&stack,"windows","Window appearance","Native grid spacing. Saved changes apply to a running updated compositor.");
     windows_page::build(&windows);
 
     let applications = page(&stack, "applications", "Applications", "Set the terminal that Atelier launches. This only changes Atelier's own preference.");
