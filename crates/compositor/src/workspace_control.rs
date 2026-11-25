@@ -35,7 +35,7 @@ impl WorkspaceControl {
     }
 
     pub fn poll(&mut self, atelier: &mut Atelier, time: u32) -> Result<()> {
-        if atelier.refresh_appearance(){
+        if atelier.desktop_input_ready()&&atelier.refresh_appearance(){
             let serial=SERIAL_COUNTER.next_serial();
             let focus=atelier.surface_under_pointer();let location=atelier.pointer_position;
             if let Some(pointer)=atelier.seat.get_pointer(){
@@ -45,6 +45,7 @@ impl WorkspaceControl {
         for _ in 0..32 {
             let mut data = [0u8; ACTIVATE_LEN+1];
             match self.socket.recv(&mut data) {
+                Ok(_) if !atelier.desktop_input_ready()=>{},
                 Ok(1) if (1..=4).contains(&data[0]) => {
                     let serial = SERIAL_COUNTER.next_serial();
                     atelier.select_workspace(usize::from(data[0] - 1), false, serial);

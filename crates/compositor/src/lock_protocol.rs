@@ -4,6 +4,9 @@
 use super::Atelier;
 use smithay::{
     backend::renderer::utils::RendererSurfaceStateUserData,
+    input::pointer::{CursorImageStatus,MotionEvent},
+    utils::SERIAL_COUNTER,
+    wayland::selection::data_device::{set_data_device_focus,clear_data_device_selection},
     reexports::{
         wayland_protocols::ext::session_lock::v1::server::{
             ext_session_lock_manager_v1::ExtSessionLockManagerV1,
@@ -50,11 +53,79 @@ impl Atelier{
             self.scene_dirty=true;
         }
     }
+    // Lock admission refuses existing grabs; at the other boundary only
+    // lock-era click grabs can remain (data-device start_drag is guarded).
+    // Clear both seat focuses before changing ownership or restoring desktop.
+    fn isolate_input(&mut self,time:u32){
+        self.input_gate.boundary();
+        let serial=SERIAL_COUNTER.next_serial();
+        if let Some(keyboard)=self.seat.get_keyboard(){
+            if keyboard.is_grabbed(){keyboard.unset_grab(self);}
+            keyboard.set_focus(self,None,serial);
+        }
+        if let Some(pointer)=self.seat.get_pointer(){
+            let location=self.pointer_position;
+            let event=MotionEvent{location,serial,time};
+            // Update pending focus first; Smithay unset_grab restores it.
+            pointer.motion(self,None,&event);
+            if pointer.is_grabbed(){pointer.unset_grab(self,serial,time);}
+            pointer.motion(self,None,&event);pointer.frame(self);
+        }
+        set_data_device_focus(&self.display,&self.seat,None);
+        self.cursor_status=CursorImageStatus::default_named();
+        self.scene_dirty=true;
+    }
+    pub(super) fn sync_lock_input(&mut self,time:u32){
+        if self.desktop_visible(){
+            if self.restore_input&&!self.input_gate.waiting(){
+                self.restore_input=false;
+                let serial=SERIAL_COUNTER.next_serial();
+                let window=self.focused.clone().filter(|w|self.space.element_location(w).is_some())
+                    .or_else(||self.space.elements().next_back().cloned());
+                self.focus(window,serial);
+                if let Some(pointer)=self.seat.get_pointer(){
+                    let focus=self.surface_under_pointer();let location=self.pointer_position;
+                    pointer.motion(self,focus,&MotionEvent{location,serial,time});pointer.frame(self);
+                }
+            }
+            return;
+        }
+        let target=self.lock_surface().cloned();
+        let keyboard=self.seat.get_keyboard();
+        let current=keyboard.as_ref().and_then(|k|k.current_focus());
+        // A newly mapped or vanished lock root creates another boundary.
+        // Do not leak held keys from a previously focused root into a new one.
+        if current.is_some()&&current!=target{
+            self.isolate_input(time);
+        }
+        if self.input_gate.waiting(){return;}
+        if let Some(keyboard)=keyboard{
+            if keyboard.current_focus()!=target{
+                // A key may have been pressed before any lock surface existed.
+                // Require it to be released before entering the new focus.
+                self.input_gate.boundary();
+                if self.input_gate.waiting(){return;}
+                keyboard.set_focus(self,target.clone(),SERIAL_COUNTER.next_serial());
+            }
+        }
+        // Refresh lock pointer focus on entry or on surface changes; ordinary
+        // motion uses the same lock-only hit-test. Respect lock click grabs.
+        if let Some(pointer)=self.seat.get_pointer(){
+            if !pointer.is_grabbed(){
+                let focus=self.input_pointer_focus();
+                if pointer.current_focus()!=focus.as_ref().map(|(surface,_)|surface.clone()){
+                    let location=self.pointer_position;
+                    pointer.motion(self,focus,&MotionEvent{location,serial:SERIAL_COUNTER.next_serial(),time});
+                    pointer.frame(self);
+                }
+            }
+        }
+    }
     fn clear_lock_surface_for_client(&mut self,client:&ClientId){
         let accepted=self.lock_protocol.surface.as_ref().and_then(|s|s.wl_surface().client());
         if accepted.as_ref().is_some_and(|c|&c.id()==client){
             self.lock_protocol.surface=None;
-            self.scene_dirty=true;
+            self.isolate_input(0);
         }
     }
     fn lock_owner_lost(&mut self,id:&ObjectId){
@@ -63,7 +134,7 @@ impl Atelier{
             self.lock_protocol.owner=None;
             self.lock_protocol.surface=None;
             self.lock_protocol.authorized_unlock=None;
-            self.scene_dirty=true;
+            self.isolate_input(0);
         }
     }
     /// Direct surface only, not a desktop window. The accepted root must
@@ -80,7 +151,7 @@ impl Atelier{
         let wl=surface.wl_surface();
         let mapped=with_states(wl,|states|{
             states.data_map.get::<RendererSurfaceStateUserData>()
-                .is_some_and(|state|state.lock().is_ok_and(|s|s.buffer().is_some()))
+                .is_some_and(|state|state.lock().is_ok_and(|s|s.buffer().is_some()&&s.surface_size()==Some((mode.size.w,mode.size.h).into())))
         });
         mapped.then_some(wl)
     }
@@ -91,7 +162,11 @@ impl SessionLockHandler for Atelier{
     }
     fn lock(&mut self,confirmation:SessionLocker){
         let id=confirmation.ext_session_lock().id();
+        if !self.desktop_input_ready()||self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return;}
         if !self.session_lock.begin(id.clone()){return;}
+        self.isolate_input(0);
+        // Do not offer the previous desktop selection to the lock client.
+        clear_data_device_selection(&self.display,&self.seat);
         self.lock_protocol.owner=Some(id);
         self.lock_protocol.surface_issued=false;
         self.lock_protocol.pending=Some(confirmation);
@@ -100,6 +175,9 @@ impl SessionLockHandler for Atelier{
     fn unlock(&mut self){
         // Only the guarded resource dispatch can arm this one-shot context.
         let Some(id)=self.lock_protocol.authorized_unlock.take()else{return;};
+        if !self.session_lock.can_unlock(&id){return;}
+        self.isolate_input(0);
+        self.restore_input=true;
         if self.session_lock.unlock(&id){
             self.lock_protocol.owner=None;
             self.lock_protocol.surface=None;

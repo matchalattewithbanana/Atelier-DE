@@ -638,6 +638,7 @@ pub fn run_native(
                     // Conservative scene invalidation: a client request may alter content,
                     // stacking, regions or frame callbacks. Idle sessions do not submit.
                     if server.dispatch_clients(&mut *state)? > 0 { queue.invalidate(); }
+                    state.sync_input_boundary(started.elapsed().as_millis() as u32);
                     state.popups.cleanup();
                     state.space.refresh();
                     if state.take_scene_dirty() { queue.invalidate(); }

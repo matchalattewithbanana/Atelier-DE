@@ -1,6 +1,6 @@
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, RendererSurfaceStateUserData},
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_layer_shell,
+    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_layer_shell,
     desktop::{layer_map_for_output, LayerSurface as DesktopLayer, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
     reexports::wayland_server::{
@@ -79,6 +79,8 @@ pub struct Atelier {
     focused: Option<Window>,
     scene_dirty: bool,
     session_lock: crate::session_lock::Lifecycle<smithay::reexports::wayland_server::backend::ObjectId>,
+    pub(crate) input_gate:crate::session_lock::InputGate<smithay::input::keyboard::Keycode>,
+    restore_input:bool,
     #[cfg(feature = "native-session")]
     lock_protocol:lock_protocol::Protocol,
 }
@@ -111,7 +113,7 @@ impl Atelier {
             cursor_shapes:None,
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cursor_status: CursorImageStatus::default_named(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
-            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true, session_lock:Default::default(),
+            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true, session_lock:Default::default(),input_gate:Default::default(),restore_input:false,
             #[cfg(feature = "native-session")]
             lock_protocol:Default::default(),
         })
@@ -140,6 +142,7 @@ impl Atelier {
 
     /// Ordinary desktop surfaces must never be used as a lock fallback.
     pub(crate) fn desktop_visible(&self)->bool{self.session_lock.desktop_visible()}
+    pub(crate) fn desktop_input_ready(&self)->bool{self.desktop_visible()&&!self.input_gate.waiting()&&!self.restore_input}
     #[cfg(feature = "native-session")]
     pub(crate) fn protected_frame(&self)->Option<crate::session_lock::ProtectedFrame>{
         self.session_lock.protected_frame()
@@ -147,6 +150,26 @@ impl Atelier {
     #[cfg(feature = "native-session")]
     pub(crate) fn protected_frame_presented(&mut self,frame:crate::session_lock::ProtectedFrame){
         self.confirm_lock_frame(frame);
+    }
+
+    // Ordinary desktop focus is restored only after every held control has
+    // been released without a focus target. This also blocks workspace IPC.
+    pub(crate) fn sync_input_boundary(&mut self,time:u32){
+        #[cfg(feature = "native-session")]
+        self.sync_lock_input(time);
+        #[cfg(not(feature = "native-session"))]
+        let _=time;
+    }
+    pub(crate) fn input_pointer_focus(&self)->Option<(WlSurface,Point<f64,Logical>)>{
+        if self.input_gate.waiting()||self.restore_input{return None;}
+        #[cfg(feature = "native-session")]
+        if !self.desktop_visible(){
+            let root=self.lock_surface()?;
+            return smithay::desktop::utils::under_from_surface_tree(root,self.pointer_position,
+                (0,0),WindowSurfaceType::TOPLEVEL|WindowSurfaceType::SUBSURFACE)
+                .map(|(surface,origin)|(surface,origin.to_f64()));
+        }
+        self.surface_under_pointer()
     }
 
     pub fn take_scene_dirty(&mut self) -> bool {
@@ -282,7 +305,7 @@ impl Atelier {
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
-        if !self.desktop_visible(){return;}
+        if !self.desktop_input_ready(){return;}
         self.scene_dirty = true;
         self.focused_layer = None;
         self.focused = window.clone();
@@ -324,7 +347,7 @@ impl Atelier {
     pub fn active_workspace(&self) -> usize { self.active_workspace }
 
     pub fn select_workspace(&mut self, target: usize, move_focused: bool, serial: Serial) {
-        if !self.desktop_visible(){return;}
+        if !self.desktop_input_ready(){return;}
         if target >= self.parked.len() || target == self.active_workspace { return; }
         if self.seat.get_pointer().is_some_and(|p| p.is_grabbed()) || self.seat.get_keyboard().is_some_and(|k| k.is_grabbed()) { return; }
         if move_focused {
@@ -386,7 +409,7 @@ impl Atelier {
     }
 
     pub fn activate_task(&mut self,id:u64,serial:Serial)->bool{
-        if !self.desktop_visible(){return false;}
+        if !self.desktop_input_ready(){return false;}
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         // Do not steal keyboard focus from an interactive layer surface.
         if self.focused_layer.is_some(){return false;}
@@ -442,7 +465,7 @@ impl Atelier {
         None
     }
     pub fn surface_under_pointer(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        if !self.desktop_visible(){return None;}
+        if !self.desktop_input_ready(){return None;}
         if let Some((_, surface, origin)) = self.layer_hit(&[Layer::Overlay, Layer::Top]) {
             return Some((surface, origin));
         }
@@ -451,7 +474,7 @@ impl Atelier {
     }
 
     pub fn focus_pointer(&mut self, serial: Serial) {
-        if !self.desktop_visible(){return;}
+        if !self.desktop_input_ready(){return;}
         let layer = self.layer_hit(&[Layer::Overlay, Layer::Top]).map(|(layer, _, _)| layer);
         let window = self.window_hit().map(|(window,_,_)|window);
         let layer = layer.or_else(|| if window.is_none() { self.layer_hit(&[Layer::Bottom, Layer::Background]).map(|(layer, _, _)| layer) } else { None });
@@ -576,12 +599,13 @@ impl SeatHandler for Atelier {
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seats }
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         use smithay::{reexports::wayland_server::Resource, wayland::selection::data_device::set_data_device_focus};
-        let client = focused.and_then(|surface| surface.client());
+        let client = if self.desktop_input_ready(){focused.and_then(|surface| surface.client())}else{None};
         set_data_device_focus(&self.display, seat, client);
     }
     fn cursor_image(&mut self, _: &Seat<Self>, status: CursorImageStatus) {
         // Smithay validates client focus, serial and surface role before this callback.
         // Even an unchanged surface may have a new hotspot.
+        if !self.desktop_input_ready(){return;}
         self.cursor_status=status;
         self.scene_dirty=true;
     }
@@ -669,5 +693,22 @@ delegate_seat!(Atelier);
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Atelier {}
 #[cfg(feature = "native-session")]
 smithay::delegate_cursor_shape!(Atelier);
-delegate_data_device!(Atelier);
+// Keep the ordinary data-device delegates, but guard state-changing
+// clipboard and drag requests at dispatch rather than after Smithay applies them.
+use smithay::reexports::wayland_server::{Dispatch,DataInit,protocol::{
+    wl_data_device::{self,WlDataDevice},wl_data_device_manager::WlDataDeviceManager,wl_data_source::WlDataSource}};
+use smithay::wayland::selection::data_device::{DataDeviceUserData,DataSourceUserData};
+smithay::reexports::wayland_server::delegate_global_dispatch!(Atelier: [WlDataDeviceManager: ()] => DataDeviceState);
+smithay::reexports::wayland_server::delegate_dispatch!(Atelier: [WlDataDeviceManager: ()] => DataDeviceState);
+smithay::reexports::wayland_server::delegate_dispatch!(Atelier: [WlDataSource: DataSourceUserData] => DataDeviceState);
+impl Dispatch<WlDataDevice,DataDeviceUserData> for Atelier{
+    fn request(state:&mut Self,client:&Client,resource:&WlDataDevice,request:wl_data_device::Request,
+        data:&DataDeviceUserData,dh:&DisplayHandle,init:&mut DataInit<'_,Self>){
+        if !state.desktop_input_ready()&&matches!(&request,wl_data_device::Request::StartDrag{..}|wl_data_device::Request::SetSelection{..}){return;}
+        <DataDeviceState as Dispatch<WlDataDevice,DataDeviceUserData,Self>>::request(state,client,resource,request,data,dh,init);
+    }
+    fn destroyed(state:&mut Self,client:ClientId,resource:&WlDataDevice,data:&DataDeviceUserData){
+        <DataDeviceState as Dispatch<WlDataDevice,DataDeviceUserData,Self>>::destroyed(state,client,resource,data);
+    }
+}
 delegate_output!(Atelier);

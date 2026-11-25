@@ -190,7 +190,10 @@ impl NativeCursor {
         theme.next_frame=None;
         let position:Point<i32,Physical>=((state.pointer_position.x as i32).clamp(0,output.w-1),
             (state.pointer_position.y as i32).clamp(0,output.h-1)).into();
-        let image=if !state.desktop_visible(){Image::Hidden}else{match state.cursor_status(){
+        let image=if !state.desktop_visible(){
+            // A compositor-owned glyph only; never reuse a desktop/client cursor.
+            if state.lock_surface().is_some(){Image::Default}else{Image::Hidden}
+        }else{match state.cursor_status(){
             CursorImageStatus::Hidden=>Image::Hidden,
             CursorImageStatus::Surface(surface) if surface.is_alive()=>{
                 let hotspot=with_states(surface,|states|{

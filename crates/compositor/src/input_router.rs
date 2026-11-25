@@ -13,15 +13,24 @@ fn clamp_position(x: f64, y: f64, width: i32, height: i32) -> (f64, f64) {
 }
 
 pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, intercepted: &mut HashSet<smithay::input::keyboard::Keycode>) {
-    // No ordinary seat dispatch in a protected state. A future lock-surface
-    // router must own input, including grabs and pressed-key bookkeeping.
-    if !state.desktop_visible(){return;}
+    state.sync_input_boundary(0);
+    let desktop=state.desktop_input_ready();
+    let blocked=state.input_gate.waiting()||(!desktop&&state.desktop_visible());
     let serial = SERIAL_COUNTER.next_serial();
     match input {
         InputEvent::Keyboard { event } => {
+            let code=event.key_code();let pressed=event.state()==KeyState::Pressed;
             if let Some(keyboard) = state.seat.get_keyboard() {
-                let code = event.key_code();
-                let pressed = event.state() == KeyState::Pressed;
+                if !desktop{
+                    // No shortcuts in the lock domain. When quarantined the
+                    // seat has no focus; update its physical/XKB state anyway.
+                    intercepted.clear();
+                    if blocked{keyboard.set_focus(state,None,serial);}
+                    keyboard.input(state,code,event.state(),serial,event.time_msec(),|_,_,_|FilterResult::<()>::Forward);
+                    state.input_gate.key(code,pressed);
+                    state.sync_input_boundary(event.time_msec());
+                    return;
+                }
                 let grabbed = keyboard.is_grabbed();
                 let action = keyboard.input(state, code, event.state(), serial, event.time_msec(), |_, modifiers, key| {
                     if !pressed && intercepted.remove(&code) { return FilterResult::Intercept(None); }
@@ -36,13 +45,14 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
                 if let Some(Some((target, move_focused))) = action {
                     state.select_workspace(target, move_focused, serial);
                     if let Some(pointer) = state.seat.get_pointer() {
-                        let focus = state.surface_under_pointer();
+                        let focus = state.input_pointer_focus();
                         let location = state.pointer_position;
                         pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
                         pointer.frame(state);
                     }
                 }
             }
+            state.input_gate.key(code,pressed);
         }
         InputEvent::PointerMotion { event } => {
             if let Some(region) = state.space.output_geometry(&state.output) {
@@ -52,7 +62,7 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
                     region.size.w, region.size.h,
                 );
                 state.pointer_position = (x, y).into();
-                let focus = state.surface_under_pointer();
+                let focus = state.input_pointer_focus();
                 let location = state.pointer_position;
                 if let Some(pointer) = state.seat.get_pointer() {
                     pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
@@ -62,8 +72,9 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
         }
         InputEvent::PointerMotionAbsolute { event } => {
             if let Some(region) = state.space.output_geometry(&state.output) {
-                state.pointer_position = event.position_transformed(region.size);
-                let focus = state.surface_under_pointer();
+                let p=event.position_transformed(region.size);
+                state.pointer_position=clamp_position(p.x,p.y,region.size.w,region.size.h).into();
+                let focus = state.input_pointer_focus();
                 let location = state.pointer_position;
                 if let Some(pointer) = state.seat.get_pointer() {
                     pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
@@ -72,15 +83,25 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
             }
         }
         InputEvent::PointerButton { event } => {
+            let button=event.button_code();let pressed=event.state()==ButtonState::Pressed;
             if let Some(pointer) = state.seat.get_pointer() {
-                if event.state() == ButtonState::Pressed && !pointer.is_grabbed() {
-                    state.focus_pointer(serial);
+                if desktop&&pressed&&!pointer.is_grabbed(){state.focus_pointer(serial);}
+                if blocked{
+                    let location=state.pointer_position;
+                    let motion=MotionEvent{location,serial,time:event.time_msec()};
+                    pointer.motion(state,None,&motion);
+                    if pointer.is_grabbed(){pointer.unset_grab(state,serial,event.time_msec());}
+                    pointer.motion(state,None,&motion);
                 }
-                pointer.button(state, &ButtonEvent { button: event.button_code(), state: event.state(), serial, time: event.time_msec() });
+                pointer.button(state,&ButtonEvent{button,state:event.state(),serial,time:event.time_msec()});
+                if blocked&&pointer.is_grabbed(){pointer.unset_grab(state,serial,event.time_msec());}
                 pointer.frame(state);
             }
+            state.input_gate.button(button,pressed);
+            state.sync_input_boundary(event.time_msec());
         }
         InputEvent::PointerAxis { event } => {
+            if blocked{return;}
             if let Some(pointer) = state.seat.get_pointer() {
                 let source = event.source();
                 let mut frame = AxisFrame::new(event.time_msec()).source(source);

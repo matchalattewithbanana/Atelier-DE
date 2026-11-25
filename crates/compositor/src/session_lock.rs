@@ -65,6 +65,33 @@ impl<Owner:Eq> Lifecycle<Owner>{
     }
 }
 
+/// Physical keys/buttons are tracked independently from client focus.
+/// A boundary quarantines all input until every held control is released.
+/// The release which clears the barrier still belongs to the old boundary.
+pub(crate) struct InputGate<K>{
+    keys:std::collections::HashSet<K>,
+    buttons:std::collections::HashSet<u32>,
+    waiting:bool,
+}
+impl<K> Default for InputGate<K>{
+    fn default()->Self{Self{keys:Default::default(),buttons:Default::default(),waiting:false}}
+}
+impl<K:Eq+std::hash::Hash> InputGate<K>{
+    pub(crate) fn waiting(&self)->bool{self.waiting}
+    pub(crate) fn boundary(&mut self){self.waiting=!self.keys.is_empty()||!self.buttons.is_empty();}
+    pub(crate) fn key(&mut self,key:K,pressed:bool){
+        if pressed{self.keys.insert(key);}else{self.keys.remove(&key);}
+        self.recheck();
+    }
+    pub(crate) fn button(&mut self,button:u32,pressed:bool){
+        if pressed{self.buttons.insert(button);}else{self.buttons.remove(&button);}
+        self.recheck();
+    }
+    fn recheck(&mut self){
+        if self.keys.is_empty()&&self.buttons.is_empty(){self.waiting=false;}
+    }
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -105,6 +132,16 @@ mod tests{
             assert!(!state.unlock(&1));assert!(!state.presented(frame));
             assert!(state.protected_frame().is_none());
         }
+    }
+    #[test]
+    fn input_boundary_waits_for_every_control_including_new_presses(){
+        let mut gate=InputGate::default();
+        gate.key(1,true);gate.button(272,true);
+        gate.boundary();assert!(gate.waiting());
+        gate.key(1,false);assert!(gate.waiting());
+        gate.key(2,true);gate.button(272,false);assert!(gate.waiting());
+        gate.key(2,false);assert!(!gate.waiting());
+        gate.boundary();assert!(!gate.waiting());
     }
     #[test]
     fn generation_exhaustion_cannot_wrap(){
