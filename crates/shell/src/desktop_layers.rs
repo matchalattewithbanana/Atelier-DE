@@ -34,7 +34,7 @@ impl DesktopLayers{
             self.dock_preferences=Some(dock);
         }
         if native{
-            self.wallpaper.update(app,&prefs.wallpaper_path,prefs.wallpaper_fit);
+            self.wallpaper.update(app,prefs);
             if self.widget_preferences.as_ref()!=Some(&prefs.widgets){
                 if let Some(window)=self.widgets.take(){window.destroy();}
                 self.widgets=crate::desktop_widgets::build(app,&prefs.widgets);
