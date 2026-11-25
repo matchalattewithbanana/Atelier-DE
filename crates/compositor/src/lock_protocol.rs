@@ -151,7 +151,7 @@ impl Atelier{
         let wl=surface.wl_surface();
         let mapped=with_states(wl,|states|{
             states.data_map.get::<RendererSurfaceStateUserData>()
-                .is_some_and(|state|state.lock().is_ok_and(|s|s.buffer().is_some()&&s.surface_size()==Some(mode.size)))
+                .is_some_and(|state|state.lock().is_ok_and(|s|s.buffer().is_some()&&s.surface_size()==Some((mode.size.w,mode.size.h).into())))
         });
         mapped.then_some(wl)
     }
