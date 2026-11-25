@@ -21,6 +21,7 @@ use smithay::{
     },
 };
 use std::os::fd::OwnedFd;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 
 pub struct Atelier {
     display: DisplayHandle,
@@ -42,6 +43,7 @@ pub struct Atelier {
     layout: atelier_config::Layout,
     windows: Vec<Window>,
     task_ids: Vec<(Window,u64)>,
+    fullscreen: Vec<(ToplevelSurface,Option<Point<i32,Logical>>)>,
     next_task_id: u64,
     active_workspace: usize,
     parked: [Vec<(Window, Point<i32, Logical>)>; 4],
@@ -72,7 +74,7 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1,
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, fullscreen:Vec::new(),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
     }
@@ -97,20 +99,58 @@ impl Atelier {
         }
     }
 
+    fn is_fullscreen(&self,window:&Window)->bool{
+        window.toplevel().is_some_and(|surface|self.fullscreen.iter().any(|(s,_)|s==surface))
+    }
+
     fn reflow(&mut self) {
-        if self.layout != atelier_config::Layout::Grid { return; }
-        let Some(_) = self.output.current_mode() else { return; };
-        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
-        let Some(tiles) = crate::layout::grid(zone.size.w, zone.size.h, self.windows.len()) else { return; };
-        let top = self.space.elements().next_back().cloned();
-        for (window, tile) in self.windows.iter().zip(tiles) {
-            self.space.map_element(window.clone(), (zone.loc.x + tile.x, zone.loc.y + tile.y), false);
-            if let Some(surface) = window.toplevel() {
-                surface.with_pending_state(|state| state.size = Some((tile.width, tile.height).into()));
+        let Some(mode)=self.output.current_mode() else{return;};
+        let top=self.space.elements().next_back().cloned();
+        if self.layout==atelier_config::Layout::Grid{
+            let zone=layer_map_for_output(&self.output).non_exclusive_zone();
+            let normal:Vec<_>=self.windows.iter().filter(|w|!self.is_fullscreen(w)).cloned().collect();
+            if let Some(tiles)=crate::layout::grid(zone.size.w,zone.size.h,normal.len()){
+                for (window,tile) in normal.iter().zip(tiles){
+                    self.space.map_element(window.clone(),(zone.loc.x+tile.x,zone.loc.y+tile.y),false);
+                    if let Some(surface)=window.toplevel(){
+                        surface.with_pending_state(|state|state.size=Some((tile.width,tile.height).into()));
+                        surface.send_pending_configure();
+                    }
+                }
+            }
+        }
+        let full:Vec<_>=self.windows.iter().filter(|w|self.is_fullscreen(w)).cloned().collect();
+        for window in full{
+            self.space.map_element(window.clone(),(0,0),false);
+            if let Some(surface)=window.toplevel(){
+                surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some(mode.size);});
                 surface.send_pending_configure();
             }
         }
-        if let Some(top) = top { self.space.raise_element(&top, false); }
+        if let Some(top)=top{self.space.raise_element(&top,false);}
+    }
+
+    fn set_fullscreen(&mut self,surface:ToplevelSurface,enabled:bool){
+        let window=self.window_for_surface(surface.wl_surface());
+        if enabled{
+            let Some(mode)=self.output.current_mode()else{surface.send_configure();return;};
+            if !self.fullscreen.iter().any(|(s,_)|s==&surface){
+                let location=window.as_ref().and_then(|w|self.space.element_location(w).or_else(||
+                    self.parked.iter().flatten().find(|(candidate,_)|candidate==w).map(|(_,p)|*p)));
+                self.fullscreen.push((surface.clone(),location));
+            }
+            surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some(mode.size);});
+        }else{
+            let saved=self.fullscreen.iter().position(|(s,_)|s==&surface).and_then(|i|self.fullscreen.remove(i).1);
+            surface.with_pending_state(|state|{state.states.unset(XdgState::Fullscreen);state.size=None;});
+            if let (Some(window),Some(location))=(&window,saved){
+                if self.windows.contains(window){self.space.map_element(window.clone(),location,false);}
+                else{for (candidate,position) in self.parked.iter_mut().flatten(){if candidate==window{*position=location;}}}
+            }
+        }
+        // Initial configure must still follow the client's first empty commit.
+        if surface.is_initial_configure_sent(){surface.send_pending_configure();}
+        self.scene_dirty=true;self.reflow();
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
@@ -137,7 +177,9 @@ impl Atelier {
             let Some(window) = self.focused.clone() else { return; };
             let position = self.space.element_location(&window).unwrap_or((24, 24).into());
             let id=self.task_ids.iter().find(|(w,_)|w==&window).map(|(_,id)|*id);
+            let full=window.toplevel().and_then(|surface|self.fullscreen.iter().find(|(s,_)|s==surface).cloned());
             self.unmap(&window);
+            if let Some(full)=full{self.fullscreen.push(full);}
             if let Some(id)=id{self.task_ids.push((window.clone(),id));}
             window.set_activated(false);
             if let Some(surface) = window.toplevel() { surface.send_pending_configure(); }
@@ -183,7 +225,8 @@ impl Atelier {
                 workspace:(workspace+1) as u8,focused:self.focused.as_ref()==Some(window)});
         }
         windows.sort_by_key(|w|w.id);
-        TaskSnapshot{version:1,session,truncated,windows}
+        let fullscreen_active=self.focused.as_ref().is_some_and(|w|self.is_fullscreen(w));
+        TaskSnapshot{version:2,session,truncated,windows,fullscreen_active:Some(fullscreen_active)}
     }
 
     pub fn activate_task(&mut self,id:u64,serial:Serial)->bool{
@@ -265,6 +308,7 @@ impl Atelier {
     fn map_toplevel(&mut self, surface: ToplevelSurface) {
         let offset = 24 + (self.cascade % 8) as i32 * 24;
         self.cascade = self.cascade.wrapping_add(1);
+        if let Some((_,position))=self.fullscreen.iter_mut().find(|(s,_)|s==&surface){if position.is_none(){*position=Some((offset,offset).into());}}
         let window = Window::new_wayland_window(surface);
         window.on_commit();
         self.space.map_element(window.clone(), (offset, offset), true);
@@ -277,6 +321,7 @@ impl Atelier {
     fn unmap(&mut self, window: &Window) {
         self.scene_dirty = true;
         self.task_ids.retain(|(candidate,_)|candidate!=window);
+        if let Some(surface)=window.toplevel(){self.fullscreen.retain(|(s,_)|s!=surface);}
         for hidden in &mut self.parked { hidden.retain(|(candidate, _)| candidate != window); }
         let had_focus = self.focused.as_ref() == Some(window);
         self.space.unmap_elem(window);
@@ -376,7 +421,10 @@ impl XdgShellHandler for Atelier {
         surface.with_pending_state(|state| { state.geometry = positioner.get_geometry(); });
         surface.send_repositioned(token);
     }
+    fn fullscreen_request(&mut self,surface:ToplevelSurface,_:Option<WlOutput>){self.set_fullscreen(surface,true);}
+    fn unfullscreen_request(&mut self,surface:ToplevelSurface){self.set_fullscreen(surface,false);}
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.fullscreen.retain(|(s,_)|s!=&surface);
         self.pending.retain(|candidate| candidate != &surface);
         let removed = self.window_for_surface(surface.wl_surface());
         if let Some(window) = removed { self.unmap(&window); }

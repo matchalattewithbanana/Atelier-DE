@@ -19,12 +19,14 @@ pub struct Appearance {
     pub show_audio:bool,
     pub show_terminal:bool,
     pub dock_enabled:bool,
+    pub dock_auto_hide:bool,
+    pub dock_hide_fullscreen:bool,
     pub dock_icon_size:u32,
     pub dock_pins:Vec<String>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_icon_size:32,dock_pins:Vec::new()}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new()}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
