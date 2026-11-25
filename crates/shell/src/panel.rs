@@ -12,6 +12,7 @@ pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>)
         settings.set_gtk_application_prefer_dark_theme(config.theme.is_dark());
     }
     let window = gtk::ApplicationWindow::builder().application(app).title("Atelier panel").decorated(false).build();
+    window.add_css_class("atelier-panel-layer");
     window.init_layer_shell();
     window.set_namespace(Some("atelier-panel"));
     window.set_layer(Layer::Top);

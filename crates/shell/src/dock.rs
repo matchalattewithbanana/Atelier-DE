@@ -23,6 +23,7 @@ impl Drop for Dock{
 }
 pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier dock").decorated(false).resizable(false).build();
+    window.add_css_class("atelier-dock-layer");
     window.init_layer_shell();window.set_namespace(Some("atelier-dock"));window.set_layer(Layer::Top);
     window.set_anchor(Edge::Bottom,true);window.set_keyboard_mode(KeyboardMode::None);
     // Auto-hide overlays the workspace, persistent mode reserves space.

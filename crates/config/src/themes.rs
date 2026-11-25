@@ -1,5 +1,5 @@
 //! Portable visual settings only: never import machine-local paths, pins or commands.
-use crate::{Appearance,WindowBorder,WindowSpacing,WindowShadow};
+use crate::{Appearance,WindowBorder,WindowSpacing,WindowShadow,Transparency};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use std::{fs,io::Write,path::Path};
@@ -62,19 +62,21 @@ pub struct PortableTheme{
     pub window_border:WindowBorder,
     #[serde(default,skip_serializing_if="WindowShadow::is_default")]
     pub window_shadow:WindowShadow,
+    #[serde(default,skip_serializing_if="Transparency::is_default")]
+    pub transparency:Transparency,
 }
 impl PortableTheme{
     pub fn capture(name:String,a:&Appearance)->Self{
         Self{format:"atelier-native-theme".into(),version:1,name,accent:a.accent.clone(),shell_palette:a.shell_palette.clone(),
             button_radius:a.button_radius,panel_height:a.panel_height,panel_spacing:a.panel_spacing,launcher_icon_size:a.launcher_icon_size,dock_icon_size:a.dock_icon_size,
-            window_spacing:a.window_spacing,window_border:a.window_border.clone(),window_shadow:a.window_shadow}
+            window_spacing:a.window_spacing,window_border:a.window_border.clone(),window_shadow:a.window_shadow,transparency:a.transparency}
     }
     pub fn applied(&self,base:&Appearance)->Result<Appearance>{
         if self.format!="atelier-native-theme"||self.version!=1||self.name.trim().is_empty()||self.name.len()>80||self.name.chars().any(char::is_control){bail!("unsupported theme format, version or name");}
         let mut a=base.clone();
         a.accent=self.accent.clone();a.shell_palette=self.shell_palette.clone();a.button_radius=self.button_radius;
         a.panel_height=self.panel_height;a.panel_spacing=self.panel_spacing;a.launcher_icon_size=self.launcher_icon_size;a.dock_icon_size=self.dock_icon_size;
-        a.window_spacing=self.window_spacing;a.window_border=self.window_border.clone();a.window_shadow=self.window_shadow;a.validate()?;Ok(a)
+        a.window_spacing=self.window_spacing;a.window_border=self.window_border.clone();a.window_shadow=self.window_shadow;a.transparency=self.transparency;a.validate()?;Ok(a)
     }
     pub fn parse(text:&str)->Result<Self>{
         if text.len()>65536{bail!("theme exceeds 64 KiB");}
@@ -125,12 +127,12 @@ mod tests{
     #[test]
     fn portable_roundtrip_preserves_local_preferences(){
         let mut base=Appearance::default();base.wallpaper_path="/tmp/image.png".into();base.dock_pins=vec!["foot.desktop".into()];base.widgets.enabled=true;
-        base.window_shadow=WindowShadow{radius:20,opacity:45};
+        base.window_shadow=WindowShadow{radius:20,opacity:45};base.transparency.unfocused=85;base.wallpaper_blur=8;
         let theme=from_seed([100,150,200],false,&base).unwrap();
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("theme.json");
         theme.export(&path).unwrap();assert!(theme.export(&path).is_err());
         let loaded=PortableTheme::import(&path).unwrap();assert_eq!(loaded,theme);
-        let applied=loaded.applied(&base).unwrap();assert_eq!(applied.wallpaper_path,base.wallpaper_path);assert_eq!(applied.dock_pins,base.dock_pins);assert_eq!(applied.widgets,base.widgets);assert_eq!(applied.window_shadow,base.window_shadow);
+        let applied=loaded.applied(&base).unwrap();assert_eq!(applied.wallpaper_path,base.wallpaper_path);assert_eq!(applied.dock_pins,base.dock_pins);assert_eq!(applied.widgets,base.widgets);assert_eq!(applied.window_shadow,base.window_shadow);assert_eq!(applied.transparency,base.transparency);assert_eq!(applied.wallpaper_blur,base.wallpaper_blur);
         let mut json=serde_json::to_value(&theme).unwrap();json["wallpaper_path"]=serde_json::json!("/tmp/other.png");assert!(PortableTheme::parse(&json.to_string()).is_err());
         let mut bad=theme;bad.shell_palette.as_mut().unwrap().text=bad.shell_palette.as_ref().unwrap().surface.clone();assert!(bad.json().is_err());
     }
