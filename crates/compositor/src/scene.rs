@@ -69,7 +69,7 @@ impl SceneShaders{
                 UniformName::new("outline",UniformType::_4f),
                 UniformName::new("radius",UniformType::_1f),
             ]){
-                Ok(program)=>Some(program),
+                Ok(program)=>{println!("Atelier smooth shadow shader ready");Some(program)},
                 Err(error)=>{tracing::warn!(?error,"smooth shadow shader unavailable; using banded shadows");None}
             }
         }).as_ref()
