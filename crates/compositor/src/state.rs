@@ -15,7 +15,7 @@ use smithay::{
         compositor::{get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
         selection::{data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler}, SelectionHandler},
-        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData},
         shm::{ShmHandler, ShmState},
         shell::wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
     },
@@ -41,6 +41,8 @@ pub struct Atelier {
     pending: Vec<ToplevelSurface>,
     layout: atelier_config::Layout,
     windows: Vec<Window>,
+    task_ids: Vec<(Window,u64)>,
+    next_task_id: u64,
     active_workspace: usize,
     parked: [Vec<(Window, Point<i32, Logical>)>; 4],
     focused: Option<Window>,
@@ -70,7 +72,7 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(),
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1,
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
     }
@@ -134,7 +136,9 @@ impl Atelier {
         if move_focused {
             let Some(window) = self.focused.clone() else { return; };
             let position = self.space.element_location(&window).unwrap_or((24, 24).into());
+            let id=self.task_ids.iter().find(|(w,_)|w==&window).map(|(_,id)|*id);
             self.unmap(&window);
+            if let Some(id)=id{self.task_ids.push((window.clone(),id));}
             window.set_activated(false);
             if let Some(surface) = window.toplevel() { surface.send_pending_configure(); }
             self.parked[target].push((window, position));
@@ -156,6 +160,44 @@ impl Atelier {
         let next = self.space.elements().next_back().cloned();
         self.focus(next, serial);
         tracing::info!(workspace = target + 1, "workspace activated");
+    }
+
+    pub fn task_inventory(&self,session:[u8;16])->atelier_config::tasks::TaskSnapshot{
+        use atelier_config::tasks::{TaskSnapshot,TaskWindow,MAX_WINDOWS};
+        let mut windows=Vec::new();
+        let mut truncated=false;
+        let all=self.windows.iter().map(|w|(self.active_workspace,w)).chain(
+            self.parked.iter().enumerate().flat_map(|(index,items)|items.iter().map(move |(w,_)|(index,w))));
+        for (workspace,window) in all{
+            let Some((_,id))=self.task_ids.iter().find(|(w,_)|w==window)else{continue;};
+            if windows.len()>=MAX_WINDOWS{truncated=true;break;}
+            let Some(surface)=window.toplevel()else{continue;};
+            let (app_id,title)=with_states(surface.wl_surface(),|states|{
+                states.data_map.get::<XdgToplevelSurfaceData>().and_then(|data|{
+                    let data=data.lock().ok()?;
+                    Some((data.app_id.clone().unwrap_or_default(),data.title.clone().unwrap_or_default()))
+                }).unwrap_or_default()
+            });
+            let clean=|text:String,limit:usize|text.chars().filter(|c|!c.is_control()).take(limit).collect::<String>();
+            windows.push(TaskWindow{id:*id,app_id:clean(app_id,128),title:clean(title,256),
+                workspace:(workspace+1) as u8,focused:self.focused.as_ref()==Some(window)});
+        }
+        windows.sort_by_key(|w|w.id);
+        TaskSnapshot{version:1,session,truncated,windows}
+    }
+
+    pub fn activate_task(&mut self,id:u64,serial:Serial)->bool{
+        if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
+        // Do not steal keyboard focus from an interactive layer surface.
+        if self.focused_layer.is_some(){return false;}
+        let Some(window)=self.task_ids.iter().find(|(_,key)|*key==id).map(|(w,_)|w.clone())else{return false;};
+        if !self.windows.contains(&window){
+            let Some(target)=self.parked.iter().position(|items|items.iter().any(|(w,_)|w==&window))else{return false;};
+            self.select_workspace(target,false,serial);
+        }
+        if !self.windows.contains(&window){return false;}
+        self.focus(Some(window),serial);
+        true
     }
 
     fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
@@ -227,12 +269,14 @@ impl Atelier {
         window.on_commit();
         self.space.map_element(window.clone(), (offset, offset), true);
         self.windows.push(window.clone());
+        if let Some(next)=self.next_task_id.checked_add(1){self.task_ids.push((window.clone(),self.next_task_id));self.next_task_id=next;}
         self.reflow();
         self.focus(Some(window), SERIAL_COUNTER.next_serial());
     }
 
     fn unmap(&mut self, window: &Window) {
         self.scene_dirty = true;
+        self.task_ids.retain(|(candidate,_)|candidate!=window);
         for hidden in &mut self.parked { hidden.retain(|(candidate, _)| candidate != window); }
         let had_focus = self.focused.as_ref() == Some(window);
         self.space.unmap_elem(window);

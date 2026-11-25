@@ -1,6 +1,7 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
 mod appearance;
+pub mod tasks;
 pub use appearance::{appearance_path, Appearance, AppearanceReview};
 
 use anyhow::{bail, Context, Result};
