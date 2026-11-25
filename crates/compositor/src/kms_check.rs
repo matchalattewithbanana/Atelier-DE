@@ -456,9 +456,17 @@ pub fn run_native(
         for _ in 0..2 {
             let buffer = allocator.create_buffer(u32::from(width), u32::from(height), Fourcc::Xrgb8888, &[Modifier::Linear])
                 .map_err(|error| anyhow::anyhow!("allocate native scanout buffer: {error}"))?;
+            // Keep the same exported object for the lifetime of this slot.
+            // Validate EGL import before registering the DRM framebuffer.
+            let mut dmabuf = buffer.export().map_err(|error| anyhow::anyhow!("export native scanout buffer: {error}"))?;
+            {
+                let _target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("preflight native render target: {error}"))?;
+            }
             let flags = if PlanarBuffer::modifier(&*buffer).is_some() { FbCmd2Flags::MODIFIERS } else { FbCmd2Flags::empty() };
             let fb = card.add_planar_framebuffer(&*buffer, flags).context("register native framebuffer")?;
-            slots.push((buffer, fb));
+            // Retain both the GBM allocation and the exported DMA-BUF; the
+            // framebuffer handle remains registered until guarded cleanup.
+            slots.push((buffer, fb, dmabuf));
             commit_framebuffer(&card, route.plane, u64::from(u32::from(fb)), true)
                 .context("preflight native framebuffer")?;
         }
@@ -554,8 +562,7 @@ pub fn run_native(
                     let y=(state.pointer_position.y as i32).clamp(0,i32::from(height)-1);
                     cursor_bounds=Rectangle::new((x,y).into(),(11.min(i32::from(width)-x),16.min(i32::from(height)-y)).into());
                     let damage=queue.damage(next,output_damage,cursor_bounds);
-                    let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
-                    let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
+                    let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
@@ -588,7 +595,7 @@ pub fn run_native(
         result
     })();
 
-    let owned:Vec<u64>=slots.iter().map(|(_,fb)|u64::from(u32::from(*fb))).collect();
+    let owned:Vec<u64>=slots.iter().map(|(_,fb,_)|u64::from(u32::from(*fb))).collect();
     if !owned.is_empty(){
         if let Err(error)=recover_scanout(&card,&route,original,&owned,session.is_active(),queue.pending().is_some()){
             if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
@@ -600,7 +607,7 @@ pub fn run_native(
         }
     }
     let mut cleanup = Ok(());
-    for (_, framebuffer) in &slots {
+    for (_, framebuffer, _) in &slots {
         if let Err(error) = card.destroy_framebuffer(*framebuffer) {
             eprintln!("Unable to destroy temporary framebuffer: {error}");
             cleanup = Err(anyhow::anyhow!("native framebuffer cleanup failed: {error}"));
