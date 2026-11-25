@@ -349,6 +349,53 @@ fn flip_completed(card: &Card<'_>, crtc: control::crtc::Handle) -> Result<bool> 
     Ok(events.into_iter().any(|event| matches!(event, control::Event::PageFlip(flip) if flip.crtc == crtc)))
 }
 
+// Recovery must not overwrite a framebuffer installed by another owner.
+// When ownership or route identity is uncertain, leave explicit DRM cleanup
+// to descriptor/seat release rather than removing a potentially active FB.
+#[cfg(feature = "native-session")]
+#[derive(Debug,PartialEq,Eq)]
+enum Recovery {
+    Restore,
+    LeaveCurrent,
+    Defer,
+}
+
+#[cfg(feature = "native-session")]
+fn recovery_decision(seat_active:bool,pending:bool,route_matches:bool,current:u64,owned:&[u64])->Recovery {
+    if !seat_active||pending||!route_matches{return Recovery::Defer;}
+    if owned.contains(&current){Recovery::Restore}else{Recovery::LeaveCurrent}
+}
+
+#[cfg(feature = "native-session")]
+fn recover_scanout(card:&Card<'_>,route:&Route,original:u64,owned:&[u64],seat_active:bool,pending:bool)->Result<()> {
+    if !seat_active||pending{
+        bail!("native scanout cleanup deferred: seat inactive or page flip outstanding");
+    }
+    // Revalidate the same route including primary-plane geometry, connector,
+    // mode and mirroring before writing any display property.
+    let (current_route,current)=active_route(card).context("revalidate native route before cleanup")?;
+    let matches=current_route.connector==route.connector&&current_route.crtc==route.crtc
+        &&current_route.plane==route.plane&&current_route.mode==route.mode;
+    match recovery_decision(seat_active,pending,matches,current,owned){
+        Recovery::Defer=>bail!("native route changed; deferring framebuffer cleanup"),
+        Recovery::Restore=>{
+            commit_framebuffer(card,route.plane,original,false).context("restore original native framebuffer")?;
+            if property(card,route.plane,"FB_ID")?.1!=original{bail!("restored framebuffer differs from original");}
+        }
+        Recovery::LeaveCurrent=>{
+            if current!=original{eprintln!("Primary-plane framebuffer changed outside Atelier; leaving external state intact.");}
+        }
+    }
+    // Check all planes, not merely the last slot tracked by FrameQueue.
+    // An externally changed route may still reference a temporary buffer.
+    for plane in card.plane_handles()?{
+        if owned.contains(&property(card,plane,"FB_ID")?.1){
+            bail!("temporary framebuffer is still referenced by a plane; deferring cleanup");
+        }
+    }
+    Ok(())
+}
+
 // Experimental continuous native session. One outstanding nonblocking page flip keeps
 // the displayed and pending buffers out of the renderer.
 #[cfg(feature = "native-session")]
@@ -526,26 +573,15 @@ pub fn run_native(
         result
     })();
 
-    if queue.pending().is_some() {
-        // An outstanding kernel flip may still reference either temporary buffer.
-        // Do not issue another commit or remove those framebuffers; release the seat.
-        if let Err(error) = outcome { eprintln!("Native session error: {error:#}"); }
-        bail!("native page flip remained pending; restoration could not be safely attempted");
-    }
-    if let Some(slot) = queue.displayed() {
-        let expected = u64::from(u32::from(slots[slot].1));
-        let actual = property(&card, route.plane, "FB_ID")?.1;
-        if actual == expected {
-        let restored = commit_framebuffer(&card, route.plane, original, false).and_then(|_| {
-            if property(&card, route.plane, "FB_ID")?.1 != original { bail!("restored framebuffer differs from original"); }
-            Ok(())
-        });
-        if let Err(error) = restored {
-            if let Err(cause) = outcome { eprintln!("Native session error: {cause:#}"); }
-            bail!("native restoration failed; seat release follows: {error:#}");
+    let owned:Vec<u64>=slots.iter().map(|(_,fb)|u64::from(u32::from(*fb))).collect();
+    if !owned.is_empty(){
+        if let Err(error)=recover_scanout(&card,&route,original,&owned,session.is_active(),queue.pending().is_some()){
+            if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
+            return Err(error.context("native recovery incomplete; seat release follows"));
         }
-        } else if actual != original {
-            eprintln!("Primary-plane framebuffer changed outside Atelier; leaving external state intact.");
+        if !session.is_active(){
+            if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
+            bail!("native seat deactivated before framebuffer cleanup; seat release follows");
         }
     }
     let mut cleanup = Ok(());
@@ -556,4 +592,22 @@ pub fn run_native(
         }
     }
     outcome.and(cleanup)
+}
+
+#[cfg(all(test,feature = "native-session"))]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn recovery_restores_only_owned_framebuffers_on_verified_route(){
+        let owned=[11,12];
+        assert_eq!(recovery_decision(true,false,true,11,&owned),Recovery::Restore);
+        assert_eq!(recovery_decision(true,false,true,12,&owned),Recovery::Restore);
+        assert_eq!(recovery_decision(true,false,true,9,&owned),Recovery::LeaveCurrent);
+        assert_eq!(recovery_decision(true,false,true,11,&[]),Recovery::LeaveCurrent);
+        for current in [9,11,12]{
+            assert_eq!(recovery_decision(false,false,true,current,&owned),Recovery::Defer);
+            assert_eq!(recovery_decision(true,true,true,current,&owned),Recovery::Defer);
+            assert_eq!(recovery_decision(true,false,false,current,&owned),Recovery::Defer);
+        }
+    }
 }
