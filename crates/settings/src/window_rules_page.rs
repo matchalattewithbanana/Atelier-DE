@@ -83,10 +83,13 @@ pub fn build(parent:&gtk::Box){
             Err(e)=>status.set_text(&format!("Rule rejected: {e:#}")),
         }
     });}
-    {let (list,state,status)=(list.clone(),state.clone(),status.clone());
+    {let (list,state,status,fields)=(list.clone(),state.clone(),status.clone(),fields.clone());
     remove.connect_clicked(move|_|{
         let Some(id)=list.active_id()else{status.set_text("Select a draft rule first.");return;};
-        let mut state=state.borrow_mut();state.rules.remove(id.as_str());refresh(&list,&state.rules);status.set_text("Rule removed from draft; save to apply.");
+        let mut state=state.borrow_mut();
+        state.rules.remove(id.as_str());
+        if fields.id.text().as_str()==id.as_str(){fields.populate("",WindowRule::default());}
+        refresh(&list,&state.rules);status.set_text("Rule removed from draft; save to apply.");
     });}
     {let (list,state,status,fields)=(list.clone(),state.clone(),status.clone(),fields.clone());
     previous.connect_clicked(move|_|{
