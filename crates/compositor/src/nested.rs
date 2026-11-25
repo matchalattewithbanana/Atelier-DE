@@ -27,6 +27,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
     let started = Instant::now();
     let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
     let mut intercepted_keys = HashSet::new();
+    let mut shaders=crate::scene::SceneShaders::default();
     while running.load(Ordering::SeqCst) {
         let status = events.dispatch_new_events(|event| {
             if let WinitEvent::Input(input) = event { handle_input(&mut state, input, &mut intercepted_keys); }
@@ -53,7 +54,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         let damage = Rectangle::from_size(size);
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
-            let elements = crate::scene::elements(&state,renderer)?;
+            let elements = crate::scene::elements(&state,renderer,&mut shaders)?;
             let mut frame = renderer.render(&mut target, size, Transform::Flipped180)?;
             frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;

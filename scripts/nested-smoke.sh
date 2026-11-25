@@ -11,7 +11,12 @@ test -x target/debug/atelier-compositor
 test_runtime="$(mktemp -d)"
 supervisor=''
 panel_pid=''
+launcher_pid=''
 cleanup() {
+    if [[ -n "$launcher_pid" ]]; then
+        kill -TERM "$launcher_pid" 2>/dev/null || true
+        wait "$launcher_pid" || true
+    fi
     if [[ -n "$panel_pid" ]]; then
         kill -TERM "$panel_pid" 2>/dev/null || true
         wait "$panel_pid" || true
@@ -20,10 +25,15 @@ cleanup() {
         kill -TERM "$supervisor" 2>/dev/null || true
         wait "$supervisor" || true
     fi
-    rm -f -- "$test_runtime/session.log" "$test_runtime/protocols.txt" "$test_runtime/panel.log"
+    rm -f -- "$test_runtime/session.log" "$test_runtime/protocols.txt" "$test_runtime/panel.log" "$test_runtime/launcher.log" "$test_runtime/config/atelier-de/appearance.toml"
+    rmdir -- "$test_runtime/config/atelier-de" "$test_runtime/config" 2>/dev/null || true
     rmdir -- "$test_runtime" 2>/dev/null || echo "Review remaining test runtime: $test_runtime" >&2
 }
 trap cleanup EXIT
+if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
+    mkdir -p -- "$test_runtime/config/atelier-de"
+    printf 'version = 1\n[window_shadow]\nradius = 24\nopacity = 40\n' > "$test_runtime/config/atelier-de/appearance.toml"
+fi
 env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" LIBGL_ALWAYS_SOFTWARE=1 target/debug/atelier-session --nested --no-shell >"$test_runtime/session.log" 2>&1 &
 supervisor=$!
 socket="wayland-atelier-$supervisor"
@@ -77,8 +87,27 @@ if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
         sleep 0.1
     done
     grep -q 'Atelier layer panel mapped' "$test_runtime/panel.log" || { cat "$test_runtime/panel.log" >&2; exit 1; }
+    # Open a real xdg-toplevel while software GLES is active. The shadow
+    # program is compiled only when drawing an eligible mapped window.
+    env -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" WAYLAND_DISPLAY="$socket" GDK_BACKEND=wayland GSK_RENDERER=cairo target/debug/atelier-shell --launcher >"$test_runtime/launcher.log" 2>&1 &
+    launcher_pid=$!
+    for _ in {1..100}; do
+        if ! kill -0 "$launcher_pid" 2>/dev/null || ! kill -0 "$supervisor" 2>/dev/null; then
+            cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2
+            exit 1
+        fi
+        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log"; then break; fi
+        sleep 0.1
+    done
+    grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
     sleep 1
+    kill -0 "$launcher_pid"
+    kill -0 "$supervisor"
     kill -0 "$panel_pid"
+    kill -TERM "$launcher_pid"
+    wait "$launcher_pid" || true
+    launcher_pid=''
+    echo 'Atelier nested smooth shadow smoke passed'
     kill -TERM "$panel_pid"
     wait "$panel_pid" || true
     panel_pid=''
