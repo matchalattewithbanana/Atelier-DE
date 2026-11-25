@@ -21,6 +21,9 @@ use smithay::{
     },
 };
 use std::os::fd::OwnedFd;
+#[cfg(feature = "native-session")]
+#[path = "lock_protocol.rs"]
+mod lock_protocol;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 
 /// Fullscreen takes precedence over maximized; restore geometry belongs to
@@ -76,6 +79,8 @@ pub struct Atelier {
     focused: Option<Window>,
     scene_dirty: bool,
     session_lock: crate::session_lock::Lifecycle<smithay::reexports::wayland_server::backend::ObjectId>,
+    #[cfg(feature = "native-session")]
+    lock_protocol:lock_protocol::Protocol,
 }
 
 impl Atelier {
@@ -107,6 +112,8 @@ impl Atelier {
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cursor_status: CursorImageStatus::default_named(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true, session_lock:Default::default(),
+            #[cfg(feature = "native-session")]
+            lock_protocol:Default::default(),
         })
     }
 
@@ -139,9 +146,7 @@ impl Atelier {
     }
     #[cfg(feature = "native-session")]
     pub(crate) fn protected_frame_presented(&mut self,frame:crate::session_lock::ProtectedFrame){
-        // The eventual protocol adapter must send the locked event only
-        // when this transition succeeds. No protocol is currently exposed.
-        if self.session_lock.presented(frame){self.scene_dirty=true;}
+        self.confirm_lock_frame(frame);
     }
 
     pub fn take_scene_dirty(&mut self) -> bool {
@@ -464,7 +469,13 @@ impl Atelier {
     }
 
     pub fn send_frames(&self, time: std::time::Duration) {
-        if !self.desktop_visible(){return;}
+        if !self.desktop_visible(){
+            #[cfg(feature = "native-session")]
+            if let Some(surface)=self.lock_surface(){
+                smithay::desktop::utils::send_frames_surface_tree(surface,&self.output,time,None,|_,_|Some(self.output.clone()));
+            }
+            return;
+        }
         for window in self.space.elements_for_output(&self.output) {
             window.send_frame(&self.output, time, None, |_, _| Some(self.output.clone()));
         }

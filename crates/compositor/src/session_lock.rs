@@ -1,7 +1,5 @@
-//! Session lock ownership and presentation barrier. This is not a protocol
-//! implementation. No global is registered until the remaining security
-//! boundaries (trusted lock-surface routing, grab/selection isolation,
-//! owner-aware dispatch and physical acceptance) are implemented.
+//! Session lock ownership and presentation barrier. The protocol adapter
+//! must authorize the exact resource before forwarding any state changes.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub(crate) struct ProtectedFrame(u64);
 
@@ -53,9 +51,11 @@ impl<Owner:Eq> Lifecycle<Owner>{
     pub(crate) fn owns_request(&self,owner:&Owner)->bool{
         matches!(&self.phase,Phase::Pending{owner:current,..}|Phase::Locked{owner:current} if current==owner)
     }
-    #[allow(dead_code)]
+    pub(crate) fn can_unlock(&self,owner:&Owner)->bool{
+        matches!(&self.phase,Phase::Locked{owner:current} if current==owner)
+    }
     pub(crate) fn unlock(&mut self,owner:&Owner)->bool{
-        if !matches!(&self.phase,Phase::Locked{owner:current} if current==owner){return false;}
+        if !self.can_unlock(owner){return false;}
         self.phase=Phase::Desktop;true
     }
     #[allow(dead_code)]
@@ -76,12 +76,12 @@ mod tests{
         assert!(!state.desktop_visible());
         assert!(!state.begin(2));
         assert!(state.owns_request(&1));assert!(!state.owns_request(&2));
-        assert!(!state.unlock(&1));
+        assert!(!state.can_unlock(&1));assert!(!state.unlock(&1));
         let frame=state.protected_frame().unwrap();
         assert!(!state.presented(ProtectedFrame(0)));
         assert!(state.presented(frame));
         assert!(!state.presented(frame));
-        assert!(!state.unlock(&2));
+        assert!(!state.can_unlock(&2));assert!(state.can_unlock(&1));assert!(!state.unlock(&2));
         assert!(!state.desktop_visible());
         assert!(state.unlock(&1));assert!(state.desktop_visible());
     }

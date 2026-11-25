@@ -20,3 +20,9 @@ Implement and test the following before enabling any global:
 5. Only then advertise the protocol on the verified native backend. Keep nested separate and do not advertise host security. Configure trusted lockers independently and test authentication with the installed PAM configuration.
 
 No production security claim follows from unit tests or protocol availability.
+
+## Guarded protocol adapter (still disabled)
+
+The native build now implements Smithay's lock-manager and resource dispatch traits without creating the global. A custom lock-object dispatcher checks exact resource ownership and confirmed presentation before forwarding unlock, rejects foreign/duplicate-output surface construction before upstream bookkeeping, and handles owner destruction by retaining the protected state. The lock callback stores Smithay's confirmation until the native protected flip completes. The protected scene can draw only the accepted mapped lock-surface tree over opaque black; no normal surface or ordinary cursor is drawn. Only lock-tree frame callbacks are eligible in protected states. No input is routed to the lock surface yet.
+
+The pinned Smithay lock-surface resource data is private and does not expose exact resource-to-root lifetime tracking; this adapter conservatively clears the accepted tree on same-client lock-role destruction and refuses a replacement for the same lock. That can blank the lock UI, but cannot reveal the desktop. Precise role lifetime/replacement, root commit/size validation, real malicious-client dispatch tests, focus and grab isolation, selection isolation, and seat/route-loss recovery are required before registration. The original KMS backend still restores the original scanout on exit. Do not advertise or enable the protocol yet.
