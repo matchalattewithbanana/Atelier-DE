@@ -42,6 +42,8 @@ pub struct Atelier {
     seats: SeatState<Self>,
     data_device: DataDeviceState,
     _outputs: OutputManagerState,
+    #[cfg(feature = "native-session")]
+    cursor_shapes:Option<smithay::wayland::cursor_shape::CursorShapeManagerState>,
     pub seat: Seat<Self>,
     pub space: Space<Window>,
     pub output: Output,
@@ -99,6 +101,8 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
+            #[cfg(feature = "native-session")]
+            cursor_shapes:None,
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cursor_status: CursorImageStatus::default_named(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
@@ -107,6 +111,13 @@ impl Atelier {
 
     #[cfg(feature = "native-session")]
     pub(crate) fn cursor_status(&self)->&CursorImageStatus{&self.cursor_status}
+
+    #[cfg(feature = "native-session")]
+    pub(crate) fn enable_cursor_shapes(&mut self){
+        if self.cursor_shapes.is_none(){
+            self.cursor_shapes=Some(smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&self.display));
+        }
+    }
 
     #[cfg(feature = "native-session")]
     pub(crate) fn send_cursor_frames(&self,time:std::time::Duration){
@@ -621,5 +632,9 @@ delegate_compositor!(Atelier);
 delegate_xdg_shell!(Atelier);
 delegate_shm!(Atelier);
 delegate_seat!(Atelier);
+#[cfg(feature = "native-session")]
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Atelier {}
+#[cfg(feature = "native-session")]
+smithay::delegate_cursor_shape!(Atelier);
 delegate_data_device!(Atelier);
 delegate_output!(Atelier);
