@@ -95,6 +95,24 @@ impl WindowBorder{
         Ok([((rgb>>16)&255) as f32/255.0,((rgb>>8)&255) as f32/255.0,(rgb&255) as f32/255.0,1.0])
     }
 }
+/// Optional bounded ambient shadow outside a normal window's outline.
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct WindowShadow{
+    pub radius:u32,
+    pub opacity:u32,
+}
+impl Default for WindowShadow{
+    fn default()->Self{Self{radius:0,opacity:32}}
+}
+impl WindowShadow{
+    pub fn validate(&self)->Result<()>{
+        if self.radius>32||self.opacity>60{bail!("shadow radius must be 0–32 pixels and opacity 0–60 percent");}
+        Ok(())
+    }
+    pub fn is_default(&self)->bool{*self==Self::default()}
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -121,11 +139,12 @@ pub struct Appearance {
     pub widgets:DesktopWidgets,
     pub window_spacing:WindowSpacing,
     pub window_border:WindowBorder,
+    pub window_shadow:WindowShadow,
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -140,6 +159,7 @@ impl Appearance{
         self.widgets.validate()?;
         self.window_spacing.validate()?;
         self.window_border.validate()?;
+        self.window_shadow.validate()?;
         if let Some(slideshow)=&self.wallpaper_slideshow{slideshow.validate()?;}
         if let Some(palette)=&self.shell_palette{palette.validate()?;}
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
@@ -316,6 +336,15 @@ mod tests{
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
         let target=dir.path().join("other.toml");fs::write(&target,"version=1").unwrap();
         std::os::unix::fs::symlink(&target,&path).unwrap();assert!(Appearance::load(&path).is_err());
+    }
+    #[test]
+    fn shadow_preferences_round_trip(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let mut next=review.value.clone();next.window_shadow=WindowShadow{radius:24,opacity:40};
+        review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
+        assert!(WindowShadow{radius:33,opacity:40}.validate().is_err());
+        assert!(WindowShadow{radius:16,opacity:61}.validate().is_err());
     }
     #[test]
     fn border_validation_and_round_trip(){

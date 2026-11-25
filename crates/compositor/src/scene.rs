@@ -1,5 +1,5 @@
-//! One front-to-back scene for both GLES backends. Borders are four
-//! noninteractive solid elements behind their own window, never a global overlay.
+//! One front-to-back scene for both GLES backends. Decorations sit behind
+//! their own window, never a global overlay.
 use crate::{state::Atelier,layout::Tile};
 use anyhow::{Context,Result};
 use smithay::{
@@ -23,17 +23,37 @@ pub fn inset_tile(tile:Tile,width:u32)->Tile{
 /// Clip each outside strip independently, preserving the content rectangle.
 /// Use wider intermediate arithmetic for client-supplied window dimensions.
 fn strips(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,width:u32)->Vec<Rectangle<i32,Logical>>{
-    if width==0||rect.size.w<=0||rect.size.h<=0||clip.size.w<=0||clip.size.h<=0{return Vec::new();}
+    ring(rect,clip,0,width.min(8))
+}
+/// Nonoverlapping ring between two expansions of the content rectangle.
+fn ring(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,inner:u32,outer:u32)->Vec<Rectangle<i32,Logical>>{
+    if outer<=inner||outer>40||rect.size.w<=0||rect.size.h<=0||clip.size.w<=0||clip.size.h<=0{return Vec::new();}
     let x=i64::from(rect.loc.x);let y=i64::from(rect.loc.y);
     let r=x+i64::from(rect.size.w);let b=y+i64::from(rect.size.h);
-    let w=i64::from(width.min(8));
+    let i=i64::from(inner);let w=i64::from(outer);
     let cx=i64::from(clip.loc.x);let cy=i64::from(clip.loc.y);
     let cr=cx+i64::from(clip.size.w);let cb=cy+i64::from(clip.size.h);
-    [(x-w,y-w,r+w,y),(x-w,b,r+w,b+w),(x-w,y,x,b),(r,y,r+w,b)].into_iter().filter_map(|(l,t,r,b)|{
+    [(x-w,y-w,r+w,y-i),(x-w,b+i,r+w,b+w),(x-w,y-i,x-i,b+i),(r+i,y-i,r+w,b+i)].into_iter().filter_map(|(l,t,r,b)|{
         let (l,t,r,b)=(l.max(cx),t.max(cy),r.min(cr),b.min(cb));
         if l>=r||t>=b{return None;}
         Some(Rectangle::new((i32::try_from(l).ok()?,i32::try_from(t).ok()?).into(),(i32::try_from(r-l).ok()?,i32::try_from(b-t).ok()?).into()))
     }).collect()
+}
+/// At most eight disjoint rings (32 solid elements) per window, with a
+/// quadratic alpha falloff. No framebuffer readback, texture allocation or
+/// blur pass. Black is already premultiplied at any alpha.
+fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u32,shadow:atelier_config::WindowShadow)->Vec<(Rectangle<i32,Logical>,f32)>{
+    let radius=shadow.radius.min(32);let opacity=shadow.opacity.min(60) as f32/100.0;
+    if radius==0||opacity==0.0{return Vec::new();}
+    let bands=radius.min(8);let border=border.min(8);
+    let mut result=Vec::with_capacity((bands*4) as usize);
+    for band in 0..bands{
+        let inner=band*radius/bands;let outer=(band+1)*radius/bands;
+        let midpoint=(inner+outer) as f32/(2.0*radius as f32);
+        let alpha=opacity*(1.0-midpoint).powi(2);
+        result.extend(ring(rect,clip,border+inner,border+outer).into_iter().map(|r|(r,alpha)));
+    }
+    result
 }
 pub fn elements(state:&Atelier,renderer:&mut GlesRenderer)->Result<Vec<SceneElement>>{
     let output=&state.output;
@@ -65,6 +85,13 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer)->Result<Vec<SceneElem
                 result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
             }
         }
+        if let Some(shadow)=state.window_shadow(window){
+            let border=state.window_border(window).map_or(0,|(b,_)|b.width);
+            for (strip,alpha) in shadow_bands(geometry,clip,border,shadow){
+                let buffer=SolidColorBuffer::new(strip.size,[0.0,0.0,0.0,alpha]);
+                result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
+            }
+        }
     }
     layers(&[Layer::Bottom,Layer::Background],&mut result,renderer);
     Ok(result)
@@ -83,6 +110,20 @@ mod tests{
             for other in &ring[i+1..]{assert!(!strip.overlaps(*other));}
         }
         assert!(strips(content,clip,0).is_empty());
+    }
+    #[test]
+    fn shadows_are_disjoint_clipped_and_fade_outwards(){
+        let content=Rectangle::new((30,30).into(),(60,40).into());
+        let clip=Rectangle::new((0,0).into(),(120,100).into());
+        let border=strips(content,clip,3);
+        let shadow=shadow_bands(content,clip,3,atelier_config::WindowShadow{radius:32,opacity:60});
+        assert!(!shadow.is_empty()&&shadow.len()<=32);
+        for (i,(r,alpha)) in shadow.iter().enumerate(){
+            assert!(*alpha>0.0&&*alpha<=0.6);assert!(!r.overlaps(content));assert_eq!(r.intersection(clip),Some(*r));
+            assert!(border.iter().all(|b|!b.overlaps(*r)));
+            assert!(shadow[i+1..].iter().all(|(other,a)|!other.overlaps(*r)&&*a<=*alpha));
+        }
+        assert!(shadow_bands(content,clip,3,atelier_config::WindowShadow::default()).is_empty());
     }
     #[test]
     fn tiny_tiles_retain_positive_content(){
