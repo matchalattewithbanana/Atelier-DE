@@ -535,6 +535,7 @@ pub fn run_native(
     let mut queue = FrameQueue::default();
     let mut client_damage=crate::client_damage::ClientDamage::new();
     let mut shaders=crate::scene::SceneShaders::default();
+    let cursor_theme=crate::native_cursor::CursorTheme::load(&mut renderer);
 
     let outcome = (|| -> Result<()> {
         for _ in 0..2 {
@@ -648,7 +649,7 @@ pub fn run_native(
                     let state = state.borrow();
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
-                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size);
+                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&cursor_theme);
                     cursor_bounds=cursor.default_bounds();
                     custom_cursor=!cursor.is_default();
                     let damage=if !custom_cursor{
