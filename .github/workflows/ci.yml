@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  runner-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Runner-only probe (no checkout or dependencies)
+        run: |
+          printf 'Runner shell started\n'
+          uname -s
+          printf 'runner-shell-ok\n' > "$GITHUB_STEP_SUMMARY"
+
   core:
     runs-on: ubuntu-24.04
     defaults:
