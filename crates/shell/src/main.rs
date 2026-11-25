@@ -19,6 +19,8 @@ mod task_backend;
 mod dock_visibility;
 #[cfg(feature = "layer-panel")]
 mod wallpaper_layer;
+#[cfg(feature = "layer-panel")]
+mod desktop_widgets;
 mod applications;
 
 fn main() -> glib::ExitCode {
