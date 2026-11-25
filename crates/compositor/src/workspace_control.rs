@@ -35,6 +35,13 @@ impl WorkspaceControl {
     }
 
     pub fn poll(&mut self, atelier: &mut Atelier, time: u32) -> Result<()> {
+        if atelier.refresh_appearance(){
+            let serial=SERIAL_COUNTER.next_serial();
+            let focus=atelier.surface_under_pointer();let location=atelier.pointer_position;
+            if let Some(pointer)=atelier.seat.get_pointer(){
+                if !pointer.is_grabbed(){pointer.motion(atelier,focus,&MotionEvent{location,serial,time});pointer.frame(atelier);}
+            }
+        }
         for _ in 0..32 {
             let mut data = [0u8; ACTIVATE_LEN+1];
             match self.socket.recv(&mut data) {

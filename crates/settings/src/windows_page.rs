@@ -30,7 +30,7 @@ pub fn build(parent:&gtk::Box){
     save.connect_clicked(move|_|{
         let mut state=state.borrow_mut();let Some(review)=state.as_mut()else{return;};
         let mut next=review.value.clone();next.window_spacing=WindowSpacing{inner_gap:inner.value_as_int() as u32,outer_gap:outer.value_as_int() as u32};
-        match review.save(next){Ok(true)=>status.set_text("Saved. Restart the native compositor session to apply."),Ok(false)=>status.set_text("No spacing changes."),Err(e)=>status.set_text(&format!("Save failed: {e:#}. Reload before retrying."))}
+        match review.save(next){Ok(true)=>status.set_text("Saved. Running native compositor applies gaps after active input grabs finish."),Ok(false)=>status.set_text("No spacing changes."),Err(e)=>status.set_text(&format!("Save failed: {e:#}. Reload before retrying."))}
     });
     reload.emit_clicked();
 }
