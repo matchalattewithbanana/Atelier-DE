@@ -4,6 +4,7 @@ use crate::{state::Atelier,layout::Tile};
 mod backdrop;
 pub(crate) use backdrop::BlurTarget;
 use anyhow::{Context,Result};
+use std::rc::Rc;
 use smithay::{
     backend::renderer::{
         Frame,
@@ -25,14 +26,17 @@ render_elements!{
 }
 /// Non-overlapping integer strips approximating a rounded rectangle at
 /// pixel centers. The central band is merged, bounding work by 2*r+1.
+fn scanline_inset(r:i32,y:i32)->i32{
+    let dy=f64::from(r-y)-0.5;
+    (f64::from(r)-(f64::from(r*r)-dy*dy).sqrt()-0.5).ceil().max(0.0) as i32
+}
 fn rounded_regions(rect:Rectangle<i32,Logical>,radius:u32)->Vec<Rectangle<i32,Logical>>{
     if rect.size.w<=0||rect.size.h<=0{return Vec::new();}
     let r=(radius.min(32) as i32).min(rect.size.w/2).min(rect.size.h/2);
     if r==0{return vec![rect];}
     let mut out=Vec::with_capacity((2*r+1) as usize);
     for y in 0..r{
-        let dy=f64::from(r-y)-0.5;
-        let inset=(f64::from(r)-(f64::from(r*r)-dy*dy).sqrt()-0.5).ceil().max(0.0) as i32;
+        let inset=scanline_inset(r,y);
         let width=rect.size.w-2*inset;
         if width<=0{continue;}
         for row in [y,rect.size.h-1-y]{
@@ -47,7 +51,19 @@ fn rounded_regions(rect:Rectangle<i32,Logical>,radius:u32)->Vec<Rectangle<i32,Lo
     out
 }
 pub(crate) fn rounded_contains(rect:Rectangle<i32,Logical>,radius:u32,p:Point<f64,Logical>)->bool{
-    rounded_regions(rect,radius).iter().any(|r|r.to_f64().contains(p))
+    if rect.size.w<=0||rect.size.h<=0||!rect.to_f64().contains(p){return false;}
+    let r=(radius.min(32) as i32).min(rect.size.w/2).min(rect.size.h/2);
+    if r==0{return true;}
+    // Find the same pixel-centred strip used by the renderer without
+    // materialising every scanline on each pointer motion.
+    let row=(p.y-f64::from(rect.loc.y)).floor() as i32;
+    let edge_row=row.min(rect.size.h-1-row);
+    if edge_row>=r{return rect.loc.y.checked_add(r).is_some();}
+    let inset=scanline_inset(r,edge_row);
+    let Some(x)=rect.loc.x.checked_add(inset)else{return false;};
+    let Some(y)=rect.loc.y.checked_add(row)else{return false;};
+    let width=rect.size.w-2*inset;
+    width>0&&Rectangle::<i32,Logical>::new((x,y).into(),(width,1).into()).to_f64().contains(p)
 }
 /// Subtract the disjoint inner strips from an outer shape, without duplicate
 /// pixels. Used for the visible outline, not the client's content.
@@ -75,7 +91,7 @@ fn rounded_border(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,radius
 /// the clipped corners as opaque. Keep source mapping/transform intact.
 pub struct Masked<E>{
     inner:E,
-    regions:Vec<Rectangle<i32,Logical>>,
+    regions:Rc<[Rectangle<i32,Logical>]>,
     scale:f64,
 }
 impl<E:Element> Element for Masked<E>{
@@ -94,7 +110,7 @@ impl<E:RenderElement<GlesRenderer>> Masked<E>{
     fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>)->Result<(),GlesError>{
         let mut clipped=Vec::new();
         let scale=Scale::from((self.scale*factor.x,self.scale*factor.y));
-        for region in &self.regions{
+        for region in self.regions.iter(){
             let mut region=region.to_physical_precise_round(scale);
             if region.size.w<=0||region.size.h<=0{continue;}
             region.loc-=dst.loc;
@@ -136,10 +152,10 @@ impl CornerMask{
         };
         Some(([sx,sy],flip,height))
     }
-    fn uniforms(&self,factor:Scale<f64>,transform:Transform)->Option<Vec<Uniform<'static>>>{
+    fn uniforms(&self,factor:Scale<f64>,transform:Transform)->Option<[Uniform<'static>;4]>{
         let ([sx,sy],flip,height)=self.coordinates(factor,transform)?;
         if self.radius<=0.0{return None;}
-        Some(vec![
+        Some([
             Uniform::new("mask_rect",UniformValue::_4f(self.rect.loc.x as f32,self.rect.loc.y as f32,self.rect.size.w as f32,self.rect.size.h as f32)),
             Uniform::new("mask_scale",UniformValue::_2f(sx,sy)),
             Uniform::new("mask_y",UniformValue::_2f(flip,height)),
@@ -379,7 +395,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                     let offset=(window.geometry().loc+offset-popup.geometry().loc).to_physical_precise_round(scale);
                     result.extend(render_elements_from_surface_tree::<GlesRenderer,SceneElement>(renderer,popup.wl_surface(),location+offset,Scale::from(scale),alpha,Kind::Unspecified));
                 }
-                let regions:Vec<_>=rounded_regions(geometry,radius).into_iter().map(|mut r|{r.loc-=bounds.loc;r}).collect();
+                let regions:Rc<[_]>=rounded_regions(geometry,radius).into_iter().map(|mut r|{r.loc-=bounds.loc;r}).collect::<Vec<_>>().into();
                 let surfaces=render_elements_from_surface_tree::<GlesRenderer,WaylandSurfaceRenderElement<GlesRenderer>>(renderer,surface,location,Scale::from(scale),alpha,Kind::Unspecified);
                 let rect=Rectangle::new(geometry.loc-bounds.loc,geometry.size);
                 let mask=CornerMask::new(rect,radius,bounds.size.h,scale);
@@ -459,11 +475,13 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
     if scale==1.0{
         let size=bounds.size.to_physical(1);
         for request in blurs{
+            let regions:Vec<_>=request.explicit_regions.unwrap_or_else(||rounded_regions(request.geometry,request.radius)).into_iter().filter_map(|r|r.intersection(bounds))
+                .map(|mut r|{r.loc-=bounds.loc;r}).collect();
+            // No visible destination means no scratch allocation or snapshot.
+            if regions.is_empty(){continue;}
             if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],request.strength,request.target){
                 active[request.target.slot()]=true;
-                let regions=request.explicit_regions.unwrap_or_else(||rounded_regions(request.geometry,request.radius)).into_iter().filter_map(|r|r.intersection(bounds))
-                    .map(|mut r|{r.loc-=bounds.loc;r}).collect();
-                insertions.push((request.index,SceneElement::from(Masked{inner,regions,scale})));
+                insertions.push((request.index,SceneElement::from(Masked{inner,regions:regions.into(),scale})));
             }
         }
     }
@@ -528,6 +546,23 @@ mod tests{
         for (i,r) in regions.iter().enumerate(){assert!(regions[i+1..].iter().all(|o|!r.overlaps(*o)));assert!(border.iter().all(|b|!r.overlaps(*b)));}
         for (i,r) in border.iter().enumerate(){assert_eq!(r.intersection(clip),Some(*r));assert!(border[i+1..].iter().all(|b|!r.overlaps(*b)));}
         let tiny=Rectangle::new((0,0).into(),(1,1).into());assert_eq!(rounded_regions(tiny,24),vec![tiny]);
+    }
+    #[test]
+    fn direct_hit_test_matches_scanlines_at_fractional_and_boundary_points(){
+        for (w,h) in [(1,1),(2,3),(5,7),(16,8),(37,29)]{
+            let rect=Rectangle::new((-5,7).into(),(w,h).into());
+            for radius in [0,1,4,12,24,32]{
+                let strips=rounded_regions(rect,radius);
+                for y in -1..=h{
+                    for x in -1..=w{
+                        for offset in [0.0,0.25,0.5,0.99]{
+                            let p=Point::from((f64::from(rect.loc.x+x)+offset,f64::from(rect.loc.y+y)+offset));
+                            assert_eq!(rounded_contains(rect,radius,p),strips.iter().any(|r|r.to_f64().contains(p)));
+                        }
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn rounded_decoration_tiles_are_bounded_and_disjoint(){
