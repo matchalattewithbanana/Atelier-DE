@@ -702,6 +702,12 @@ pub fn run_native(
         result
     })();
 
+    // Never intentionally restore pre-session content after an accepted
+    // lock. Descriptor/seat release is NOT a verified secure recovery path.
+    if !state.borrow().desktop_visible(){
+        if let Err(cause)=&outcome{eprintln!("Native protected session error: {cause:#}");}
+        bail!("protected session ended; refusing original framebuffer restoration; secure seat recovery not implemented");
+    }
     let owned:Vec<u64>=slots.iter().map(|(_,fb,_)|u64::from(u32::from(*fb))).collect();
     if !owned.is_empty(){
         if let Err(error)=recover_scanout(&card,&route,original,&owned,session.is_active(),queue.pending().is_some()){
