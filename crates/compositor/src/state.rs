@@ -227,7 +227,12 @@ impl Atelier {
         self.scene_dirty = true;
         self.focused_layer = None;
         self.focused = window.clone();
-        if let Some(window) = &window { self.space.raise_element(window, true); }
+        if let Some(window) = &window {
+            // Once a window settles for backdrop composition, losing focus
+            // must not resume a partially completed opening fade.
+            if self.window_backdrop_blur(window)>0 { self.opening_fades.cancel(window); }
+            self.space.raise_element(window, true);
+        }
         for candidate in self.space.elements() {
             if let Some(toplevel) = candidate.toplevel() {
                 if window.is_none() { candidate.set_activated(false); }
