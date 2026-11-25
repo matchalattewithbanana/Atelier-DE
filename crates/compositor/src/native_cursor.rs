@@ -55,8 +55,6 @@ fn cursor_envelope(geometries:impl IntoIterator<Item=Rectangle<i32,Physical>>,ou
 
 type ThemeTexture=(GlesTexture,(i32,i32));
 const MAX_CACHED_SHAPES:usize=40;
-const MAX_FRAMES:usize=32;
-const MAX_SHAPE_BYTES:usize=512*1024;
 
 struct ThemeFrame{
     image:ThemeTexture,
@@ -134,48 +132,6 @@ fn requested_size(value:Option<&str>)->u32{
     value.and_then(|s|s.parse::<u32>().ok()).filter(|s|(8..=128).contains(s)).unwrap_or(24)
 }
 
-fn valid_image(image:&xcursor::parser::Image)->bool{
-    (1..=256).contains(&image.width)&&(1..=256).contains(&image.height)
-        &&image.xhot<image.width&&image.yhot<image.height
-        &&image.pixels_rgba.len()==(image.width as usize)*(image.height as usize)*4
-}
-
-fn file_pixels_to_rgba(bytes:&[u8])->Vec<u8>{
-    // pixels_rgba preserves the bytes from disk: little-endian
-    // premultiplied ARGB words (B,G,R,A).
-    let mut rgba=bytes.to_vec();
-    for pixel in rgba.chunks_exact_mut(4){pixel.swap(0,2);}
-    rgba
-}
-
-// Preflight the table before the library allocates decoded images.
-// Bound dimensions, image count and aggregate decoded storage.
-fn bounded_file(data:&[u8])->bool{
-    let word=|offset:usize|->Option<u32>{Some(u32::from_le_bytes(data.get(offset..offset.checked_add(4)?)?.try_into().ok()?))};
-    let check=(||->Option<()>{
-        if data.get(..4)?!=b"Xcur"{return None;}
-        let header=usize::try_from(word(4)?).ok()?;
-        let count=usize::try_from(word(12)?).ok()?;
-        if header<16||count>256||header.checked_add(count.checked_mul(12)?)?>data.len(){return None;}
-        let mut total=0usize;
-        for index in 0..count{
-            let at=header+index*12;
-            if word(at)?!=0xfffd0002{continue;}
-            let chunk=usize::try_from(word(at+8)?).ok()?;
-            let length=usize::try_from(word(chunk)?).ok()?;
-            if length<36||chunk.checked_add(length)?>data.len(){return None;}
-            let w=word(chunk.checked_add(16)?)?;
-            let h=word(chunk.checked_add(20)?)?;
-            if !(1..=256).contains(&w)||!(1..=256).contains(&h){return None;}
-            let bytes=(w as usize)*(h as usize)*4;
-            total=total.checked_add(bytes)?;
-            if total>8*1024*1024||chunk.checked_add(length)?.checked_add(bytes)?>data.len(){return None;}
-        }
-        Some(())
-    })();
-    check.is_some()
-}
-
 impl CursorTheme {
     pub fn load(renderer:&mut GlesRenderer)->Self{
         let prefs=atelier_config::appearance_path().and_then(|path|atelier_config::Appearance::load(&path)).map(|a|a.cursor).unwrap_or_default();
@@ -189,30 +145,14 @@ impl CursorTheme {
     }
 
     fn import(&self,renderer:&mut GlesRenderer,icon:CursorIcon)->anyhow::Result<Vec<ThemeFrame>>{
-        use std::io::Read;
         let path=shape_names(icon).iter().find_map(|name|self.theme.load_icon(name))
             .ok_or_else(||anyhow::anyhow!("cursor shape missing from theme"))?;
-        const MAX_FILE:u64=8*1024*1024;
-        anyhow::ensure!(std::fs::metadata(&path)?.is_file(),"cursor image is not a regular file");
-        let file=std::fs::File::open(path)?;
-        anyhow::ensure!(file.metadata()?.is_file(),"cursor image is not a regular file");
-        let mut data=Vec::new();
-        file.take(MAX_FILE+1).read_to_end(&mut data)?;
-        anyhow::ensure!(data.len() as u64<=MAX_FILE&&bounded_file(&data),"invalid or oversized cursor file");
-        let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
-        let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(self.size))
-            .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
-        // Animate only complete, bounded nominal-size groups. An oversized
-        // sequence uses its first selected image rather than truncating a loop.
-        let mut frames:Vec<_>=images.iter().filter(|candidate|valid_image(candidate)&&candidate.size==image.size).collect();
-        let bytes=frames.iter().map(|frame|frame.pixels_rgba.len()).sum::<usize>();
-        if frames.len()>MAX_FRAMES||bytes>MAX_SHAPE_BYTES{frames=vec![image];}
+        let frames=atelier_config::cursor_images::load(&path,self.size)?;
         let mut imported=Vec::with_capacity(frames.len());
         for frame in frames{
-            let rgba=file_pixels_to_rgba(&frame.pixels_rgba);
-            let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
+            let texture=renderer.import_memory(&frame.rgba,smithay::backend::allocator::Fourcc::Abgr8888,
                 (frame.width as i32,frame.height as i32).into(),false)?;
-            imported.push(ThemeFrame{image:(texture,(frame.xhot as i32,frame.yhot as i32)),delay_ms:frame.delay.clamp(16,60_000)});
+            imported.push(ThemeFrame{image:(texture,(frame.xhot as i32,frame.yhot as i32)),delay_ms:frame.delay_ms});
         }
         Ok(imported)
     }
@@ -328,13 +268,10 @@ mod tests{
         assert_eq!(shape_names(CursorIcon::NwseResize),&["nwse-resize","bd_double_arrow"]);
     }
     #[test]
-    fn theme_size_and_channel_order(){
+    fn theme_size_bounds(){
         assert_eq!(requested_size(Some("32")),32);
         for value in ["0","9999","-1","abc"]{assert_eq!(requested_size(Some(value)),24);}
         assert_eq!(requested_size(None),24);
-        assert_eq!(file_pixels_to_rgba(&[20,40,60,128,0,0,0,0]),vec![60,40,20,128,0,0,0,0]);
-        assert!(!bounded_file(&[]));
-        assert!(!bounded_file(b"Xcur"));
     }
     #[test]
     fn cursor_envelope_clips_and_unions_surface_trees(){

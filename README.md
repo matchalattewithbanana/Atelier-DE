@@ -366,3 +366,7 @@ Manager → Custom components supports reviewed import, unregister and previous-
 ### Community customization discovery
 
 Manager → Customization catalog → Discover online (GitHub) searches public repositories by category topic and optional bounded keywords. The first page lists source, description, stars and advertised license metadata, with explicit unverified compatibility/trust status. CLI: `atelier-manager customizations discover login "dark"`. Requires the existing GitHub CLI transport; no automatic installation, source checkout or registration. Local browsing works independently. See docs/CUSTOMIZATIONS.md.
+
+### Local cursor previews
+
+Manager → Cursor previews renders six static samples from installed XCursor themes, with size and hotspot information, without applying them. The native compositor and Manager share the bounded pixel decoder. Existing animation scheduling and texture caching remain in the native renderer; previews intentionally display one frame. Actual upstream asset and physical appearance validation remains required.

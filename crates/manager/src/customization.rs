@@ -35,7 +35,7 @@ const COMPONENTS:&[Component]=&[
 ];
 pub fn provider_package(id:&str)->Option<&'static str>{COMPONENTS.iter().find(|c|c.id==id).map(|c|c.package)}
 
-fn icon_roots()->Vec<PathBuf>{
+pub(super) fn icon_roots()->Vec<PathBuf>{
     let home=std::env::var_os("HOME").map(PathBuf::from).filter(|p|p.is_absolute());
     let data=std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p|p.is_absolute())
         .or_else(||home.as_ref().map(|p|p.join(".local/share")));
