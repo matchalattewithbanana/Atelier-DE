@@ -1,5 +1,5 @@
 //! Graphical draft editor. Only an explicitly reviewed theme reaches the shared appearance file.
-use atelier_config::{appearance_path,Appearance,AppearanceReview,WindowBorder,WindowSpacing,themes::{PortableTheme,ShellPalette,from_seed},wallpaper};
+use atelier_config::{appearance_path,Appearance,AppearanceReview,WindowBorder,WindowSpacing,WindowShadow,themes::{PortableTheme,ShellPalette,from_seed},wallpaper};
 use gtk::{gdk,glib,prelude::*};
 use std::{cell::{Cell,RefCell},rc::Rc,path::PathBuf,time::Duration};
 use super::{description,heading};
@@ -30,6 +30,7 @@ struct Fields{
     custom_palette:gtk::CheckButton,surface:gtk::ColorButton,elevated:gtk::ColorButton,text:gtk::ColorButton,muted:gtk::ColorButton,
     radius:gtk::SpinButton,panel_height:gtk::SpinButton,panel_spacing:gtk::SpinButton,launcher_icon:gtk::SpinButton,dock_icon:gtk::SpinButton,
     inner:gtk::SpinButton,outer:gtk::SpinButton,border:gtk::SpinButton,focused:gtk::ColorButton,unfocused:gtk::ColorButton,
+    shadow_radius:gtk::SpinButton,shadow_opacity:gtk::SpinButton,
 }
 impl Fields{
     fn new(parent:&gtk::Box)->Self{
@@ -48,7 +49,8 @@ impl Fields{
         let inner=spin(parent,"Inner grid gap",0.0,48.0);let outer=spin(parent,"Outer grid gap",0.0,64.0);
         let border=spin(parent,"Border width (0 disables)",0.0,8.0);
         let focused=color(parent,"Focused border");let unfocused=color(parent,"Unfocused border");
-        Self{name,custom_accent,accent,custom_palette,surface,elevated,text,muted,radius,panel_height,panel_spacing,launcher_icon,dock_icon,inner,outer,border,focused,unfocused}
+        let shadow_radius=spin(parent,"Ambient shadow radius",0.0,32.0);let shadow_opacity=spin(parent,"Shadow opacity (%)",0.0,60.0);
+        Self{name,custom_accent,accent,custom_palette,surface,elevated,text,muted,radius,panel_height,panel_spacing,launcher_icon,dock_icon,inner,outer,border,focused,unfocused,shadow_radius,shadow_opacity}
     }
     fn populate(&self,t:&PortableTheme){
         self.name.set_text(&t.name);self.custom_accent.set_active(!t.accent.is_empty());
@@ -59,7 +61,7 @@ impl Fields{
         for (button,value) in [(&self.surface,&p.surface),(&self.elevated,&p.elevated),(&self.text,&p.text),(&self.muted,&p.muted)]{set_color(button,value);}
         for (spin,value) in [(&self.radius,t.button_radius),(&self.panel_height,t.panel_height),(&self.panel_spacing,t.panel_spacing),
             (&self.launcher_icon,t.launcher_icon_size),(&self.dock_icon,t.dock_icon_size),(&self.inner,t.window_spacing.inner_gap),
-            (&self.outer,t.window_spacing.outer_gap),(&self.border,t.window_border.width)]{spin.set_value(value as f64);}
+            (&self.outer,t.window_spacing.outer_gap),(&self.border,t.window_border.width),(&self.shadow_radius,t.window_shadow.radius),(&self.shadow_opacity,t.window_shadow.opacity)]{spin.set_value(value as f64);}
         set_color(&self.focused,&t.window_border.focused);set_color(&self.unfocused,&t.window_border.unfocused);
         self.sensitivity();
     }
@@ -75,13 +77,14 @@ impl Fields{
             button_radius:n(&self.radius),panel_height:n(&self.panel_height),panel_spacing:n(&self.panel_spacing),
             launcher_icon_size:n(&self.launcher_icon),dock_icon_size:n(&self.dock_icon),
             window_spacing:WindowSpacing{inner_gap:n(&self.inner),outer_gap:n(&self.outer)},
-            window_border:WindowBorder{width:n(&self.border),focused:hex(&self.focused),unfocused:hex(&self.unfocused)}}
+            window_border:WindowBorder{width:n(&self.border),focused:hex(&self.focused),unfocused:hex(&self.unfocused)},
+            window_shadow:WindowShadow{radius:n(&self.shadow_radius),opacity:n(&self.shadow_opacity)}}
     }
     fn changed(&self,callback:impl Fn()+Clone+'static){
         let cb=callback.clone();self.name.connect_changed(move |_|cb());
         for button in [&self.custom_accent,&self.custom_palette]{let cb=callback.clone();button.connect_toggled(move |_|cb());}
         for button in [&self.accent,&self.surface,&self.elevated,&self.text,&self.muted,&self.focused,&self.unfocused]{let cb=callback.clone();button.connect_color_set(move |_|cb());}
-        for spin in [&self.radius,&self.panel_height,&self.panel_spacing,&self.launcher_icon,&self.dock_icon,&self.inner,&self.outer,&self.border]{
+        for spin in [&self.radius,&self.panel_height,&self.panel_spacing,&self.launcher_icon,&self.dock_icon,&self.inner,&self.outer,&self.border,&self.shadow_radius,&self.shadow_opacity]{
             let cb=callback.clone();spin.connect_value_changed(move |_|cb());
         }
     }
@@ -112,6 +115,10 @@ fn draw(cr:&gtk::cairo::Context,width:i32,height:i32,t:&PortableTheme){
     let w=(424.0-2.0*outer-gap)/2.0;let h=bottom-y;
     for i in 0..2{
         let x=8.0+outer+i as f64*(w+gap);let border=(t.window_border.width as f64*0.6).min(h.max(0.0)/2.0);
+        let spread=t.window_shadow.radius as f64*0.45;
+        if spread>0.0&&t.window_shadow.opacity>0&&h>0.0{
+            for band in (1..=4).rev(){let r=spread*band as f64/4.0;cr.set_source_rgba(0.0,0.0,0.0,t.window_shadow.opacity as f64/100.0*(5-band) as f64/16.0);cr.rectangle(x-r,y-r,w+2.0*r,h+2.0*r);let _=cr.fill();}
+        }
         if border>0.0{rect(x,y,w,h,0.0,if i==0{&t.window_border.focused}else{&t.window_border.unfocused});}
         rect(x+border,y+border,w-2.0*border,h-2.0*border,0.0,&p.elevated);
         if h>30.0{
