@@ -12,7 +12,7 @@ use smithay::{
     },
     desktop::{layer_map_for_output,PopupManager},
     utils::{Buffer,Logical,Physical,Point,Rectangle,Scale,Transform},
-    wayland::shell::wlr_layer::Layer,
+    wayland::{compositor::{with_states,SurfaceAttributes,RectangleKind},shell::wlr_layer::Layer},
 };
 render_elements!{
     pub SceneElement<=GlesRenderer>;
@@ -134,6 +134,24 @@ fn ring(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,inner:u32,outer:
 /// At most eight disjoint rings (32 solid elements) per window, with a
 /// quadratic alpha falloff. No framebuffer readback, texture allocation or
 /// blur pass. Black is already premultiplied at any alpha.
+fn effective_radius(rect:Rectangle<i32,Logical>,radius:u32)->u32{
+    radius.min(24).min((rect.size.w.max(0)/2) as u32).min((rect.size.h.max(0)/2) as u32)
+}
+/// Four outer strips and, for rounded content, four disjoint corner tiles.
+/// Shaders reject interior pixels using the rounded distance field. Avoid
+/// rasterizing the entire window and keep damage bounded by its outline.
+fn decoration_tiles(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,corner:u32,spread:u32)->Vec<Rectangle<i32,Logical>>{
+    let mut tiles=ring(rect,clip,0,spread);
+    let r=effective_radius(rect,corner) as i32;
+    if r==0||spread==0{return tiles;}
+    let (Some(right),Some(bottom))=(rect.loc.x.checked_add(rect.size.w),rect.loc.y.checked_add(rect.size.h))else{return tiles;};
+    for x in [rect.loc.x,right-r]{
+        for y in [rect.loc.y,bottom-r]{
+            if let Some(tile)=Rectangle::new((x,y).into(),(r,r).into()).intersection(clip){tiles.push(tile);}
+        }
+    }
+    tiles
+}
 fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u32,shadow:atelier_config::WindowShadow)->Vec<(Rectangle<i32,Logical>,f32)>{
     let radius=shadow.radius.min(32);let opacity=shadow.opacity.min(60) as f32/100.0;
     if radius==0||opacity==0.0{return Vec::new();}
@@ -152,14 +170,29 @@ fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u
 #[derive(Default)]
 pub struct SceneShaders{
     shadow:Option<Option<GlesPixelProgram>>,
+    rounded_border:Option<Option<GlesPixelProgram>>,
     backdrop:backdrop::Backdrop,
 }
 impl SceneShaders{
+    fn rounded_border(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
+        self.rounded_border.get_or_insert_with(||{
+            match renderer.compile_custom_pixel_shader(include_str!("rounded_border.frag"),&[
+                UniformName::new("outline",UniformType::_4f),
+                UniformName::new("corner",UniformType::_1f),
+                UniformName::new("width",UniformType::_1f),
+                UniformName::new("border_color",UniformType::_4f),
+            ]){
+                Ok(program)=>{println!("Atelier rounded border shader ready");Some(program)}
+                Err(error)=>{tracing::warn!(?error,"rounded border shader unavailable; using pixel-aligned outlines");None}
+            }
+        }).as_ref()
+    }
     fn shadow(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
         self.shadow.get_or_insert_with(||{
             match renderer.compile_custom_pixel_shader(include_str!("shadow.frag"),&[
                 UniformName::new("outline",UniformType::_4f),
                 UniformName::new("radius",UniformType::_1f),
+                UniformName::new("corner",UniformType::_1f),
             ]){
                 Ok(program)=>{println!("Atelier smooth shadow shader ready");Some(program)},
                 Err(error)=>{tracing::warn!(?error,"smooth shadow shader unavailable; using banded shadows");None}
@@ -175,9 +208,29 @@ fn relative_outline(content:Rectangle<i32,Logical>,strip:Rectangle<i32,Logical>,
     let b=i64::from(border.min(8));
     [(x-b) as f32,(y-b) as f32,(x+i64::from(content.size.w)+b) as f32,(y+i64::from(content.size.h)+b) as f32]
 }
-#[derive(Clone,Copy)]
+#[derive(Clone)]
 struct BlurRequest{
     target:BlurTarget,index:usize,geometry:Rectangle<i32,Logical>,radius:u32,strength:u32,
+    explicit_regions:Option<Vec<Rectangle<i32,Logical>>>,
+}
+/// Only accept a small, additive, non-overlapping region. Never interpret
+/// absent/default input regions as the full widget group. The namespace
+/// merely opts into this rendering convention, not a privileged protocol.
+fn widget_regions(rects:&[(RectangleKind,Rectangle<i32,Logical>)],origin:Point<i32,Logical>,geometry:Rectangle<i32,Logical>,bounds:Rectangle<i32,Logical>)->Option<Vec<Rectangle<i32,Logical>>>{
+    if rects.is_empty()||rects.len()>256{return None;}
+    let mut result=Vec::new();
+    let clip=geometry.intersection(bounds)?;
+    for (kind,rect) in rects{
+        if !matches!(kind,RectangleKind::Add)||rect.size.w<=0||rect.size.h<=0{return None;}
+        let x=rect.loc.x.checked_add(origin.x)?;let y=rect.loc.y.checked_add(origin.y)?;
+        x.checked_add(rect.size.w)?;y.checked_add(rect.size.h)?;
+        let rect=Rectangle::new((x,y).into(),rect.size);
+        if let Some(hit)=rect.intersection(clip){
+            if result.iter().any(|other:&Rectangle<i32,Logical>|other.overlaps(hit)){return None;}
+            result.push(hit);
+        }
+    }
+    (!result.is_empty()).then_some(result)
 }
 fn add_blur(requests:&mut Vec<BlurRequest>,request:BlurRequest){
     // One request per role (including duplicate client namespaces).
@@ -204,7 +257,17 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 // Namespace is a rendering hint, not an authorization claim.
                 if result.len()>first&&geometry.overlaps(bounds){
                     if let Some((target,strength,radius))=state.shell_backdrop(layer.namespace()){
-                        add_blur(blurs,BlurRequest{target,index:result.len(),geometry,radius,strength});
+                        let explicit_regions=if target==BlurTarget::Widgets{
+                            let surface_origin=geometry.loc-layer.bbox().loc;
+                            let regions=with_states(layer.wl_surface(),|states|{
+                                let mut cached=states.cached_state.get::<SurfaceAttributes>();
+                                let current=cached.current();
+                                current.input_region.as_ref().and_then(|region|widget_regions(&region.rects,surface_origin,geometry,bounds))
+                            });
+                            if regions.is_none(){continue;}
+                            regions
+                        }else{None};
+                        add_blur(blurs,BlurRequest{target,index:result.len(),geometry,radius,strength,explicit_regions});
                     }
                 }
             }
@@ -236,27 +299,50 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
             result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),alpha));
         }
         if let Some((border,focused))=state.window_border(window){
-            let mut color=border.color(focused)?;
-            for channel in &mut color{*channel*=opening;}
-            let strips=if radius>0{rounded_border(geometry,clip,radius,border.width)}else{strips(geometry,clip,border.width)};
-            for strip in strips{
-                let buffer=SolidColorBuffer::new(strip.size,color);
-                result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
+            let color=border.color(focused)?;
+            let corner=effective_radius(geometry,radius);
+            let program=if corner>0&&border.width>0{shaders.rounded_border(renderer)}else{None};
+            if let Some(program)=program{
+                for tile in decoration_tiles(geometry,clip,corner,border.width){
+                    let [l,t,r,b]=relative_outline(geometry,tile,0);
+                    let area=Rectangle::new(tile.loc-bounds.loc,tile.size);
+                    result.push(SceneElement::from(PixelShaderElement::new(
+                        program.clone(),area,None,opening,
+                        vec![Uniform::new("outline",UniformValue::_4f(l,t,r,b)),
+                             Uniform::new("corner",UniformValue::_1f(corner as f32)),
+                             Uniform::new("width",UniformValue::_1f(border.width as f32)),
+                             Uniform::new("border_color",UniformValue::_4f(color[0],color[1],color[2],color[3]))],
+                        Kind::Unspecified,
+                    )));
+                }
+            }else{
+                let strips=if radius>0{rounded_border(geometry,clip,radius,border.width)}else{strips(geometry,clip,border.width)};
+                for strip in strips{
+                    let mut color=color;
+                    for channel in &mut color{*channel*=opening;}
+                    let buffer=SolidColorBuffer::new(strip.size,color);
+                    result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
+                }
             }
         }
         if let Some(shadow)=state.window_shadow(window){
             let border=state.window_border(window).map_or(0,|(b,_)|b.width);
             if let Some(program)=shaders.shadow(renderer){
-                // Draw only outside the outline: four clipped strips, not the
-                // entire window interior. Euclidean distance rounds the shadow
-                // corners without changing client content or hit testing.
-                for strip in ring(geometry,clip,border,border+shadow.radius){
+                let corner=effective_radius(geometry,radius);
+                // Only the outer strips and corner tiles need shading.
+                // The distance field excludes the rounded outer outline,
+                // including the border, even for translucent clients.
+                let tiles=if corner>0{
+                    decoration_tiles(geometry,clip,corner,border+shadow.radius)
+                }else{ring(geometry,clip,border,border+shadow.radius)};
+                for strip in tiles{
                     let [l,t,r,b]=relative_outline(geometry,strip,border);
                     let area=Rectangle::new(strip.loc-bounds.loc,strip.size);
                     result.push(SceneElement::from(PixelShaderElement::new(
                         program.clone(),area,None,shadow.opacity as f32/100.0*opening,
                         vec![Uniform::new("outline",UniformValue::_4f(l,t,r,b)),
-                             Uniform::new("radius",UniformValue::_1f(shadow.radius as f32))],
+                             Uniform::new("radius",UniformValue::_1f(shadow.radius as f32)),
+                             Uniform::new("corner",UniformValue::_1f(if corner>0{(corner+border) as f32}else{0.0}))],
                         Kind::Unspecified,
                     )));
                 }
@@ -269,7 +355,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         }
         let strength=state.window_backdrop_blur(window);
         if strength>0&&geometry.overlaps(bounds){
-            add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength});
+            add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength,explicit_regions:None});
         }
     }
     layers(&[Layer::Bottom,Layer::Background],&mut result,renderer,&mut blurs);
@@ -282,7 +368,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         for request in blurs{
             if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],request.strength,request.target){
                 active[request.target.slot()]=true;
-                let regions=rounded_regions(request.geometry,request.radius).into_iter().filter_map(|r|r.intersection(bounds))
+                let regions=request.explicit_regions.unwrap_or_else(||rounded_regions(request.geometry,request.radius)).into_iter().filter_map(|r|r.intersection(bounds))
                     .map(|mut r|{r.loc-=bounds.loc;r}).collect();
                 insertions.push((request.index,SceneElement::from(Masked{inner,regions,scale})));
             }
@@ -351,11 +437,42 @@ mod tests{
         let tiny=Rectangle::new((0,0).into(),(1,1).into());assert_eq!(rounded_regions(tiny,24),vec![tiny]);
     }
     #[test]
+    fn rounded_decoration_tiles_are_bounded_and_disjoint(){
+        let rect=Rectangle::new((20,20).into(),(80,60).into());
+        let clip=Rectangle::new((0,0).into(),(110,90).into());
+        let tiles=decoration_tiles(rect,clip,16,20);
+        assert_eq!(tiles.len(),8);
+        assert!(tiles.iter().any(|r|r.contains((20,20))));
+        assert!(!tiles.iter().any(|r|r.contains((60,50))));
+        for (i,tile) in tiles.iter().enumerate(){
+            assert_eq!(tile.intersection(clip),Some(*tile));
+            assert!(tiles[i+1..].iter().all(|other|!tile.overlaps(*other)));
+        }
+        let small=Rectangle::new((0,0).into(),(5,3).into());
+        assert_eq!(effective_radius(small,24),1);
+        assert_eq!(decoration_tiles(rect,clip,0,20).len(),4);
+        assert!(decoration_tiles(rect,clip,16,0).is_empty());
+    }
+    #[test]
+    fn widget_blur_regions_preserve_gaps_and_reject_complex_input(){
+        let geometry=Rectangle::new((10,20).into(),(100,100).into());
+        let bounds=Rectangle::new((0,0).into(),(200,200).into());
+        let first=Rectangle::new((0,0).into(),(100,40).into());
+        let second=Rectangle::new((0,50).into(),(100,40).into());
+        let rects=[(RectangleKind::Add,first),(RectangleKind::Add,second)];
+        let regions=widget_regions(&rects,geometry.loc,geometry,bounds).unwrap();
+        assert_eq!(regions.len(),2);
+        assert!(!regions.iter().any(|r|r.contains((50,65))));
+        assert!(widget_regions(&[],geometry.loc,geometry,bounds).is_none());
+        assert!(widget_regions(&[(RectangleKind::Subtract,first)],geometry.loc,geometry,bounds).is_none());
+        assert!(widget_regions(&[(RectangleKind::Add,first),(RectangleKind::Add,first)],geometry.loc,geometry,bounds).is_none());
+    }
+    #[test]
     fn blur_requests_are_bounded_and_preserve_scene_indices(){
         let geometry=Rectangle::new((0,0).into(),(50,40).into());
         let mut requests=Vec::new();
         for (target,index) in [(BlurTarget::Panel,2),(BlurTarget::Dock,4),(BlurTarget::Panel,6),(BlurTarget::Focused,9)]{
-            add_blur(&mut requests,BlurRequest{target,index,geometry,radius:0,strength:8});
+            add_blur(&mut requests,BlurRequest{target,index,geometry,radius:0,strength:8,explicit_regions:None});
         }
         assert_eq!(requests.iter().map(|r|r.index).collect::<Vec<_>>(),vec![2,4,9]);
         let mut scene=vec![0;10];for request in requests.into_iter().rev(){scene.insert(request.index,request.index);}

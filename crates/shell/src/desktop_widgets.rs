@@ -2,7 +2,7 @@
 use atelier_config::{DesktopWidgets,WidgetPosition};
 use gtk::{glib,prelude::*};
 use gtk4_layer_shell::{Edge,KeyboardMode,Layer,LayerShell};
-use std::{sync::mpsc,time::Duration};
+use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::Duration};
 
 fn label(text:&str,class:&str)->gtk::Label{
     let label=gtk::Label::new(Some(text));label.set_xalign(0.0);label.set_wrap(true);label.add_css_class(class);label
@@ -75,11 +75,28 @@ fn system_summary()->String{
     };
     format!("{memory}\n{load}\n{battery}")
 }
-pub fn build(app:&gtk::Application,prefs:&DesktopWidgets)->Option<gtk::ApplicationWindow>{
+mod regions;
+use regions::RegionPublisher;
+/// Explicitly owns the region-publishing timer and the layer window.
+pub struct WidgetGroup{
+    window:gtk::ApplicationWindow,
+    radius:Rc<Cell<u32>>,
+    source:Option<glib::SourceId>,
+}
+impl WidgetGroup{
+    pub fn set_radius(&self,radius:u32){self.radius.set(radius.min(24));}
+}
+impl Drop for WidgetGroup{
+    fn drop(&mut self){
+        if let Some(source)=self.source.take(){source.remove();}
+        self.window.destroy();
+    }
+}
+pub fn build(app:&gtk::Application,prefs:&DesktopWidgets,radius:u32)->Option<WidgetGroup>{
     if !prefs.enabled||prefs.validate().is_err(){return None;}
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier widgets").decorated(false).resizable(false).build();
     window.add_css_class("atelier-widget-layer");
-    window.init_layer_shell();window.set_namespace(Some("atelier-desktop-widgets"));window.set_layer(Layer::Bottom);
+    window.init_layer_shell();window.set_namespace(Some("atelier-widget-cards-v1"));window.set_layer(Layer::Bottom);
     window.set_anchor(Edge::Top,true);
     let edge=match prefs.position{WidgetPosition::TopLeft=>Edge::Left,WidgetPosition::TopRight=>Edge::Right};
     window.set_anchor(edge,true);window.set_margin(edge,16);window.set_margin(Edge::Top,16);
@@ -101,7 +118,16 @@ pub fn build(app:&gtk::Application,prefs:&DesktopWidgets)->Option<gtk::Applicati
         refresh(&summary,Duration::from_secs(5),system_summary);
     }
     let scroll=gtk::ScrolledWindow::builder().child(&group).hscrollbar_policy(gtk::PolicyType::Never).vscrollbar_policy(gtk::PolicyType::Automatic)
-        .propagate_natural_height(true).max_content_height(440).build();
+        .overlay_scrolling(false).propagate_natural_height(true).max_content_height(440).build();
     window.set_child(Some(&scroll));
-    window.present();Some(window)
+    let radius=Rc::new(Cell::new(radius.min(24)));
+    let publisher=Rc::new(RefCell::new(RegionPublisher::new(&window,&scroll,&group)));
+    let tick={let publisher=publisher.clone();let radius=radius.clone();move||publisher.borrow_mut().publish(radius.get())};
+    let source=glib::timeout_add_local(Duration::from_millis(100),move||{tick();glib::ControlFlow::Continue});
+    // Update immediately on scroll, in addition to checking allocations.
+    {let (publisher,radius)=(Rc::downgrade(&publisher),radius.clone());
+    scroll.vadjustment().connect_value_changed(move|_|{if let Some(p)=publisher.upgrade(){p.borrow_mut().publish(radius.get());}});}
+    window.present();
+    println!("Atelier widget group requested");
+    Some(WidgetGroup{window,radius,source:Some(source)})
 }

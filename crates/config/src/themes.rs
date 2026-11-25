@@ -1,4 +1,4 @@
-//! Portable visual settings only: never import machine-local paths, pins or commands.
+//! Portable visual settings only: never import machine-local paths, pins, application rules or commands.
 use crate::{Appearance,WindowBorder,WindowSpacing,WindowShadow,Transparency};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
@@ -70,6 +70,8 @@ pub struct PortableTheme{
     pub panel_backdrop_blur:u32,
     #[serde(default,skip_serializing_if="is_zero")]
     pub dock_backdrop_blur:u32,
+    #[serde(default,skip_serializing_if="is_zero")]
+    pub widget_backdrop_blur:u32,
     #[serde(default,skip_serializing_if="Transparency::is_default")]
     pub transparency:Transparency,
 }
@@ -78,14 +80,14 @@ impl PortableTheme{
     pub fn capture(name:String,a:&Appearance)->Self{
         Self{format:"atelier-native-theme".into(),version:1,name,accent:a.accent.clone(),shell_palette:a.shell_palette.clone(),
             button_radius:a.button_radius,panel_height:a.panel_height,panel_spacing:a.panel_spacing,launcher_icon_size:a.launcher_icon_size,dock_icon_size:a.dock_icon_size,
-            window_spacing:a.window_spacing,window_border:a.window_border.clone(),window_shadow:a.window_shadow,window_corner_radius:a.window_corner_radius,backdrop_blur:a.backdrop_blur,panel_backdrop_blur:a.panel_backdrop_blur,dock_backdrop_blur:a.dock_backdrop_blur,transparency:a.transparency}
+            window_spacing:a.window_spacing,window_border:a.window_border.clone(),window_shadow:a.window_shadow,window_corner_radius:a.window_corner_radius,backdrop_blur:a.backdrop_blur,panel_backdrop_blur:a.panel_backdrop_blur,dock_backdrop_blur:a.dock_backdrop_blur,widget_backdrop_blur:a.widget_backdrop_blur,transparency:a.transparency}
     }
     pub fn applied(&self,base:&Appearance)->Result<Appearance>{
         if self.format!="atelier-native-theme"||self.version!=1||self.name.trim().is_empty()||self.name.len()>80||self.name.chars().any(char::is_control){bail!("unsupported theme format, version or name");}
         let mut a=base.clone();
         a.accent=self.accent.clone();a.shell_palette=self.shell_palette.clone();a.button_radius=self.button_radius;
         a.panel_height=self.panel_height;a.panel_spacing=self.panel_spacing;a.launcher_icon_size=self.launcher_icon_size;a.dock_icon_size=self.dock_icon_size;
-        a.window_spacing=self.window_spacing;a.window_border=self.window_border.clone();a.window_shadow=self.window_shadow;a.window_corner_radius=self.window_corner_radius;a.backdrop_blur=self.backdrop_blur;a.panel_backdrop_blur=self.panel_backdrop_blur;a.dock_backdrop_blur=self.dock_backdrop_blur;a.transparency=self.transparency;a.validate()?;Ok(a)
+        a.window_spacing=self.window_spacing;a.window_border=self.window_border.clone();a.window_shadow=self.window_shadow;a.window_corner_radius=self.window_corner_radius;a.backdrop_blur=self.backdrop_blur;a.panel_backdrop_blur=self.panel_backdrop_blur;a.dock_backdrop_blur=self.dock_backdrop_blur;a.widget_backdrop_blur=self.widget_backdrop_blur;a.transparency=self.transparency;a.validate()?;Ok(a)
     }
     pub fn parse(text:&str)->Result<Self>{
         if text.len()>65536{bail!("theme exceeds 64 KiB");}

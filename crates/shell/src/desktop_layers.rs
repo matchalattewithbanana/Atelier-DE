@@ -21,7 +21,7 @@ struct DesktopLayers{
     wallpaper:WallpaperLayer,
     dock:Option<Dock>,
     dock_preferences:Option<DockPreferences>,
-    widgets:Option<gtk::ApplicationWindow>,
+    widgets:Option<crate::desktop_widgets::WidgetGroup>,
     widget_preferences:Option<DesktopWidgets>,
 }
 impl DesktopLayers{
@@ -36,16 +36,17 @@ impl DesktopLayers{
         if native{
             self.wallpaper.update(app,prefs);
             if self.widget_preferences.as_ref()!=Some(&prefs.widgets){
-                if let Some(window)=self.widgets.take(){window.destroy();}
-                self.widgets=crate::desktop_widgets::build(app,&prefs.widgets);
+                self.widgets.take();
+                self.widgets=crate::desktop_widgets::build(app,&prefs.widgets,prefs.button_radius);
                 self.widget_preferences=Some(prefs.widgets.clone());
             }
+            if let Some(group)=&self.widgets{group.set_radius(prefs.button_radius);}
         }
     }
 }
 impl Drop for DesktopLayers{
     fn drop(&mut self){
-        if let Some(window)=self.widgets.take(){window.destroy();}
+        self.widgets.take();
         // The owned dock and wallpaper destroy their surfaces on drop.
     }
 }
