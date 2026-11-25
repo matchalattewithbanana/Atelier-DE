@@ -9,47 +9,126 @@ permissions:
   contents: read
 
 jobs:
-  rust:
+  core:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install native development libraries
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
           sudo apt-get update
           sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev libgbm-dev libdrm-dev dbus-daemon libglib2.0-bin
       - name: Rust stable
-        run: rustup toolchain install stable --profile minimal
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
+          rustup toolchain install stable --profile minimal
       - name: Check workspace
-        run: cargo +stable check --workspace --all-targets
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
+          cargo +stable check --workspace --all-targets
       - name: Test workspace
-        run: cargo +stable test --workspace
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
+          cargo +stable test --workspace
       - name: Test graphical manager and GTK smoke
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
           cargo +stable test -p atelier-manager --features gui
           dbus-run-session -- xvfb-run -a cargo +stable test -p atelier-manager --features gui gui::tests::gtk_window_smoke -- --ignored
       - name: Isolated notification D-Bus smoke
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-core.log") 2>&1
           cargo +stable build -p atelier-notifications
           dbus-run-session -- bash scripts/notification-smoke.sh
+      - name: Upload diagnostic logs (core)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-core-diagnostics
+          path: ${{ runner.temp }}/atelier-ci-core.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  native:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native development libraries
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev libgbm-dev libdrm-dev dbus-daemon libglib2.0-bin
+      - name: Rust stable
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          rustup toolchain install stable --profile minimal
       - name: Build nested session binaries
-        run: cargo +stable build -p atelier-compositor -p atelier-session
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          cargo +stable build -p atelier-compositor -p atelier-session
       - name: Nested Wayland smoke
-        run: xvfb-run -a bash scripts/nested-smoke.sh
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          xvfb-run -a bash scripts/nested-smoke.sh
 
       - name: Read-only hardware inventory
-        run: target/debug/atelier-compositor --probe-hardware
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          target/debug/atelier-compositor --probe-hardware
 
       - name: Compile native-seat, native-gbm and native-kms features
-        run: cargo +stable test -p atelier-compositor --features native-kms
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          cargo +stable test -p atelier-compositor --features native-kms
 
       - name: Compile native-input feature
-        run: cargo +stable test -p atelier-compositor --features native-input
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          cargo +stable test -p atelier-compositor --features native-input
 
       - name: Compile integrated native session
-        run: cargo +stable test -p atelier-compositor --features native-session
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-native.log") 2>&1
+          cargo +stable test -p atelier-compositor --features native-session
 
+      - name: Upload diagnostic logs (native)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-native-diagnostics
+          path: ${{ runner.temp }}/atelier-ci-native.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  panel:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native development libraries
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-panel.log") 2>&1
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libgtk-4-dev xvfb xauth libgl1-mesa-dri wayland-utils libseat-dev libudev-dev libinput-dev libgbm-dev libdrm-dev dbus-daemon libglib2.0-bin
+      - name: Rust stable
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-panel.log") 2>&1
+          rustup toolchain install stable --profile minimal
+      - name: Build nested session binaries
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-panel.log") 2>&1
+          cargo +stable build -p atelier-compositor -p atelier-session
       - name: Build GTK layer-shell dependency and panel
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/atelier-ci-panel.log") 2>&1
           sudo apt-get install -y meson ninja-build wayland-protocols
           git clone --depth 1 --branch v1.0.4 https://github.com/wmww/gtk4-layer-shell.git "$RUNNER_TEMP/gtk4-layer-shell"
           meson setup "$RUNNER_TEMP/gtk4-layer-shell/build" "$RUNNER_TEMP/gtk4-layer-shell" --prefix "$RUNNER_TEMP/atelier-layer-shell" --libdir lib -Dintrospection=false -Dvapi=false -Ddocs=false -Dexamples=false -Dtests=false
@@ -60,3 +139,26 @@ jobs:
           cargo +stable test -p atelier-shell --features layer-panel
           cargo +stable build -p atelier-shell --features layer-panel
           ATELIER_TEST_PANEL=1 xvfb-run -a bash scripts/nested-smoke.sh
+      - name: Upload diagnostic logs (panel)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-panel-diagnostics
+          path: ${{ runner.temp }}/atelier-ci-panel.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Preserve the existing required check; every stage must succeed.
+  rust:
+    if: ${{ always() }}
+    needs: [core, native, panel]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all desktop checks
+        env:
+          CORE: ${{ needs.core.result }}
+          NATIVE: ${{ needs.native.result }}
+          PANEL: ${{ needs.panel.result }}
+        run: |
+          printf 'core=%s native=%s panel=%s\n' "$CORE" "$NATIVE" "$PANEL"
+          test "$CORE" = success && test "$NATIVE" = success && test "$PANEL" = success
