@@ -44,7 +44,10 @@ fn candidates(plan: &Plan, providers: &[String]) -> BTreeMap<String, BTreeSet<St
             "audio" => add(&mut result, "optional audio", &["libpulse", "coreutils"]),
             "network" => add(&mut result, "optional network", &["networkmanager", "coreutils"]),
             "bluetooth" => add(&mut result, "optional bluetooth", &["bluez-utils", "coreutils"]),
-            id => if let Some(package)=crate::customization::provider_package(id){add(&mut result,id,&[package]);}
+            id => if let Some(package)=crate::customization::provider_package(id){
+                add(&mut result,id,&[package]);
+                if crate::locker::is_locker(id){add(&mut result,"locker diagnostics",&["wayland-utils","coreutils"]);}
+            }
         }
     }
     result
