@@ -126,7 +126,7 @@ pub(super) fn items()->Result<Vec<Item>>{
 }
 
 #[derive(Clone,Copy)]
-pub(super) enum Action{Register,Remove,Restore}
+pub(super) enum Action{Register,Community,Remove,Restore}
 pub(super) struct Review{
     root:PathBuf,current:Option<Vec<u8>>,previous:Option<Vec<u8>>,next:Registry,
     phrase:String,detail:String,
@@ -160,6 +160,19 @@ impl Review{
     }
 }
 
+fn community_manifest(category:&str,repository:&str)->Result<Manifest>{
+    use sha2::{Digest,Sha256};
+    if !CATEGORIES.contains(&category)||!crate::customization_discovery::valid_repo(repository){
+        bail!("select a valid category and GitHub owner/repository");
+    }
+    let canonical=repository.to_ascii_lowercase();
+    let hash=format!("{:x}",Sha256::digest(format!("{category}:{canonical}").as_bytes()));
+    let entry=Manifest{schema:1,id:format!("github-{}",&hash[..24]),name:repository.chars().take(128).collect(),
+        category:category.into(),source:format!("https://github.com/{repository}"),targets:vec![],
+        description:"Community repository reference; compatibility and trust not verified.".into()};
+    entry.validate()?;Ok(entry)
+}
+
 fn review_at(root:PathBuf,action:Action,value:&str)->Result<Review>{
     let current=read_state(&root,"registry.json")?;
     let previous=read_state(&root,"registry.previous.json")?;
@@ -167,11 +180,20 @@ fn review_at(root:PathBuf,action:Action,value:&str)->Result<Review>{
     // Invalid existing backup must not be silently overwritten.
     if let Some(bytes)=&previous{Registry::decode(Some(bytes))?;}
     let (phrase,detail)=match action{
-        Action::Register=>{
-            let path=Path::new(value);
-            if !path.is_absolute(){bail!("manifest path must be absolute");}
-            let bytes=read_file(path,MAX_MANIFEST,false)?.context("manifest not found")?;
-            let entry:Manifest=serde_json::from_slice(&bytes)?;
+        Action::Register|Action::Community=>{
+            let entry=match action{
+                Action::Register=>{
+                    let path=Path::new(value);
+                    if !path.is_absolute(){bail!("manifest path must be absolute");}
+                    let bytes=read_file(path,MAX_MANIFEST,false)?.context("manifest not found")?;
+                    serde_json::from_slice::<Manifest>(&bytes)?
+                }
+                Action::Community=>{
+                    let (category,repository)=value.split_once(' ').context("expected category and owner/repository")?;
+                    community_manifest(category,repository)?
+                }
+                _=>unreachable!(),
+            };
             entry.validate()?;
             if next.entries.iter().any(|e|e.id==entry.id){bail!("ID already registered; unregister explicitly first");}
             let phrase=format!("register custom:{}",entry.id);
@@ -198,12 +220,13 @@ pub(super) fn run(args:&[String])->Result<()>{
     if nix::unistd::Uid::effective().is_root(){bail!("run as your desktop user, not root");}
     if !io::stdin().is_terminal()||!io::stdout().is_terminal(){bail!("interactive registry review required");}
     let (action,value)=match args{
-        [a,flag,path] if a=="register"&&flag=="--from"=>(Action::Register,path.as_str()),
-        [a,id] if a=="unregister"=>(Action::Remove,id.as_str()),
-        [a] if a=="restore-registry"=>(Action::Restore,""),
-        _=>bail!("use customizations register --from FILE | unregister custom:ID | restore-registry"),
+        [a,flag,path] if a=="register"&&flag=="--from"=>(Action::Register,path.clone()),
+        [a,category,repository] if a=="register-source"=>(Action::Community,format!("{category} {repository}")),
+        [a,id] if a=="unregister"=>(Action::Remove,id.clone()),
+        [a] if a=="restore-registry"=>(Action::Restore,String::new()),
+        _=>bail!("use customizations register --from FILE | register-source CATEGORY OWNER/REPO | unregister custom:ID | restore-registry"),
     };
-    let review=review(action,value)?;
+    let review=review(action,&value)?;
     println!("{}\nNo download, installation, activation or service change.",review.detail());
     print!("Type '{}': ",review.phrase());io::stdout().flush()?;
     let mut typed=String::new();io::stdin().read_line(&mut typed)?;
@@ -240,6 +263,20 @@ mod tests{
         assert!(Registry::decode(read_state(&root,"registry.json").unwrap().as_deref()).unwrap().entries.is_empty());
         review_at(root.clone(),Action::Restore,"").unwrap().commit().unwrap();
         assert_eq!(Registry::decode(read_state(&root,"registry.json").unwrap().as_deref()).unwrap().entries,vec![manifest()]);
+    }
+    #[test]
+    fn community_references_are_stable_and_do_not_claim_compatibility(){
+        let a=community_manifest("cursor","Example/Theme").unwrap();
+        let b=community_manifest("cursor","example/theme").unwrap();
+        assert_eq!(a.id,b.id);
+        assert_ne!(a.id,community_manifest("login","example/theme").unwrap().id);
+        assert!(a.targets.is_empty());
+        assert_eq!(a.source,"https://github.com/Example/Theme");
+        assert!(community_manifest("bad","example/theme").is_err());
+        assert!(community_manifest("cursor","example/../theme").is_err());
+        let dir=tempfile::tempdir().unwrap();let root=dir.path().join("registry");
+        review_at(root.clone(),Action::Community,"cursor Example/Theme").unwrap().commit().unwrap();
+        assert!(review_at(root,Action::Community,"cursor example/theme").is_err());
     }
     #[test]
     fn refuses_symlink_state(){

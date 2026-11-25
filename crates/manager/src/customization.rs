@@ -105,7 +105,7 @@ pub fn run(args:&[String])->Result<()>{
     if args.first().is_some_and(|a|a=="discover"){
         return crate::customization_discovery::run(&args[1..]);
     }
-    if args.first().is_some_and(|a|matches!(a.as_str(),"register"|"unregister"|"restore-registry")){
+    if args.first().is_some_and(|a|matches!(a.as_str(),"register"|"register-source"|"unregister"|"restore-registry")){
         return crate::customization_registry::run(args);
     }
     let json=args.last().is_some_and(|arg|arg=="--json");
