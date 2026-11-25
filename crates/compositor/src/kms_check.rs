@@ -568,7 +568,7 @@ pub fn run_native(
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
                     snapshot=client_damage.capture(&elements,cursor_bounds);
-                    let damage=client_damage.damage(next,output_damage,fallback,snapshot.as_ref());
+                    let damage=client_damage.damage(next,output_damage,fallback,snapshot.as_ref(),&elements);
                     timing.repaint(damage,output_damage);
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
