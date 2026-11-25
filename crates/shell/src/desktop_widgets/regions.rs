@@ -63,7 +63,12 @@ impl RegionPublisher{
         for [x,y,w,h] in &rows{
             if region.union_rectangle(&gtk::cairo::RectangleInt::new(*x,*y,*w,*h)).is_err(){return;}
         }
+        // GDK stages Wayland input regions until the next surface commit.
+        // A static card may not otherwise schedule a render for minutes.
         surface.set_input_region(&region);
+        window.queue_draw();
+        surface.queue_render();
+        if self.last.is_none()&&!rows.is_empty(){println!("Atelier widget card input region published");}
         self.last=Some(rows);
     }
 }
