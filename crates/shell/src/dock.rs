@@ -11,9 +11,8 @@ pub fn build(app:&gtk::Application,appearance:&Appearance){
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier dock").decorated(false).resizable(false).build();
     window.init_layer_shell();window.set_namespace(Some("atelier-dock"));window.set_layer(Layer::Top);
     window.set_anchor(Edge::Bottom,true);window.set_keyboard_mode(KeyboardMode::None);
-    // A bottom-only anchor centers the surface. Reserve space rather than
-    // silently covering maximized windows. No auto-hide/fullscreen inference.
-    window.auto_exclusive_zone_enable();
+    // Auto-hide overlays the workspace, persistent mode reserves space.
+    if appearance.dock_auto_hide{window.set_exclusive_zone(0);}else{window.auto_exclusive_zone_enable();}
     let row=gtk::Box::new(gtk::Orientation::Horizontal,6);row.add_css_class("atelier-dock");
     let launcher=gtk::Button::with_label("Apps");launcher.set_tooltip_text(Some("Open application launcher"));
     let app_ref=app.downgrade();
@@ -64,7 +63,8 @@ pub fn build(app:&gtk::Application,appearance:&Appearance){
     let scroll=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Automatic).vscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_width(true).propagate_natural_height(true).max_content_width(640).child(&row).build();
     window.set_child(Some(&scroll));window.present();
-    if let Some(backend)=backend{watch_tasks(&window,&tasks,backend,snapshot,pins);}
+    if let Some(backend)=backend{watch_tasks(&window,&tasks,backend,snapshot.clone(),pins);}
+    crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen);
 }
 
 

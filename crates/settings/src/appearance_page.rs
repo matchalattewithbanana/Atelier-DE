@@ -8,18 +8,18 @@ use super::description;
 struct Fields{
     accent:gtk::Entry,height:gtk::SpinButton,spacing:gtk::SpinButton,radius:gtk::SpinButton,icons:gtk::SpinButton,
     toggles:Vec<gtk::CheckButton>,
-    dock:gtk::CheckButton,dock_icons:gtk::SpinButton,pins:gtk::TextView,
+    dock:gtk::CheckButton,auto_hide:gtk::CheckButton,hide_fullscreen:gtk::CheckButton,dock_icons:gtk::SpinButton,pins:gtk::TextView,
 }
 impl Fields{
     fn populate(&self,p:&Appearance){
         self.accent.set_text(&p.accent);
-        self.dock.set_active(p.dock_enabled);self.dock_icons.set_value(p.dock_icon_size as f64);self.pins.buffer().set_text(&p.dock_pins.join("\n"));
+        self.dock.set_active(p.dock_enabled);self.auto_hide.set_active(p.dock_auto_hide);self.hide_fullscreen.set_active(p.dock_hide_fullscreen);self.dock_icons.set_value(p.dock_icon_size as f64);self.pins.buffer().set_text(&p.dock_pins.join("\n"));
         for (field,value) in [(&self.height,p.panel_height),(&self.spacing,p.panel_spacing),(&self.radius,p.button_radius),(&self.icons,p.launcher_icon_size)]{field.set_value(value as f64);}
         for (field,value) in self.toggles.iter().zip([p.show_date,p.show_battery,p.show_media,p.show_notifications,p.show_audio,p.show_terminal]){field.set_active(value);}
     }
     fn collect(&self)->Appearance{
         let buffer=self.pins.buffer();let pins=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
-        Appearance{dock_enabled:self.dock.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
+        Appearance{dock_enabled:self.dock.is_active(),dock_auto_hide:self.auto_hide.is_active(),dock_hide_fullscreen:self.hide_fullscreen.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
             dock_pins:pins.lines().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect(),accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
             button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
             show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
@@ -40,8 +40,10 @@ pub fn build(parent:&gtk::Box){
     let icons=spin(parent,"Launcher icon size",16.0,64.0);
     let toggles:Vec<_>=["Show date","Show battery","Show media button","Show notifications button","Show audio button","Show terminal button"].iter().map(|title|{let field=gtk::CheckButton::with_label(title);parent.append(&field);field}).collect();
     parent.append(&super::heading("Application dock"));
-    parent.append(&description("Optional bottom dock in panel mode. Pins launch applications, not running windows. On external desktops disable any overlapping dock yourself."));
+    parent.append(&description("Optional bottom dock in panel mode. Native task support requires a compatible compositor. External desktops use launch-only mode."));
     let dock=gtk::CheckButton::with_label("Enable bottom application dock");parent.append(&dock);
+    let auto_hide=gtk::CheckButton::with_label("Auto-hide dock; reveal at bottom center");parent.append(&auto_hide);
+    let hide_fullscreen=gtk::CheckButton::with_label("Hide dock during native fullscreen");parent.append(&hide_fullscreen);
     let dock_icons=spin(parent,"Dock icon size",16.0,64.0);
     parent.append(&description("Choose an installed application to append, or edit the exact case-sensitive desktop IDs below. Order is left to right."));
     let picker=gtk::ComboBoxText::new();picker.set_hexpand(true);
@@ -67,7 +69,7 @@ pub fn build(parent:&gtk::Box){
             let text=text.trim_end();buffer.set_text(&if text.is_empty(){id.to_string()}else{format!("{text}\n{id}")});
         }
     });}
-    let fields=Fields{accent,height,spacing,radius,icons,toggles,dock,dock_icons,pins};
+    let fields=Fields{accent,height,spacing,radius,icons,toggles,dock,auto_hide,hide_fullscreen,dock_icons,pins};
     let status=description("Load saved appearance to begin.");status.set_selectable(true);
     let reload=gtk::Button::with_label("Load saved appearance");
     let defaults=gtk::Button::with_label("Preview defaults");

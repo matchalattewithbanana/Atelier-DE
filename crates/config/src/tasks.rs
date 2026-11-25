@@ -22,11 +22,13 @@ pub struct TaskSnapshot{
     pub version:u32,
     pub session:[u8;16],
     pub truncated:bool,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub fullscreen_active:Option<bool>,
     pub windows:Vec<TaskWindow>,
 }
 impl TaskSnapshot{
     pub fn validate(&self)->Result<()>{
-        if self.version!=1||self.windows.len()>MAX_WINDOWS{bail!("unsupported task inventory");}
+        if !matches!(self.version,1|2)||self.windows.len()>MAX_WINDOWS||(self.version==2&&self.fullscreen_active.is_none())||(self.version==1&&self.fullscreen_active.is_some()){bail!("unsupported task inventory");}
         let mut ids=std::collections::HashSet::new();
         let mut focused=0;
         for w in &self.windows{
@@ -72,7 +74,9 @@ mod tests{
     #[test]
     fn validates_inventory_and_duplicate_ids(){
         let item=TaskWindow{id:1,app_id:"app".into(),title:"Title".into(),workspace:1,focused:true};
-        let mut s=TaskSnapshot{version:1,session:[1;16],truncated:false,windows:vec![item.clone()]};
-        assert!(s.encode().is_ok());s.windows.push(item);assert!(s.encode().is_err());
+        let mut s=TaskSnapshot{version:1,session:[1;16],truncated:false,fullscreen_active:None,windows:vec![item.clone()]};
+        assert!(s.encode().is_ok());
+        s.version=2;assert!(s.encode().is_err());s.fullscreen_active=Some(true);assert!(s.encode().is_ok());
+        s.windows.push(item);assert!(s.encode().is_err());
     }
 }

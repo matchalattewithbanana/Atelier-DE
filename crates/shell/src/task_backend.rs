@@ -60,7 +60,7 @@ mod tests{
     #[test]
     fn exact_case_sensitive_matching_and_cycle(){
         let window=|id,focused,app_id:&str|TaskWindow{id,focused,app_id:app_id.into(),title:"Title".into(),workspace:1};
-        let state=TaskSnapshot{version:1,session:[1;16],truncated:false,windows:vec![window(1,true,"org.example.App"),window(2,false,"org.example.App.desktop"),window(3,false,"org.example.AppOther")]};
+        let state=TaskSnapshot{version:1,session:[1;16],truncated:false,fullscreen_active:None,windows:vec![window(1,true,"org.example.App"),window(2,false,"org.example.App.desktop"),window(3,false,"org.example.AppOther")]};
         assert_eq!(next_window(&state,"org.example.App.desktop").unwrap().id,2);
         assert!(next_window(&state,"org.example.app.desktop").is_none());
         assert!(!matches_pin("org.example.App.desktop",""));
