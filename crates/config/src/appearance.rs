@@ -33,6 +33,20 @@ impl DesktopWidgets {
     }
 }
 
+/// Logical-pixel spacing for native grid layout.
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct WindowSpacing {
+    pub inner_gap:u32,
+    pub outer_gap:u32,
+}
+impl WindowSpacing {
+    pub fn validate(&self)->Result<()>{
+        if self.inner_gap>48||self.outer_gap>64{bail!("window gaps exceed 48 inner / 64 outer logical pixels");}
+        Ok(())
+    }
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -56,10 +70,11 @@ pub struct Appearance {
     pub wallpaper_path:String,
     pub wallpaper_fit:WallpaperFit,
     pub widgets:DesktopWidgets,
+    pub window_spacing:WindowSpacing,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default()}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default()}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -72,6 +87,7 @@ impl Appearance{
         }
         validate_dock_pins(&self.dock_pins)?;
         self.widgets.validate()?;
+        self.window_spacing.validate()?;
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
     }
@@ -173,6 +189,15 @@ mod tests{
         assert_eq!(Appearance::load(&path).unwrap(),next);
         let previous=a.previous().unwrap();a.save(previous).unwrap();
         assert_eq!(a.previous().unwrap(),next);
+    }
+    #[test]
+    fn window_spacing_round_trip(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let mut next=review.value.clone();next.window_spacing=WindowSpacing{inner_gap:12,outer_gap:20};
+        review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
+        assert!(WindowSpacing{inner_gap:49,outer_gap:0}.validate().is_err());
+        assert_eq!(decode(Some(b"version=1\n")).unwrap().window_spacing,WindowSpacing::default());
     }
     #[test]
     fn widget_preferences_round_trip_and_reject_empty_groups(){
