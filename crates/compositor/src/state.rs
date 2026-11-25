@@ -57,6 +57,7 @@ pub struct Atelier {
     border:atelier_config::WindowBorder,
     shadow:atelier_config::WindowShadow,
     corner_radius:u32,
+    backdrop_blur:u32,
     transparency:atelier_config::Transparency,
     appearance_monitor:Option<atelier_config::AppearanceMonitor>,
     next_task_id: u64,
@@ -90,7 +91,7 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,transparency:appearance.transparency,
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,backdrop_blur:appearance.backdrop_blur,transparency:appearance.transparency,
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
@@ -116,6 +117,11 @@ impl Atelier {
         }
     }
 
+    pub(crate) fn window_backdrop_blur(&self,window:&Window)->u32{
+        if self.focused.as_ref()==Some(window)&&self.placement(window).is_none()&&self.window_alpha(window)<1.0{
+            self.backdrop_blur
+        }else{0}
+    }
     pub(crate) fn window_corner_radius(&self,window:&Window)->u32{
         if self.placement(window).is_some(){0}else{self.corner_radius}
     }
@@ -215,10 +221,10 @@ impl Atelier {
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         let Some(monitor)=self.appearance_monitor.as_mut()else{return false;};
         match monitor.poll(){
-            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.transparency!=self.transparency=>{
+            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.backdrop_blur!=self.backdrop_blur||appearance.transparency!=self.transparency=>{
                 let geometry=appearance.window_spacing!=self.spacing||appearance.window_border.width!=self.border.width;
                 let input_changed=geometry||appearance.window_corner_radius!=self.corner_radius;
-                self.spacing=appearance.window_spacing;self.border=appearance.window_border;self.shadow=appearance.window_shadow;self.corner_radius=appearance.window_corner_radius;self.transparency=appearance.transparency;
+                self.spacing=appearance.window_spacing;self.border=appearance.window_border;self.shadow=appearance.window_shadow;self.corner_radius=appearance.window_corner_radius;self.backdrop_blur=appearance.backdrop_blur;self.transparency=appearance.transparency;
                 if geometry{self.reflow();}self.scene_dirty=true;input_changed
             }
             Err(error)=>{tracing::warn!(?error,"retaining last valid native appearance");false}

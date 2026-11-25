@@ -1,10 +1,11 @@
 //! One front-to-back scene for both GLES backends. Decorations sit behind
 //! their own window, never a global overlay.
 use crate::{state::Atelier,layout::Tile};
+mod backdrop;
 use anyhow::{Context,Result};
 use smithay::{
     backend::renderer::{
-        gles::{GlesRenderer,GlesFrame,GlesError,GlesPixelProgram,Uniform,UniformName,UniformType,UniformValue,element::PixelShaderElement},
+        gles::{GlesRenderer,GlesFrame,GlesError,GlesPixelProgram,Uniform,UniformName,UniformType,UniformValue,element::{PixelShaderElement,TextureShaderElement}},
         utils::CommitCounter,
         element::{render_elements,AsRenderElements,Element,RenderElement,Id,Kind,solid::{SolidColorBuffer,SolidColorRenderElement},surface::{WaylandSurfaceRenderElement,render_elements_from_surface_tree}},
     },
@@ -18,6 +19,7 @@ render_elements!{
     Border=SolidColorRenderElement,
     Shadow=PixelShaderElement,
     Rounded=Masked<WaylandSurfaceRenderElement<GlesRenderer>>,
+    Backdrop=Masked<TextureShaderElement>,
 }
 /// Non-overlapping integer strips approximating a rounded rectangle at
 /// pixel centers. The central band is merged, bounding work by 2*r+1.
@@ -139,6 +141,7 @@ fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u
 #[derive(Default)]
 pub struct SceneShaders{
     shadow:Option<Option<GlesPixelProgram>>,
+    backdrop:backdrop::Backdrop,
 }
 impl SceneShaders{
     fn shadow(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
@@ -161,12 +164,13 @@ fn relative_outline(content:Rectangle<i32,Logical>,strip:Rectangle<i32,Logical>,
     let b=i64::from(border.min(8));
     [(x-b) as f32,(y-b) as f32,(x+i64::from(content.size.w)+b) as f32,(y+i64::from(content.size.h)+b) as f32]
 }
-pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShaders)->Result<Vec<SceneElement>>{
+pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShaders,color:[f32;4])->Result<Vec<SceneElement>>{
     let output=&state.output;
     let bounds=state.space.output_geometry(output).context("unmapped output")?;
     let scale=output.current_scale().fractional_scale();
     let map=layer_map_for_output(output);
     let mut result=Vec::new();
+    let mut blur=None;
     // Render layer roots at their actual arranged origin (bbox can include
     // negative subsurface offsets). Match input routing's layer ordering.
     let mut layers=|levels:&[Layer],result:&mut Vec<SceneElement>,renderer:&mut GlesRenderer|{
@@ -233,8 +237,25 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 }
             }
         }
+        let strength=state.window_backdrop_blur(window);
+        if strength>0&&geometry.overlaps(bounds){
+            blur=Some((result.len(),geometry,radius,strength));
+        }
     }
     layers(&[Layer::Bottom,Layer::Background],&mut result,renderer);
+    // Snapshot only content behind the focused window, not its own
+    // surfaces, decorations or any higher layers. Never sample the target
+    // being written. One optional offscreen pass per frame.
+    if let Some((index,geometry,radius,strength))=blur{
+        if scale==1.0{
+            let size=bounds.size.to_physical(1);
+            if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[index..],strength){
+                let regions=rounded_regions(geometry,radius).into_iter().filter_map(|r|r.intersection(bounds))
+                    .map(|mut r|{r.loc-=bounds.loc;r}).collect();
+                result.insert(index,SceneElement::from(Masked{inner,regions,scale}));
+            }
+        }
+    }else{shaders.backdrop.release();}
     Ok(result)
 }
 #[cfg(test)]
