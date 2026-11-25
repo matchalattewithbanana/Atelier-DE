@@ -352,6 +352,7 @@ fn add_blur(requests:&mut Vec<BlurRequest>,request:BlurRequest){
     if !requests.iter().any(|r|r.target==request.target){requests.push(request);}
 }
 pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShaders,color:[f32;4])->Result<Vec<SceneElement>>{
+    if !state.desktop_visible(){return Ok(Vec::new());}
     let output=&state.output;
     let bounds=state.space.output_geometry(output).context("unmapped output")?;
     let scale=output.current_scale().fractional_scale();

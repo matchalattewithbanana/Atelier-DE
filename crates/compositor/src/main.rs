@@ -14,6 +14,7 @@ mod client_damage;
 #[cfg(feature = "native-session")]
 mod native_cursor;
 mod input_router;
+mod session_lock;
 #[cfg(feature = "native-input")]
 mod native_input;
 mod hardware;

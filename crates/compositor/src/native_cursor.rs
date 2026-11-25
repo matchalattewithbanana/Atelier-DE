@@ -190,7 +190,7 @@ impl NativeCursor {
         theme.next_frame=None;
         let position:Point<i32,Physical>=((state.pointer_position.x as i32).clamp(0,output.w-1),
             (state.pointer_position.y as i32).clamp(0,output.h-1)).into();
-        let image=match state.cursor_status(){
+        let image=if !state.desktop_visible(){Image::Hidden}else{match state.cursor_status(){
             CursorImageStatus::Hidden=>Image::Hidden,
             CursorImageStatus::Surface(surface) if surface.is_alive()=>{
                 let hotspot=with_states(surface,|states|{
@@ -208,7 +208,7 @@ impl NativeCursor {
             }
             CursorImageStatus::Named(icon)=>theme.element(renderer,position,*icon,now).map_or(Image::Default,Image::Theme),
             _=>theme.element(renderer,position,CursorIcon::Default,now).map_or(Image::Default,Image::Theme),
-        };
+        }};
         Self{position,output,image}
     }
     /// A conservative envelope of everything drawn by this cursor.
