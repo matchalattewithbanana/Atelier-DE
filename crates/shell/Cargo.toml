@@ -11,8 +11,8 @@ layer-panel = ["dep:gtk4-layer-shell"]
 serde_json = "1"
 serde.workspace = true
 gtk4-layer-shell = { version = "=0.5.0", optional = true }
-atelier-config.workspace = true
-gtk.workspace = true
+atelier-config = { workspace = true, features = ["wallpaper"] }
+gtk = { workspace = true, features = ["v4_8"] }
 atelier-services = { path = "../services" }
 
 anyhow.workspace = true

@@ -109,6 +109,7 @@ pub fn build(app: &gtk::Application, popups: bool) {
 
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
+    if crate::task_backend::TaskBackend::detect().is_some() { crate::wallpaper_layer::start(app,&window,&appearance); }
     if appearance.dock_enabled { crate::dock::build(app, &appearance); }
     if popups { crate::notification_toast::start(app, &window); }
 }
