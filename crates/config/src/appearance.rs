@@ -47,6 +47,32 @@ impl WindowSpacing {
     }
 }
 
+/// Solid window outlines in native logical pixels. Zero preserves the old layout.
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct WindowBorder {
+    pub width:u32,
+    pub focused:String,
+    pub unfocused:String,
+}
+impl Default for WindowBorder{
+    fn default()->Self{Self{width:0,focused:"#91a8ff".into(),unfocused:"#586174".into()}}
+}
+impl WindowBorder{
+    pub fn validate(&self)->Result<()>{
+        if self.width>8{bail!("border width must be 0–8 logical pixels");}
+        for value in [&self.focused,&self.unfocused]{
+            if value.len()!=7||!value.starts_with('#')||!value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit){bail!("border colors must be #RRGGBB");}
+        }
+        Ok(())
+    }
+    pub fn color(&self,focused:bool)->Result<[f32;4]>{
+        self.validate()?;
+        let value=if focused{&self.focused}else{&self.unfocused};
+        let rgb=u32::from_str_radix(&value[1..],16)?;
+        Ok([((rgb>>16)&255) as f32/255.0,((rgb>>8)&255) as f32/255.0,(rgb&255) as f32/255.0,1.0])
+    }
+}
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -71,10 +97,11 @@ pub struct Appearance {
     pub wallpaper_fit:WallpaperFit,
     pub widgets:DesktopWidgets,
     pub window_spacing:WindowSpacing,
+    pub window_border:WindowBorder,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default()}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default()}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -88,6 +115,7 @@ impl Appearance{
         validate_dock_pins(&self.dock_pins)?;
         self.widgets.validate()?;
         self.window_spacing.validate()?;
+        self.window_border.validate()?;
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
     }
@@ -256,6 +284,18 @@ mod tests{
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
         let target=dir.path().join("other.toml");fs::write(&target,"version=1").unwrap();
         std::os::unix::fs::symlink(&target,&path).unwrap();assert!(Appearance::load(&path).is_err());
+    }
+    #[test]
+    fn border_validation_and_round_trip(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let border=WindowBorder{width:3,focused:"#ff0000".into(),unfocused:"#00FF00".into()};
+        assert_eq!(border.color(true).unwrap(),[1.0,0.0,0.0,1.0]);
+        assert_eq!(border.color(false).unwrap(),[0.0,1.0,0.0,1.0]);
+        let mut next=review.value.clone();next.window_border=border.clone();
+        review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
+        assert!(WindowBorder{width:9,..border.clone()}.validate().is_err());
+        assert!(WindowBorder{focused:"red".into(),..border}.validate().is_err());
     }
     #[test]
     fn window_spacing_round_trip(){

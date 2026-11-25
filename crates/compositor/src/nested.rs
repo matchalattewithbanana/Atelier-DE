@@ -53,7 +53,7 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         let damage = Rectangle::from_size(size);
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
-            let elements = state.space.render_elements_for_output(renderer, &state.output, 1.0).map_err(|error| anyhow::anyhow!("render nested output: {error:?}"))?;
+            let elements = crate::scene::elements(&state,renderer)?;
             let mut frame = renderer.render(&mut target, size, Transform::Flipped180)?;
             frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;

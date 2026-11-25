@@ -54,6 +54,7 @@ pub struct Atelier {
     task_ids: Vec<(Window,u64)>,
     placements:Vec<Placement>,
     spacing:atelier_config::WindowSpacing,
+    border:atelier_config::WindowBorder,
     appearance_monitor:Option<atelier_config::AppearanceMonitor>,
     next_task_id: u64,
     active_workspace: usize,
@@ -79,13 +80,14 @@ impl Atelier {
         output.create_global::<Self>(display);
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
+        let appearance=atelier_config::appearance_path().and_then(|p|atelier_config::Appearance::load(&p)).unwrap_or_else(|error|{tracing::warn!(?error,"using default native appearance");Default::default()});
         Ok(Self {
             display: display.clone(),
             compositor: CompositorState::new::<Self>(display), shell: XdgShellState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:atelier_config::appearance_path().and_then(|p|atelier_config::Appearance::load(&p)).map(|a|a.window_spacing).unwrap_or_else(|error|{tracing::warn!(?error,"using default window spacing");Default::default()}),
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
@@ -111,6 +113,9 @@ impl Atelier {
         }
     }
 
+    pub(crate) fn window_border(&self,window:&Window)->Option<(&atelier_config::WindowBorder,bool)>{
+        (self.border.width>0&&self.placement(window).is_none()).then_some((&self.border,self.focused.as_ref()==Some(window)))
+    }
     fn placement(&self,window:&Window)->Option<&Placement>{
         window.toplevel().and_then(|surface|self.placements.iter().find(|p|&p.surface==surface))
     }
@@ -125,6 +130,7 @@ impl Atelier {
             let normal:Vec<_>=self.windows.iter().filter(|w|self.placement(w).is_none()).cloned().collect();
             if let Some(tiles)=crate::layout::spaced_grid(zone.size.w,zone.size.h,normal.len(),self.spacing){
                 for (window,tile) in normal.iter().zip(tiles){
+                    let tile=crate::scene::inset_tile(tile,self.border.width);
                     self.space.map_element(window.clone(),(zone.loc.x+tile.x,zone.loc.y+tile.y),false);
                     if let Some(surface)=window.toplevel(){
                         surface.with_pending_state(|state|state.size=Some((tile.width,tile.height).into()));
@@ -197,9 +203,10 @@ impl Atelier {
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         let Some(monitor)=self.appearance_monitor.as_mut()else{return false;};
         match monitor.poll(){
-            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing=>{
-                self.spacing=appearance.window_spacing;
-                self.reflow();self.scene_dirty=true;true
+            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border=>{
+                let geometry=appearance.window_spacing!=self.spacing||appearance.window_border.width!=self.border.width;
+                self.spacing=appearance.window_spacing;self.border=appearance.window_border;
+                if geometry{self.reflow();}self.scene_dirty=true;geometry
             }
             Err(error)=>{tracing::warn!(?error,"retaining last valid native appearance");false}
             _=>false

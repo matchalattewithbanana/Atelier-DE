@@ -488,7 +488,7 @@ pub fn run_native(
                     let state = state.borrow();
                     let mut dmabuf = slots[next].0.export().map_err(|error| anyhow::anyhow!("export scanout buffer: {error}"))?;
                     let mut target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
-                    let elements = state.space.render_elements_for_output(&mut renderer, &state.output, 1.0).map_err(|error| anyhow::anyhow!("render native output: {error:?}"))?;
+                    let elements = crate::scene::elements(&state,&mut renderer)?;
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
                     frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;

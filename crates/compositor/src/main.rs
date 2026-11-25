@@ -3,6 +3,7 @@
 mod nested;
 mod state;
 mod layout;
+mod scene;
 mod workspace_control;
 #[cfg(any(feature = "native-session", test))]
 mod frame_queue;
