@@ -4,6 +4,8 @@ mod catalog;
 mod customization;
 mod customization_registry;
 mod customization_discovery;
+#[cfg(feature = "gui")]
+mod cursor_preview;
 mod wizard;
 mod packages;
 mod deploy;

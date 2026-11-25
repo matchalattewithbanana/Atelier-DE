@@ -7,6 +7,7 @@ pub use window_rules::{WindowRule,WindowRules};
 pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
+pub mod cursor_images;
 pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS};
 
 use anyhow::{bail, Context, Result};
