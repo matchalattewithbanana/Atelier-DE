@@ -102,7 +102,6 @@ impl Atelier {
         })
     }
 
-    #[cfg(feature = "native-session")]
     pub fn take_scene_dirty(&mut self) -> bool {
         let changed=self.opening_fades.tick(std::time::Instant::now());
         std::mem::take(&mut self.scene_dirty)||changed
