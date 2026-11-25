@@ -2,6 +2,7 @@
 //! their own window, never a global overlay.
 use crate::{state::Atelier,layout::Tile};
 mod backdrop;
+mod rounded;
 pub(crate) use backdrop::BlurTarget;
 use anyhow::{Context,Result};
 use smithay::{
@@ -20,6 +21,7 @@ render_elements!{
     Border=SolidColorRenderElement,
     Shadow=PixelShaderElement,
     Rounded=Masked<WaylandSurfaceRenderElement<GlesRenderer>>,
+    Composited=TextureShaderElement,
     Backdrop=Masked<TextureShaderElement>,
 }
 /// Non-overlapping integer strips approximating a rounded rectangle at
@@ -153,6 +155,7 @@ fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u
 pub struct SceneShaders{
     shadow:Option<Option<GlesPixelProgram>>,
     backdrop:backdrop::Backdrop,
+    rounded:rounded::RoundedWindows,
 }
 impl SceneShaders{
     fn shadow(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
@@ -211,6 +214,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
     let map=layer_map_for_output(output);
     let mut result=Vec::new();
     let mut blurs=Vec::new();
+    shaders.rounded.begin_frame();
     // Render layer roots at their actual arranged origin (bbox can include
     // negative subsurface offsets). Match input routing's layer ordering.
     let layers=|levels:&[Layer],result:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,blurs:&mut Vec<BlurRequest>|{
@@ -257,9 +261,19 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                     let offset=(window.geometry().loc+offset-popup.geometry().loc).to_physical_precise_round(scale);
                     result.extend(render_elements_from_surface_tree::<GlesRenderer,SceneElement>(renderer,popup.wl_surface(),location+offset,Scale::from(scale),alpha,Kind::Unspecified));
                 }
-                let regions:Vec<_>=rounded_regions(geometry,radius).into_iter().map(|mut r|{r.loc-=bounds.loc;r}).collect();
-                let surfaces=render_elements_from_surface_tree::<GlesRenderer,WaylandSurfaceRenderElement<GlesRenderer>>(renderer,surface,location,Scale::from(scale),alpha,Kind::Unspecified);
-                for inner in surfaces{result.push(SceneElement::from(Masked{inner,regions:regions.clone(),scale}));}
+                let mut area=geometry;area.loc-=bounds.loc;
+                // The optional group pass is bounded and only used on the
+                // supported scale-1 output. Preserve the strip path on failure.
+                let composited=if scale==1.0&&geometry.overlaps(bounds){
+                    shaders.rounded.render(renderer,surface,area,window.geometry().loc,radius,alpha)
+                }else{None};
+                if let Some(element)=composited{
+                    result.push(SceneElement::from(element));
+                }else{
+                    let regions:Vec<_>=rounded_regions(geometry,radius).into_iter().map(|mut r|{r.loc-=bounds.loc;r}).collect();
+                    let surfaces=render_elements_from_surface_tree::<GlesRenderer,WaylandSurfaceRenderElement<GlesRenderer>>(renderer,surface,location,Scale::from(scale),alpha,Kind::Unspecified);
+                    for inner in surfaces{result.push(SceneElement::from(Masked{inner,regions:regions.clone(),scale}));}
+                }
             }
         }else{
             result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),alpha));
@@ -300,6 +314,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
             add_blur(&mut blurs,BlurRequest{target:BlurTarget::Focused,index:result.len(),geometry,radius,strength,explicit_regions:None});
         }
     }
+    shaders.rounded.end_frame();
     layers(&[Layer::Bottom,Layer::Background],&mut result,renderer,&mut blurs);
     // Prepare from the ORIGINAL unblurred scene. Each pass gets a distinct
     // scratch texture; no feedback, overwritten snapshots or recursive blur.
