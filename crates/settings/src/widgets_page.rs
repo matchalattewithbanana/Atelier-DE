@@ -49,7 +49,7 @@ pub fn build(parent:&gtk::Box){
     save.connect_clicked(move|_|{
         let mut state=baseline.borrow_mut();let Some(review)=state.as_mut()else{return;};
         let mut next=review.value.clone();next.widgets=fields.collect();
-        match review.save(next){Ok(true)=>status.set_text("Widgets saved. Restart the native shell to apply."),Ok(false)=>status.set_text("No widget changes."),Err(e)=>status.set_text(&format!("Save failed: {e:#}. Reload before retrying."))}
+        match review.save(next){Ok(true)=>status.set_text("Widgets saved. Updated native shell applies widget preferences live."),Ok(false)=>status.set_text("No widget changes."),Err(e)=>status.set_text(&format!("Save failed: {e:#}. Reload before retrying."))}
     });
     reload.emit_clicked();
 }

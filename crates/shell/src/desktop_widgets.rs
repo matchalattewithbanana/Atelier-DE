@@ -75,8 +75,8 @@ fn system_summary()->String{
     };
     format!("{memory}\n{load}\n{battery}")
 }
-pub fn start(app:&gtk::Application,panel:&gtk::ApplicationWindow,prefs:&DesktopWidgets){
-    if !prefs.enabled||prefs.validate().is_err(){return;}
+pub fn build(app:&gtk::Application,prefs:&DesktopWidgets)->Option<gtk::ApplicationWindow>{
+    if !prefs.enabled||prefs.validate().is_err(){return None;}
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier widgets").decorated(false).resizable(false).build();
     window.init_layer_shell();window.set_namespace(Some("atelier-desktop-widgets"));window.set_layer(Layer::Bottom);
     window.set_anchor(Edge::Top,true);
@@ -102,6 +102,5 @@ pub fn start(app:&gtk::Application,panel:&gtk::ApplicationWindow,prefs:&DesktopW
     let scroll=gtk::ScrolledWindow::builder().child(&group).hscrollbar_policy(gtk::PolicyType::Never).vscrollbar_policy(gtk::PolicyType::Automatic)
         .propagate_natural_height(true).max_content_height(440).build();
     window.set_child(Some(&scroll));
-    let weak=window.downgrade();panel.connect_destroy(move|_|{if let Some(w)=weak.upgrade(){w.close();}});
-    window.present();
+    window.present();Some(window)
 }

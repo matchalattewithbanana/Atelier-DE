@@ -7,7 +7,21 @@ use crate::task_backend::{self,TaskBackend};
 use gtk4_layer_shell::{Edge,KeyboardMode,Layer,LayerShell};
 use crate::applications;
 
-pub fn build(app:&gtk::Application,appearance:&Appearance){
+/// Owns both dock surfaces and polling sources. Dropping it removes the
+/// reservation and stops callbacks before a replacement dock is constructed.
+pub struct Dock {
+    window:gtk::ApplicationWindow,
+    tasks:Option<glib::SourceId>,
+    visibility:crate::dock_visibility::Visibility,
+}
+impl Drop for Dock{
+    fn drop(&mut self){
+        if let Some(source)=self.tasks.take(){source.remove();}
+        self.visibility.stop();
+        self.window.destroy();
+    }
+}
+pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
     let window=gtk::ApplicationWindow::builder().application(app).title("Atelier dock").decorated(false).resizable(false).build();
     window.init_layer_shell();window.set_namespace(Some("atelier-dock"));window.set_layer(Layer::Top);
     window.set_anchor(Edge::Bottom,true);window.set_keyboard_mode(KeyboardMode::None);
@@ -63,16 +77,17 @@ pub fn build(app:&gtk::Application,appearance:&Appearance){
     let scroll=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Automatic).vscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_width(true).propagate_natural_height(true).max_content_width(640).child(&row).build();
     window.set_child(Some(&scroll));window.present();
-    if let Some(backend)=backend{watch_tasks(&window,&tasks,backend,snapshot.clone(),pins);}
-    crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen);
+    let tasks=backend.map(|backend|watch_tasks(&window,&tasks,backend,snapshot.clone(),pins));
+    let visibility=crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen);
+    Dock{window,tasks,visibility}
 }
 
 
 fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<TaskBackend>,
-    snapshot:Rc<RefCell<Option<TaskSnapshot>>>,pins:Vec<(String,String,glib::WeakRef<gtk::Button>)>){
+    snapshot:Rc<RefCell<Option<TaskSnapshot>>>,pins:Vec<(String,String,glib::WeakRef<gtk::Button>)>)->glib::SourceId{
     let window=window.downgrade();let container=container.downgrade();
     let tick=move||{
-        let (Some(_window),Some(container))=(window.upgrade(),container.upgrade())else{return glib::ControlFlow::Break;};
+        let (Some(_window),Some(container))=(window.upgrade(),container.upgrade())else{return glib::ControlFlow::Continue;};
         let next=backend.snapshot().ok();
         if *snapshot.borrow()==next{return glib::ControlFlow::Continue;}
         *snapshot.borrow_mut()=next;
@@ -110,5 +125,5 @@ fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<Tas
     };
     // Run on the GTK thread using only bounded local file reads and a
     // nonblocking datagram on clicks. No child processes or overlapping workers.
-    if tick()==glib::ControlFlow::Continue{glib::timeout_add_local(Duration::from_millis(500),tick);}
+    tick();glib::timeout_add_local(Duration::from_millis(500),tick)
 }
