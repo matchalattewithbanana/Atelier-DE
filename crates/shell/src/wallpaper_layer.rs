@@ -1,20 +1,44 @@
 //! A single owned wallpaper surface and at most one decode worker.
 //! Keep the last successful image until a valid replacement is ready.
-use atelier_config::{WallpaperFit,wallpaper};
+use atelier_config::{Appearance,WallpaperFit,WallpaperSlideshow,wallpaper};
 use gtk::{glib,prelude::*};
 use gtk4_layer_shell::{Edge,KeyboardMode,Layer,LayerShell};
-use std::{path::PathBuf,sync::mpsc};
+use std::{path::PathBuf,sync::mpsc,time::{Duration,Instant}};
 
+/// Session-local clock; configuration edits restart at the first image.
+#[derive(Default)]
+struct Rotation{
+    playlist:Option<WallpaperSlideshow>,
+    index:usize,
+    since:Option<Instant>,
+}
+impl Rotation{
+    fn target(&mut self,prefs:&Appearance,now:Instant,busy:bool)->String{
+        if self.playlist!=prefs.wallpaper_slideshow{
+            self.playlist=prefs.wallpaper_slideshow.clone();self.index=0;self.since=Some(now);
+        }
+        let Some(playlist)=self.playlist.as_ref()else{return prefs.wallpaper_path.clone();};
+        if playlist.images.is_empty(){return prefs.wallpaper_path.clone();}
+        let since=self.since.get_or_insert(now);
+        if !busy&&now.saturating_duration_since(*since)>=Duration::from_secs(u64::from(playlist.interval_minutes)*60){
+            self.index=(self.index+1)%playlist.images.len();*since=now;
+        }
+        playlist.images[self.index].clone()
+    }
+}
 type DecodeResult=anyhow::Result<wallpaper::Raster>;
 #[derive(Default)]
 pub struct WallpaperLayer{
+    rotation:Rotation,
     surface:Option<(gtk::ApplicationWindow,gtk::Picture)>,
     displayed:Option<String>,
     attempted:Option<String>,
     pending:Option<(String,mpsc::Receiver<DecodeResult>)>,
 }
 impl WallpaperLayer{
-    pub fn update(&mut self,app:&gtk::Application,path:&str,fit:WallpaperFit){
+    pub fn update(&mut self,app:&gtk::Application,prefs:&Appearance){
+        let path=self.rotation.target(prefs,Instant::now(),self.pending.is_some());
+        let path=path.as_str();let fit=prefs.wallpaper_fit;
         if path.is_empty(){
             self.clear_surface();self.attempted=None;
         }
@@ -69,4 +93,23 @@ impl WallpaperLayer{
 impl Drop for WallpaperLayer{fn drop(&mut self){self.clear_surface();}}
 fn content_fit(fit:WallpaperFit)->gtk::ContentFit{
     match fit{WallpaperFit::Cover=>gtk::ContentFit::Cover,WallpaperFit::Contain=>gtk::ContentFit::Contain,WallpaperFit::Stretch=>gtk::ContentFit::Fill}
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn rotation_wraps_defers_while_busy_and_resets_on_edit(){
+        let mut prefs=Appearance::default();prefs.wallpaper_path="/static.png".into();
+        let mut r=Rotation::default();let start=Instant::now();
+        assert_eq!(r.target(&prefs,start,false),"/static.png");
+        prefs.wallpaper_slideshow=Some(WallpaperSlideshow{images:vec!["/a.png".into(),"/b.png".into()],interval_minutes:1});
+        assert_eq!(r.target(&prefs,start,false),"/a.png");
+        assert_eq!(r.target(&prefs,start+Duration::from_secs(60),true),"/a.png");
+        assert_eq!(r.target(&prefs,start+Duration::from_secs(61),false),"/b.png");
+        assert_eq!(r.target(&prefs,start+Duration::from_secs(121),false),"/a.png");
+        prefs.wallpaper_slideshow.as_mut().unwrap().images.reverse();
+        assert_eq!(r.target(&prefs,start+Duration::from_secs(122),false),"/b.png");
+        prefs.wallpaper_slideshow=None;assert_eq!(r.target(&prefs,start+Duration::from_secs(123),false),"/static.png");
+    }
 }

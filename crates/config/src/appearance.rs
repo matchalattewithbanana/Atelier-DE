@@ -7,6 +7,28 @@ use std::{fs,io::{Read,Write},os::unix::fs::OpenOptionsExt,path::{Path,PathBuf},
 #[serde(rename_all="kebab-case")]
 pub enum WallpaperFit { #[default] Cover, Contain, Stretch }
 
+/// An ordered local playlist; absent means static wallpaper or solid color.
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WallpaperSlideshow{
+    pub images:Vec<String>,
+    pub interval_minutes:u32,
+}
+impl WallpaperSlideshow{
+    pub fn validate(&self)->Result<()>{
+        if !(1..=1440).contains(&self.interval_minutes)||!(2..=32).contains(&self.images.len()){
+            bail!("slideshow needs 2–32 images and an interval of 1–1440 minutes");
+        }
+        let mut seen=std::collections::HashSet::new();
+        for path in &self.images{
+            if path.len()>1024||!Path::new(path).is_absolute()||path.chars().any(char::is_control)||!seen.insert(path){
+                bail!("slideshow requires unique absolute image paths up to 1024 bytes");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="kebab-case")]
 pub enum WidgetPosition { #[default] TopLeft, TopRight }
@@ -95,6 +117,7 @@ pub struct Appearance {
     pub dock_pins:Vec<String>,
     pub wallpaper_path:String,
     pub wallpaper_fit:WallpaperFit,
+    pub wallpaper_slideshow:Option<WallpaperSlideshow>,
     pub widgets:DesktopWidgets,
     pub window_spacing:WindowSpacing,
     pub window_border:WindowBorder,
@@ -102,7 +125,7 @@ pub struct Appearance {
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -117,6 +140,7 @@ impl Appearance{
         self.widgets.validate()?;
         self.window_spacing.validate()?;
         self.window_border.validate()?;
+        if let Some(slideshow)=&self.wallpaper_slideshow{slideshow.validate()?;}
         if let Some(palette)=&self.shell_palette{palette.validate()?;}
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
@@ -170,7 +194,12 @@ fn decode(bytes:Option<&[u8]>)->Result<Appearance>{
     let value=match bytes{Some(b)=>toml::from_str::<Appearance>(std::str::from_utf8(b)?)?,None=>Appearance::default()};
     value.validate()?;Ok(value)
 }
-fn encoded(value:&Appearance)->Result<Vec<u8>>{value.validate()?;Ok(toml::to_string_pretty(value)?.into_bytes())}
+fn encoded(value:&Appearance)->Result<Vec<u8>>{
+    value.validate()?;
+    let bytes=toml::to_string_pretty(value)?.into_bytes();
+    if bytes.len()>65536{bail!("appearance exceeds 64 KiB after serialization");}
+    Ok(bytes)
+}
 fn replace(path:&Path,bytes:&[u8])->Result<()>{
     let parent=path.parent().context("appearance directory missing")?;
     let mut temp=tempfile::NamedTempFile::new_in(parent)?;
@@ -299,6 +328,16 @@ mod tests{
         review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
         assert!(WindowBorder{width:9,..border.clone()}.validate().is_err());
         assert!(WindowBorder{focused:"red".into(),..border}.validate().is_err());
+    }
+    #[test]
+    fn slideshow_preferences_roundtrip(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let mut next=review.value.clone();
+        next.wallpaper_slideshow=Some(WallpaperSlideshow{images:vec!["/tmp/a.png".into(),"/tmp/b.jpg".into()],interval_minutes:5});
+        review.save(next.clone()).unwrap();assert_eq!(Appearance::load(&path).unwrap(),next);
+        let mut invalid=next.wallpaper_slideshow.unwrap();invalid.images[1]=invalid.images[0].clone();assert!(invalid.validate().is_err());
+        invalid.images[1]="/tmp/c.png".into();invalid.interval_minutes=0;assert!(invalid.validate().is_err());
     }
     #[test]
     fn window_spacing_round_trip(){
