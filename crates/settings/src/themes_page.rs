@@ -30,7 +30,7 @@ struct Fields{
     custom_palette:gtk::CheckButton,surface:gtk::ColorButton,elevated:gtk::ColorButton,text:gtk::ColorButton,muted:gtk::ColorButton,
     radius:gtk::SpinButton,panel_height:gtk::SpinButton,panel_spacing:gtk::SpinButton,launcher_icon:gtk::SpinButton,dock_icon:gtk::SpinButton,
     inner:gtk::SpinButton,outer:gtk::SpinButton,border:gtk::SpinButton,focused:gtk::ColorButton,unfocused:gtk::ColorButton,
-    shadow_radius:gtk::SpinButton,shadow_opacity:gtk::SpinButton,
+    shadow_radius:gtk::SpinButton,shadow_opacity:gtk::SpinButton,corner_radius:gtk::SpinButton,
     active_alpha:gtk::SpinButton,inactive_alpha:gtk::SpinButton,panel_alpha:gtk::SpinButton,dock_alpha:gtk::SpinButton,widget_alpha:gtk::SpinButton,
 }
 impl Fields{
@@ -51,10 +51,11 @@ impl Fields{
         let border=spin(parent,"Border width (0 disables)",0.0,8.0);
         let focused=color(parent,"Focused border");let unfocused=color(parent,"Unfocused border");
         let shadow_radius=spin(parent,"Ambient shadow radius",0.0,32.0);let shadow_opacity=spin(parent,"Shadow opacity (%)",0.0,60.0);
+        let corner_radius=spin(parent,"Window corner radius",0.0,24.0);
         parent.append(&heading("Transparency"));
         let active_alpha=spin(parent,"Focused window opacity (%)",70.0,100.0);let inactive_alpha=spin(parent,"Inactive window opacity (%)",70.0,100.0);
         let panel_alpha=spin(parent,"Panel background opacity (%)",65.0,100.0);let dock_alpha=spin(parent,"Dock background opacity (%)",65.0,100.0);let widget_alpha=spin(parent,"Widget background opacity (%)",65.0,100.0);
-        Self{name,custom_accent,accent,custom_palette,surface,elevated,text,muted,radius,panel_height,panel_spacing,launcher_icon,dock_icon,inner,outer,border,focused,unfocused,shadow_radius,shadow_opacity,active_alpha,inactive_alpha,panel_alpha,dock_alpha,widget_alpha}
+        Self{name,custom_accent,accent,custom_palette,surface,elevated,text,muted,radius,panel_height,panel_spacing,launcher_icon,dock_icon,inner,outer,border,focused,unfocused,shadow_radius,shadow_opacity,corner_radius,active_alpha,inactive_alpha,panel_alpha,dock_alpha,widget_alpha}
     }
     fn populate(&self,t:&PortableTheme){
         self.name.set_text(&t.name);self.custom_accent.set_active(!t.accent.is_empty());
@@ -65,7 +66,7 @@ impl Fields{
         for (button,value) in [(&self.surface,&p.surface),(&self.elevated,&p.elevated),(&self.text,&p.text),(&self.muted,&p.muted)]{set_color(button,value);}
         for (spin,value) in [(&self.radius,t.button_radius),(&self.panel_height,t.panel_height),(&self.panel_spacing,t.panel_spacing),
             (&self.launcher_icon,t.launcher_icon_size),(&self.dock_icon,t.dock_icon_size),(&self.inner,t.window_spacing.inner_gap),
-            (&self.outer,t.window_spacing.outer_gap),(&self.border,t.window_border.width),(&self.shadow_radius,t.window_shadow.radius),(&self.shadow_opacity,t.window_shadow.opacity),(&self.active_alpha,t.transparency.focused),(&self.inactive_alpha,t.transparency.unfocused),(&self.panel_alpha,t.transparency.panel),(&self.dock_alpha,t.transparency.dock),(&self.widget_alpha,t.transparency.widgets)]{spin.set_value(value as f64);}
+            (&self.outer,t.window_spacing.outer_gap),(&self.border,t.window_border.width),(&self.shadow_radius,t.window_shadow.radius),(&self.shadow_opacity,t.window_shadow.opacity),(&self.corner_radius,t.window_corner_radius),(&self.active_alpha,t.transparency.focused),(&self.inactive_alpha,t.transparency.unfocused),(&self.panel_alpha,t.transparency.panel),(&self.dock_alpha,t.transparency.dock),(&self.widget_alpha,t.transparency.widgets)]{spin.set_value(value as f64);}
         set_color(&self.focused,&t.window_border.focused);set_color(&self.unfocused,&t.window_border.unfocused);
         self.sensitivity();
     }
@@ -82,13 +83,13 @@ impl Fields{
             launcher_icon_size:n(&self.launcher_icon),dock_icon_size:n(&self.dock_icon),
             window_spacing:WindowSpacing{inner_gap:n(&self.inner),outer_gap:n(&self.outer)},
             window_border:WindowBorder{width:n(&self.border),focused:hex(&self.focused),unfocused:hex(&self.unfocused)},
-            window_shadow:WindowShadow{radius:n(&self.shadow_radius),opacity:n(&self.shadow_opacity)},transparency:Transparency{focused:n(&self.active_alpha),unfocused:n(&self.inactive_alpha),panel:n(&self.panel_alpha),dock:n(&self.dock_alpha),widgets:n(&self.widget_alpha)}}
+            window_shadow:WindowShadow{radius:n(&self.shadow_radius),opacity:n(&self.shadow_opacity)},window_corner_radius:n(&self.corner_radius),transparency:Transparency{focused:n(&self.active_alpha),unfocused:n(&self.inactive_alpha),panel:n(&self.panel_alpha),dock:n(&self.dock_alpha),widgets:n(&self.widget_alpha)}}
     }
     fn changed(&self,callback:impl Fn()+Clone+'static){
         let cb=callback.clone();self.name.connect_changed(move |_|cb());
         for button in [&self.custom_accent,&self.custom_palette]{let cb=callback.clone();button.connect_toggled(move |_|cb());}
         for button in [&self.accent,&self.surface,&self.elevated,&self.text,&self.muted,&self.focused,&self.unfocused]{let cb=callback.clone();button.connect_color_set(move |_|cb());}
-        for spin in [&self.radius,&self.panel_height,&self.panel_spacing,&self.launcher_icon,&self.dock_icon,&self.inner,&self.outer,&self.border,&self.shadow_radius,&self.shadow_opacity,&self.active_alpha,&self.inactive_alpha,&self.panel_alpha,&self.dock_alpha,&self.widget_alpha]{
+        for spin in [&self.radius,&self.panel_height,&self.panel_spacing,&self.launcher_icon,&self.dock_icon,&self.inner,&self.outer,&self.border,&self.shadow_radius,&self.shadow_opacity,&self.corner_radius,&self.active_alpha,&self.inactive_alpha,&self.panel_alpha,&self.dock_alpha,&self.widget_alpha]{
             let cb=callback.clone();spin.connect_value_changed(move |_|cb());
         }
     }
@@ -123,8 +124,8 @@ fn draw(cr:&gtk::cairo::Context,width:i32,height:i32,t:&PortableTheme){
         if spread>0.0&&t.window_shadow.opacity>0&&h>0.0{
             for band in (1..=4).rev(){let r=spread*band as f64/4.0;cr.set_source_rgba(0.0,0.0,0.0,t.window_shadow.opacity as f64/100.0*(5-band) as f64/16.0);cr.rectangle(x-r,y-r,w+2.0*r,h+2.0*r);let _=cr.fill();}
         }
-        if border>0.0{rect(x,y,w,h,0.0,if i==0{&t.window_border.focused}else{&t.window_border.unfocused});}
-        rect(x+border,y+border,w-2.0*border,h-2.0*border,0.0,&p.elevated);
+        if border>0.0{rect(x,y,w,h,t.window_corner_radius as f64*0.6,if i==0{&t.window_border.focused}else{&t.window_border.unfocused});}
+        rect(x+border,y+border,w-2.0*border,h-2.0*border,t.window_corner_radius as f64*0.6,&p.elevated);
         if h>30.0{
             label(x+8.0+border,y+17.0+border,11.0,if i==0{"Focused window"}else{"Inactive window"},&p.text);
             for j in 0..3{let line_y=y+28.0+j as f64*9.0;if line_y+3.0<bottom-border{rect(x+8.0+border,line_y,(w-20.0-border*2.0)*(1.0-j as f64*0.15),3.0,1.0,&p.muted);}}
