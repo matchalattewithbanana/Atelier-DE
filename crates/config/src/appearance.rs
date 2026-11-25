@@ -170,12 +170,14 @@ pub struct Appearance {
     pub window_shadow:WindowShadow,
     pub window_corner_radius:u32,
     pub backdrop_blur:u32,
+    pub panel_backdrop_blur:u32,
+    pub dock_backdrop_blur:u32,
     pub transparency:Transparency,
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,backdrop_blur:0,transparency:Transparency::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,transparency:Transparency::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -191,7 +193,7 @@ impl Appearance{
         self.window_spacing.validate()?;
         self.window_border.validate()?;
         self.window_shadow.validate()?;
-        if self.backdrop_blur>16{bail!("focused backdrop blur must be 0–16 logical pixels");}
+        if [self.backdrop_blur,self.panel_backdrop_blur,self.dock_backdrop_blur].into_iter().any(|value|value>16){bail!("backdrop blur must be 0–16 logical pixels");}
         if self.window_corner_radius>24{bail!("window corner radius must be 0–24 logical pixels");}
         self.transparency.validate()?;
         if self.wallpaper_blur>24{bail!("wallpaper blur must be 0–24");}
@@ -393,8 +395,10 @@ mod tests{
     }
     #[test]
     fn backdrop_blur_roundtrip(){
-        let a=Appearance{backdrop_blur:12,..Appearance::default()};
+        let a=Appearance{backdrop_blur:12,panel_backdrop_blur:8,dock_backdrop_blur:16,..Appearance::default()};
         assert_eq!(decode(Some(&encoded(&a).unwrap())).unwrap(),a);
+        assert!(Appearance{panel_backdrop_blur:17,..a.clone()}.validate().is_err());
+        assert!(Appearance{dock_backdrop_blur:17,..a.clone()}.validate().is_err());
         assert!(Appearance{backdrop_blur:17,..a}.validate().is_err());
     }
     #[test]
