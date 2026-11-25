@@ -49,16 +49,21 @@ impl RegionPublisher{
         if !window.is_mapped(){self.last=None;return;}
         let area=[0,0,window.width(),window.height()];
         let viewport=scroll.child().and_then(|child|bounds(&child,&window)).and_then(|r|intersect(r,area));
-        let Some(viewport)=viewport else{return;};
         let mut rows=Vec::new();
-        let mut child=group.first_child();
-        while let Some(card)=child{
-            child=card.next_sibling();
-            if let Some(rect)=bounds(&card,&window){rows.extend(rounded(rect,radius,viewport));}
+        if let Some(viewport)=viewport{
+            let mut child=group.first_child();
+            while let Some(card)=child{
+                child=card.next_sibling();
+                if let Some(rect)=bounds(&card,&window){rows.extend(rounded(rect,radius,viewport));}
+            }
+            let scrollbar=scroll.vscrollbar();
+            if let Some(rect)=bounds(&scrollbar,&window).and_then(|r|intersect(r,area)){rows.push(rect);}
         }
-        let scrollbar=scroll.vscrollbar();
-        if let Some(rect)=bounds(&scrollbar,&window).and_then(|r|intersect(r,area)){rows.push(rect);}
-        if rows.len()>256||self.last.as_ref()==Some(&rows){return;}
+        // If allocations disappear during a layout change or exceed the
+        // protocol budget, clear the old region instead of intercepting
+        // clicks in stale card locations. The next valid tick restores it.
+        if rows.len()>256{rows.clear();}
+        if self.last.as_ref()==Some(&rows){return;}
         let region=gtk::cairo::Region::create();
         for [x,y,w,h] in &rows{
             if region.union_rectangle(&gtk::cairo::RectangleInt::new(*x,*y,*w,*h)).is_err(){return;}
@@ -68,7 +73,7 @@ impl RegionPublisher{
         surface.set_input_region(&region);
         window.queue_draw();
         surface.queue_render();
-        if self.last.is_none()&&!rows.is_empty(){println!("Atelier widget card input region published");}
+        if self.last.as_ref().is_none_or(Vec::is_empty)&&!rows.is_empty(){println!("Atelier widget card input region published");}
         self.last=Some(rows);
     }
 }
