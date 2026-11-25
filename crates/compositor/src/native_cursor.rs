@@ -5,7 +5,7 @@ use smithay::{
         element::{Element,Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
         gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture},utils::draw_render_elements,Color32F,Renderer,ImportMem,
     },
-    input::pointer::{CursorImageStatus,CursorImageSurfaceData},
+    input::pointer::{CursorIcon,CursorImageStatus,CursorImageSurfaceData},
     reexports::wayland_server::Resource,
     utils::{Physical,Point,Rectangle,Size,Scale,Transform},
     wayland::compositor::with_states,
@@ -52,9 +52,58 @@ fn cursor_envelope(geometries:impl IntoIterator<Item=Rectangle<i32,Physical>>,ou
     }
 }
 
-/// A single immutable default-theme image, imported once per renderer.
+type ThemeTexture=(GlesTexture,(i32,i32));
+const MAX_CACHED_SHAPES:usize=40;
+
+/// Session-local cache of static images, including unsuccessful lookups.
+/// No repeated file decoding or GPU upload on pointer motion.
 pub struct CursorTheme {
-    texture:Option<(GlesTexture,(i32,i32))>,
+    theme:xcursor::CursorTheme,
+    size:u32,
+    cache:Vec<(CursorIcon,Option<ThemeTexture>)>,
+}
+
+fn shape_names(icon:CursorIcon)->&'static [&'static str]{
+    use CursorIcon::*;
+    match icon{
+        Default=>&["default","left_ptr"],
+        ContextMenu=>&["context-menu","left_ptr"],
+        Help=>&["help","question_arrow"],
+        Pointer=>&["pointer","hand2","hand1"],
+        Progress=>&["progress","left_ptr_watch"],
+        Wait=>&["wait","watch"],
+        Cell=>&["cell","plus"],
+        Crosshair=>&["crosshair","cross"],
+        Text=>&["text","xterm"],
+        VerticalText=>&["vertical-text","xterm"],
+        Alias=>&["alias","link"],
+        Copy=>&["copy","dnd-copy"],
+        Move=>&["move","fleur"],
+        NoDrop=>&["no-drop","dnd-none"],
+        NotAllowed=>&["not-allowed","crossed_circle"],
+        Grab=>&["grab","openhand"],
+        Grabbing=>&["grabbing","closedhand"],
+        EResize=>&["e-resize","right_side"],
+        NResize=>&["n-resize","top_side"],
+        NeResize=>&["ne-resize","top_right_corner"],
+        NwResize=>&["nw-resize","top_left_corner"],
+        SResize=>&["s-resize","bottom_side"],
+        SeResize=>&["se-resize","bottom_right_corner"],
+        SwResize=>&["sw-resize","bottom_left_corner"],
+        WResize=>&["w-resize","left_side"],
+        EwResize=>&["ew-resize","sb_h_double_arrow"],
+        NsResize=>&["ns-resize","sb_v_double_arrow"],
+        NeswResize=>&["nesw-resize","fd_double_arrow"],
+        NwseResize=>&["nwse-resize","bd_double_arrow"],
+        ColResize=>&["col-resize","sb_h_double_arrow"],
+        RowResize=>&["row-resize","sb_v_double_arrow"],
+        AllScroll=>&["all-scroll","fleur"],
+        ZoomIn=>&["zoom-in"],
+        ZoomOut=>&["zoom-out"],
+        DndAsk=>&["dnd-ask","question_arrow"],
+        AllResize=>&["all-resize","fleur"],
+        _=>&["default","left_ptr"],
+    }
 }
 
 fn requested_size(value:Option<&str>)->u32{
@@ -105,35 +154,46 @@ fn bounded_file(data:&[u8])->bool{
 
 impl CursorTheme {
     pub fn load(renderer:&mut GlesRenderer)->Self{
-        use std::io::Read;
         let name=std::env::var("XCURSOR_THEME").ok().filter(|s|!s.is_empty()).unwrap_or_else(||"default".into());
         let size=requested_size(std::env::var("XCURSOR_SIZE").ok().as_deref());
-        let result=(||->anyhow::Result<_>{
-            let theme=xcursor::CursorTheme::load(&name);
-            let path=theme.load_icon("default").or_else(||theme.load_icon("left_ptr"))
-                .ok_or_else(||anyhow::anyhow!("no default cursor in theme"))?;
-            const MAX_FILE:u64=8*1024*1024;
-            let file=std::fs::File::open(path)?;
-            anyhow::ensure!(file.metadata()?.is_file(),"cursor image is not a regular file");
-            let mut data=Vec::new();
-            file.take(MAX_FILE+1).read_to_end(&mut data)?;
-            anyhow::ensure!(data.len() as u64<=MAX_FILE&&bounded_file(&data),"invalid or oversized cursor file");
-            let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
-            let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(size))
-                .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
-            let rgba=file_pixels_to_rgba(&image.pixels_rgba);
-            let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
-                (image.width as i32,image.height as i32).into(),false)?;
-            Ok((texture,(image.xhot as i32,image.yhot as i32)))
-        })();
-        match result{
-            Ok(texture)=>Self{texture:Some(texture)},
-            Err(error)=>{tracing::debug!(?error,"cursor theme unavailable; using default glyph");Self{texture:None}}
-        }
+        let mut theme=Self{theme:xcursor::CursorTheme::load(&name),size,cache:Vec::new()};
+        theme.ensure(renderer,CursorIcon::Default);
+        theme
     }
 
-    fn element(&self,renderer:&GlesRenderer,position:Point<i32,Physical>)->Option<TextureRenderElement<GlesTexture>>{
-        let (texture,hotspot)=self.texture.as_ref()?;
+    fn import(&self,renderer:&mut GlesRenderer,icon:CursorIcon)->anyhow::Result<ThemeTexture>{
+        use std::io::Read;
+        let path=shape_names(icon).iter().find_map(|name|self.theme.load_icon(name))
+            .ok_or_else(||anyhow::anyhow!("cursor shape missing from theme"))?;
+        const MAX_FILE:u64=8*1024*1024;
+        anyhow::ensure!(std::fs::metadata(&path)?.is_file(),"cursor image is not a regular file");
+        let file=std::fs::File::open(path)?;
+        anyhow::ensure!(file.metadata()?.is_file(),"cursor image is not a regular file");
+        let mut data=Vec::new();
+        file.take(MAX_FILE+1).read_to_end(&mut data)?;
+        anyhow::ensure!(data.len() as u64<=MAX_FILE&&bounded_file(&data),"invalid or oversized cursor file");
+        let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
+        let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(self.size))
+            .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
+        let rgba=file_pixels_to_rgba(&image.pixels_rgba);
+        let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
+            (image.width as i32,image.height as i32).into(),false)?;
+        Ok((texture,(image.xhot as i32,image.yhot as i32)))
+    }
+
+    fn ensure(&mut self,renderer:&mut GlesRenderer,icon:CursorIcon){
+        if self.cache.len()>=MAX_CACHED_SHAPES||self.cache.iter().any(|(key,_)|*key==icon){return;}
+        let texture=match self.import(renderer,icon){
+            Ok(texture)=>Some(texture),
+            Err(error)=>{tracing::debug!(?icon,?error,"cursor shape unavailable; using fallback");None}
+        };
+        self.cache.push((icon,texture));
+    }
+
+    fn element(&mut self,renderer:&mut GlesRenderer,position:Point<i32,Physical>,icon:CursorIcon)->Option<TextureRenderElement<GlesTexture>>{
+        self.ensure(renderer,icon);
+        let lookup=|key|self.cache.iter().find(|(cached,_)|*cached==key).and_then(|(_,image)|image.as_ref());
+        let (texture,hotspot)=lookup(icon).or_else(||lookup(CursorIcon::Default))?;
         let origin=hotspot_origin(position,*hotspot);
         Some(TextureRenderElement::from_static_texture(Id::new(),renderer.context_id(),origin.to_f64(),
             texture.clone(),1,Transform::Normal,Some(1.0),None,None,None,Kind::Cursor))
@@ -141,7 +201,7 @@ impl CursorTheme {
 }
 
 impl NativeCursor {
-    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&CursorTheme)->Self{
+    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&mut CursorTheme)->Self{
         let position:Point<i32,Physical>=((state.pointer_position.x as i32).clamp(0,output.w-1),
             (state.pointer_position.y as i32).clamp(0,output.h-1)).into();
         let image=match state.cursor_status(){
@@ -160,7 +220,8 @@ impl NativeCursor {
                     Image::Client(render_elements_from_surface_tree(renderer,surface,origin,Scale::from(1.0),1.0,Kind::Cursor))
                 }
             }
-            _=>theme.element(renderer,position).map_or(Image::Default,Image::Theme),
+            CursorImageStatus::Named(icon)=>theme.element(renderer,position,*icon).map_or(Image::Default,Image::Theme),
+            _=>theme.element(renderer,position,CursorIcon::Default).map_or(Image::Default,Image::Theme),
         };
         Self{position,output,image}
     }
@@ -200,6 +261,13 @@ impl NativeCursor {
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn shape_names_include_legacy_fallbacks(){
+        assert_eq!(shape_names(CursorIcon::Default),&["default","left_ptr"]);
+        assert_eq!(shape_names(CursorIcon::Text),&["text","xterm"]);
+        assert_eq!(shape_names(CursorIcon::Pointer),&["pointer","hand2","hand1"]);
+        assert_eq!(shape_names(CursorIcon::NwseResize),&["nwse-resize","bd_double_arrow"]);
+    }
     #[test]
     fn theme_size_and_channel_order(){
         assert_eq!(requested_size(Some("32")),32);

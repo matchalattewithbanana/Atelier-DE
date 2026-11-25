@@ -515,6 +515,7 @@ pub fn run_native(
 
     let mut server = Display::<Atelier>::new()?;
     let mut compositor = Atelier::new_for_output(&server.handle(), config.layout, "ATELIER-DRM-1", "Native DRM display")?;
+    compositor.enable_cursor_shapes();
     let refresh = route.mode.vrefresh().saturating_mul(1000).max(1000).min(i32::MAX as u32) as i32;
     compositor.resize_with_refresh(i32::from(width), i32::from(height), refresh);
     let state = Rc::new(RefCell::new(compositor));
@@ -535,7 +536,7 @@ pub fn run_native(
     let mut queue = FrameQueue::default();
     let mut client_damage=crate::client_damage::ClientDamage::new();
     let mut shaders=crate::scene::SceneShaders::default();
-    let cursor_theme=crate::native_cursor::CursorTheme::load(&mut renderer);
+    let mut cursor_theme=crate::native_cursor::CursorTheme::load(&mut renderer);
 
     let outcome = (|| -> Result<()> {
         for _ in 0..2 {
@@ -649,7 +650,7 @@ pub fn run_native(
                     let state = state.borrow();
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
-                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&cursor_theme);
+                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&mut cursor_theme);
                     let bounds=cursor.bounds();
                     custom_cursor=bounds.is_none();
                     cursor_bounds=bounds.unwrap_or(output_damage);
