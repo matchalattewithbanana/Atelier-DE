@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
     mkdir -p -- "$test_runtime/config/atelier-de"
-    printf 'version = 1\n[window_shadow]\nradius = 24\nopacity = 40\n' > "$test_runtime/config/atelier-de/appearance.toml"
+    printf 'version = 1\nbackdrop_blur = 8\nwindow_corner_radius = 12\n[transparency]\nfocused = 85\n[window_shadow]\nradius = 24\nopacity = 40\n' > "$test_runtime/config/atelier-de/appearance.toml"
 fi
 env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime/config" LIBGL_ALWAYS_SOFTWARE=1 target/debug/atelier-session --nested --no-shell >"$test_runtime/session.log" 2>&1 &
 supervisor=$!
@@ -96,10 +96,11 @@ if [[ "${ATELIER_TEST_PANEL:-0}" == 1 ]]; then
             cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2
             exit 1
         fi
-        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log"; then break; fi
+        if grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" && grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log"; then break; fi
         sleep 0.1
     done
     grep -q 'Atelier smooth shadow shader ready' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
+    grep -q 'Atelier focused backdrop rendered' "$test_runtime/session.log" || { cat "$test_runtime/launcher.log" "$test_runtime/session.log" >&2; exit 1; }
     sleep 1
     kill -0 "$launcher_pid"
     kill -0 "$supervisor"
