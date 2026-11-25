@@ -13,9 +13,10 @@ native-kms = ["native-gbm", "smithay/backend_drm"]
 
 native-input = ["native-seat", "smithay/backend_libinput"]
 
-native-session = ["native-kms", "native-input"]
+native-session = ["native-kms", "native-input", "dep:xcursor"]
 
 [dependencies]
+xcursor = { version = "0.3.10", optional = true }
 rustix = { version = "1", features = ["fs", "event"], optional = true }
 atelier-config.workspace = true
 anyhow.workspace = true
