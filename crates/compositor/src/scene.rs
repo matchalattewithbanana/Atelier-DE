@@ -387,7 +387,7 @@ mod tests{
         let rects=[(RectangleKind::Add,first),(RectangleKind::Add,second)];
         let regions=widget_regions(&rects,geometry.loc,geometry,bounds).unwrap();
         assert_eq!(regions.len(),2);
-        assert!(!regions.iter().any(|r|r.contains((50,65).into())));
+        assert!(!regions.iter().any(|r|r.contains((50,65))));
         assert!(widget_regions(&[],geometry.loc,geometry,bounds).is_none());
         assert!(widget_regions(&[(RectangleKind::Subtract,first)],geometry.loc,geometry,bounds).is_none());
         assert!(widget_regions(&[(RectangleKind::Add,first),(RectangleKind::Add,first)],geometry.loc,geometry,bounds).is_none());
