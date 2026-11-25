@@ -8,7 +8,7 @@ use smithay::{
         gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture,GlesTexProgram,Uniform,UniformName,UniformType,UniformValue,element::TextureShaderElement},
         utils::{draw_render_elements,CommitCounter},
     }},
-    utils::{Buffer,Physical,Rectangle,Scale,Size,Transform},
+    utils::{Buffer,Logical,Physical,Rectangle,Scale,Size,Transform},
 };
 const MAX_PIXELS:i64=4_194_304;
 const MAX_OUTPUT_EDGE:i32=8192;
@@ -27,6 +27,43 @@ impl SnapshotPlan{
         if i64::from(scratch.w)*i64::from(scratch.h)>MAX_PIXELS{return None;}
         let factor=Scale::from((f64::from(scratch.w)/f64::from(output.w),f64::from(scratch.h)/f64::from(output.h)));
         Some(Self{output,scratch,factor})
+    }
+
+    /// Repaint the bounding box of all visible destination regions, including
+    /// the furthest shader tap and a conservative scratch-space guard for
+    /// linear filtering, rounded geometry and mediump texture coordinates.
+    /// Keep the texture and projection full-sized: stale pixels outside
+    /// this rectangle are never intentionally sampled.
+    fn damage(&self,regions:&[Rectangle<i32,Logical>],strength:u32)->Option<Rectangle<i32,Physical>>{
+        let mut left=i64::from(self.output.w);
+        let mut top=i64::from(self.output.h);
+        let mut right=0i64;
+        let mut bottom=0i64;
+        let mut visible=false;
+        let ow=i64::from(self.output.w);let oh=i64::from(self.output.h);
+        for rect in regions{
+            if rect.size.w<=0||rect.size.h<=0{continue;}
+            let x=i64::from(rect.loc.x);let y=i64::from(rect.loc.y);
+            let l=x.clamp(0,ow);let t=y.clamp(0,oh);
+            let r=(x+i64::from(rect.size.w)).clamp(0,ow);
+            let b=(y+i64::from(rect.size.h)).clamp(0,oh);
+            if l>=r||t>=b{continue;}
+            visible=true;
+            left=left.min(l);top=top.min(t);right=right.max(r);bottom=bottom.max(b);
+        }
+        if !visible{return None;}
+        let radius=i64::from(strength.min(16));
+        // Shader taps extend by at most radius output pixels on each axis.
+        // Integer floor/ceil retains the exact odd-output snapshot scale.
+        // Guard is deliberately wider than the bilinear footprint and
+        // nominal mediump coordinate error at the bounded texture sizes.
+        const GUARD:i64=16;
+        let sw=i64::from(self.scratch.w);let sh=i64::from(self.scratch.h);
+        let l=(((left-radius).max(0)*sw)/ow-GUARD).max(0);
+        let t=(((top-radius).max(0)*sh)/oh-GUARD).max(0);
+        let r=((((right+radius).min(ow)*sw+ow-1)/ow)+GUARD).min(sw);
+        let b=((((bottom+radius).min(oh)*sh+oh-1)/oh)+GUARD).min(sh);
+        Some(Rectangle::new((l as i32,t as i32).into(),((r-l) as i32,(b-t) as i32).into()))
     }
 }
 /// Scale geometry and source mapping through Smithay. Opaque regions are
@@ -79,10 +116,11 @@ impl Backdrop{
     pub fn retain(&mut self,active:[bool;BlurTarget::COUNT]){
         for (slot,keep) in self.scratch.iter_mut().zip(active){if !keep{*slot=None;}}
     }
-    pub fn render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->Option<TextureShaderElement>{
+    pub fn render(&mut self,renderer:&mut GlesRenderer,size:Size<i32,Physical>,color:[f32;4],behind:&[SceneElement],regions:&[Rectangle<i32,Logical>],strength:u32,target:BlurTarget)->Option<TextureShaderElement>{
         if self.disabled||strength==0{return None;}
         let plan=SnapshotPlan::new(size)?;
-        match self.try_render(renderer,plan,color,behind,strength,target){
+        let damage=plan.damage(regions,strength)?;
+        match self.try_render(renderer,plan,damage,color,behind,strength,target){
             Ok(element)=>{
                 if !self.logged[target.slot()]{println!("Atelier {} backdrop rendered",target.name());self.logged[target.slot()]=true;}
                 Some(element)
@@ -93,7 +131,7 @@ impl Backdrop{
             }
         }
     }
-    fn try_render(&mut self,renderer:&mut GlesRenderer,plan:SnapshotPlan,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->anyhow::Result<TextureShaderElement>{
+    fn try_render(&mut self,renderer:&mut GlesRenderer,plan:SnapshotPlan,damage:Rectangle<i32,Physical>,color:[f32;4],behind:&[SceneElement],strength:u32,target:BlurTarget)->anyhow::Result<TextureShaderElement>{
         if self.program.is_none(){
             self.program=Some(renderer.compile_custom_texture_shader(include_str!("backdrop.frag"),&[UniformName::new("step_uv",UniformType::_2f)])?);
         }
@@ -110,9 +148,9 @@ impl Backdrop{
             // Normal orientation for a texture: y=0 corresponds to its
             // first row. Final presentation uses each backend's transform.
             let mut frame=renderer.render(&mut target,size,Transform::Normal)?;
-            let damage=Rectangle::from_size(size);
             frame.clear(Color32F::new(color[0],color[1],color[2],1.0),&[damage])?;
-            let scaled:Vec<_>=behind.iter().map(|element|SnapshotElement::new(element,plan.factor)).collect();
+            let scaled:Vec<_>=behind.iter().map(|element|SnapshotElement::new(element,plan.factor))
+                .filter(|element|element.geometry(Scale::from(1.0)).overlaps(damage)).collect();
             draw_render_elements(&mut frame,1.0,&scaled,&[damage])?;
             let _fence=frame.finish()?;
         }
@@ -135,6 +173,40 @@ mod tests{
     fn distinct_slots_for_each_role(){
         assert_eq!([BlurTarget::Focused.slot(),BlurTarget::Panel.slot(),BlurTarget::Dock.slot(),BlurTarget::Widgets.slot()],[0,1,2,3]);
         assert_eq!(MAX_PIXELS*4*BlurTarget::COUNT as i64,64*1024*1024);
+    }
+    #[test]
+    fn damage_bounds_panel_and_dock_without_changing_projection(){
+        let plan=SnapshotPlan::new((1920,1080).into()).unwrap();
+        let panel=Rectangle::new((0,0).into(),(1920,40).into());
+        let d=plan.damage(&[panel],16).unwrap();
+        assert_eq!(d,Rectangle::new((0,0).into(),(960,44).into()));
+        let dock=Rectangle::new((760,1000).into(),(400,80).into());
+        let d=plan.damage(&[dock],16).unwrap();
+        assert_eq!(d,Rectangle::new((356,476).into(),(248,64).into()));
+        assert_eq!(plan.damage(&[Rectangle::from_size((1920,1080).into())],16),
+            Some(Rectangle::from_size(plan.scratch)));
+    }
+    #[test]
+    fn damage_covers_odd_output_and_disjoint_regions(){
+        let plan=SnapshotPlan::new((1919,1079).into()).unwrap();
+        let regions=[Rectangle::new((101,103).into(),(19,25).into()),
+            Rectangle::new((200,240).into(),(30,50).into())];
+        let d=plan.damage(&regions,16).unwrap();
+        for r in regions{
+            // Verify conservative coverage of the entire farthest-tap
+            // rectangle under the exact anisotropic snapshot ratio.
+            let left=(f64::from(r.loc.x-16)*plan.factor.x).floor() as i32;
+            let top=(f64::from(r.loc.y-16)*plan.factor.y).floor() as i32;
+            let right=(f64::from(r.loc.x+r.size.w+16)*plan.factor.x).ceil() as i32;
+            let bottom=(f64::from(r.loc.y+r.size.h+16)*plan.factor.y).ceil() as i32;
+            let required=Rectangle::new((left,top).into(),(right-left,bottom-top).into());
+            assert_eq!(required.intersection(d),Some(required));
+        }
+        assert!(plan.damage(&[],8).is_none());
+        assert!(plan.damage(&[Rectangle::new((-100,-100).into(),(5,5).into())],8).is_none());
+        let edge=Rectangle::new((1918,1078).into(),(1,1).into());
+        let d=plan.damage(&[edge],16).unwrap();
+        assert_eq!(d.loc.x+d.size.w,960);assert_eq!(d.loc.y+d.size.h,540);
     }
     #[test]
     fn limits_scratch_allocation(){

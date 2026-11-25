@@ -479,7 +479,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 .map(|mut r|{r.loc-=bounds.loc;r}).collect();
             // No visible destination means no scratch allocation or snapshot.
             if regions.is_empty(){continue;}
-            if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],request.strength,request.target){
+            if let Some(inner)=shaders.backdrop.render(renderer,size,color,&result[request.index..],&regions,request.strength,request.target){
                 active[request.target.slot()]=true;
                 insertions.push((request.index,SceneElement::from(Masked{inner,regions:regions.into(),scale})));
             }
