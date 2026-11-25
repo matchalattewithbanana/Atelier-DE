@@ -370,3 +370,7 @@ Manager → Customization catalog → Discover online (GitHub) searches public r
 ### Local cursor previews
 
 Manager → Cursor previews renders six static samples from installed XCursor themes, with size and hotspot information, without applying them. The native compositor and Manager share the bounded pixel decoder. Existing animation scheduling and texture caching remain in the native renderer; previews intentionally display one frame. Actual upstream asset and physical appearance validation remains required.
+
+### SDDM static previews and local preparation
+
+Manager → Login themes inspects local SDDM theme files, displays a bounded static screenshot when available, and can prepare a separate user-owned copy after reviewing its fingerprint. The CLI supports `login-theme inspect --from DIR` and `login-theme prepare --from DIR`. Preparation never executes QML or changes the system login manager. See docs/CUSTOMIZATIONS.md for limits and staging paths.

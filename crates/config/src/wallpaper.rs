@@ -21,10 +21,14 @@ pub fn decode(path:&Path,max_edge:u32)->Result<Raster>{
     let meta=file.metadata()?;
     if !meta.is_file()||meta.len()>MAX_FILE{bail!("wallpaper must be a regular file up to 32 MiB");}
     let mut bytes=Vec::new();file.take(MAX_FILE+1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64>MAX_FILE{bail!("wallpaper exceeds 32 MiB");}
-    let (w,h)=reader(&bytes)?.into_dimensions()?;
+    decode_bytes(&bytes,max_edge)
+}
+/// Decode already reviewed raster bytes without reopening a source path.
+pub fn decode_bytes(bytes:&[u8],max_edge:u32)->Result<Raster>{
+    if bytes.len() as u64>MAX_FILE||!(1..=4096).contains(&max_edge){bail!("invalid or oversized raster request");}
+    let (w,h)=reader(bytes)?.into_dimensions()?;
     if w==0||h==0||w>MAX_EDGE||h>MAX_EDGE||u64::from(w)*u64::from(h)>MAX_PIXELS{bail!("wallpaper exceeds image dimensions limit");}
-    let image=reader(&bytes)?.decode()?;
+    let image=reader(bytes)?.decode()?;
     let image=if w>max_edge||h>max_edge{image.resize(max_edge,max_edge,image::imageops::FilterType::Triangle)}else{image};
     let rgba=image.into_rgba8();let (width,height)=rgba.dimensions();
     Ok(Raster{width,height,rgba:rgba.into_raw()})
