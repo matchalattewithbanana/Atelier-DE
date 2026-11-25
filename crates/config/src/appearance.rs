@@ -194,7 +194,12 @@ fn decode(bytes:Option<&[u8]>)->Result<Appearance>{
     let value=match bytes{Some(b)=>toml::from_str::<Appearance>(std::str::from_utf8(b)?)?,None=>Appearance::default()};
     value.validate()?;Ok(value)
 }
-fn encoded(value:&Appearance)->Result<Vec<u8>>{value.validate()?;Ok(toml::to_string_pretty(value)?.into_bytes())}
+fn encoded(value:&Appearance)->Result<Vec<u8>>{
+    value.validate()?;
+    let bytes=toml::to_string_pretty(value)?.into_bytes();
+    if bytes.len()>65536{bail!("appearance exceeds 64 KiB after serialization");}
+    Ok(bytes)
+}
 fn replace(path:&Path,bytes:&[u8])->Result<()>{
     let parent=path.parent().context("appearance directory missing")?;
     let mut temp=tempfile::NamedTempFile::new_in(parent)?;
