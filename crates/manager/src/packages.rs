@@ -44,7 +44,7 @@ fn candidates(plan: &Plan, providers: &[String]) -> BTreeMap<String, BTreeSet<St
             "audio" => add(&mut result, "optional audio", &["libpulse", "coreutils"]),
             "network" => add(&mut result, "optional network", &["networkmanager", "coreutils"]),
             "bluetooth" => add(&mut result, "optional bluetooth", &["bluez-utils", "coreutils"]),
-            _ => {}
+            id => if let Some(package)=crate::customization::provider_package(id){add(&mut result,id,&[package]);}
         }
     }
     result
@@ -70,6 +70,9 @@ fn cursor_notes(providers:&[String],notes:&mut Vec<String>){
 pub fn preview(plan: &Plan, report: &Report, providers: &[String]) -> PackagePreview {
     let mut notes = Vec::new();
     cursor_notes(providers,&mut notes);
+    if providers.iter().any(|id|crate::customization::provider_package(id).is_some()){
+        notes.push("Customization packages are optional installations only. Atelier does not enable display managers, configure PAM, launch lockers or change desktop themes through this package transaction.".into());
+    }
     if !arch_family(report) {
         notes.push("No package mapping enabled for the detected distribution. Product inventory remains available.".into());
         return PackagePreview { schema: 1, backend: None, candidates: vec![], notes, apply_supported: false };

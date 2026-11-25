@@ -9,6 +9,7 @@ default = []
 gui = ["dep:gtk"]
 
 [dependencies]
+atelier-config.workspace = true
 gtk = { workspace = true, optional = true }
 anyhow.workspace = true
 serde.workspace = true
