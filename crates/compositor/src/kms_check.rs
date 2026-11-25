@@ -450,6 +450,7 @@ pub fn run_native(
     let mut allocator = GbmAllocator::new(device, GbmBufferFlags::SCANOUT | GbmBufferFlags::RENDERING);
     let mut slots = Vec::new();
     let mut queue = FrameQueue::default();
+    let mut client_damage=crate::client_damage::ClientDamage::new();
     let mut shaders=crate::scene::SceneShaders::default();
 
     let outcome = (|| -> Result<()> {
@@ -526,6 +527,7 @@ pub fn run_native(
                     last_route_check = Instant::now();
                     // Periodic conservative baseline, without forcing idle flips.
                     queue.forget_damage_history();
+                    client_damage.reset();
                 }
                 if !running.load(Ordering::SeqCst) {
                     server.flush_clients()?;
@@ -556,14 +558,17 @@ pub fn run_native(
                 let Some(next) = queue.next() else { continue; };
                 let mut timing = metrics.begin_frame();
                 let cursor_bounds;
+                let snapshot;
                 {
                     let state = state.borrow();
                     let x=(state.pointer_position.x as i32).clamp(0,i32::from(width)-1);
                     let y=(state.pointer_position.y as i32).clamp(0,i32::from(height)-1);
                     cursor_bounds=Rectangle::new((x,y).into(),(11.min(i32::from(width)-x),16.min(i32::from(height)-y)).into());
-                    let damage=queue.damage(next,output_damage,cursor_bounds);
+                    let fallback=queue.damage(next,output_damage,cursor_bounds);
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
+                    snapshot=client_damage.capture(&elements,cursor_bounds);
+                    let damage=client_damage.damage(next,output_damage,fallback,snapshot.as_ref());
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
@@ -586,6 +591,7 @@ pub fn run_native(
                 card.atomic_commit(control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT, request)
                     .context("queue native page flip")?;
                 queue.submitted(next,cursor_bounds);
+                client_damage.submitted(next,snapshot);
                 pending_since = Some(Instant::now());
                 metrics.submitted(timing);
             }

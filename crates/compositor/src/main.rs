@@ -9,6 +9,8 @@ mod frame_metrics;
 mod workspace_control;
 #[cfg(any(feature = "native-session", test))]
 mod frame_queue;
+#[cfg(any(feature = "native-session", test))]
+mod client_damage;
 mod input_router;
 #[cfg(feature = "native-input")]
 mod native_input;
