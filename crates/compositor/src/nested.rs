@@ -12,6 +12,13 @@ use smithay::{
 };
 use std::{collections::HashSet, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}};
 
+// Conservative refresh while invalidation coverage is incomplete. This is
+// a maximum idle interval, not a frame rate cap for active clients.
+const IDLE_REFRESH: Duration = Duration::from_millis(250);
+fn needs_frame(dirty: bool, last: Option<Instant>, now: Instant) -> bool {
+    dirty || last.is_none_or(|presented| now.saturating_duration_since(presented) >= IDLE_REFRESH)
+}
+
 pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Result<()> {
     let mut display = Display::<Atelier>::new()?;
     let mut state = Atelier::new(&display.handle(), layout)?;
@@ -28,32 +35,44 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
     let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
     let mut intercepted_keys = HashSet::new();
     let mut shaders=crate::scene::SceneShaders::default();
+    let mut last_present = None;
+    let mut dirty = true;
     while running.load(Ordering::SeqCst) {
         let status = events.dispatch_new_events(|event| {
+            // Input, host resize and expose/redraw notifications may change
+            // the next frame. Treat all backend events conservatively.
+            dirty = true;
             if let WinitEvent::Input(input) = event { handle_input(&mut state, input, &mut intercepted_keys); }
         });
         if let ::winit::platform::pump_events::PumpStatus::Exit(_) = status { return Ok(()); }
 
         while let Some(stream) = listener.accept()? {
+            dirty = true;
             if let Err(error) = display.handle().insert_client(stream, Arc::new(ClientState::default())) {
                 tracing::warn!(?error, "Wayland client connection failed");
             }
         }
         workspace_control.poll(&mut state, started.elapsed().as_millis() as u32)?;
-        display.dispatch_clients(&mut state)?;
+        if display.dispatch_clients(&mut state)? > 0 { dirty = true; }
         state.popups.cleanup();
         state.space.refresh();
-        // Nested still renders continuously; advance/prune the same clock
-        // used by the native damage-driven frame queue.
-        state.take_scene_dirty();
 
         let size = backend.window_size();
         if size.w <= 0 || size.h <= 0 {
+            // Force a full refresh when the host window becomes drawable again.
+            dirty = true;
             display.flush_clients()?;
             std::thread::sleep(Duration::from_millis(16));
             continue;
         }
         state.resize(size.w, size.h);
+        // Consume the scene and animation invalidation after applying resize.
+        dirty |= state.take_scene_dirty();
+        if !needs_frame(dirty, last_present, Instant::now()) {
+            display.flush_clients()?;
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        }
         let damage = Rectangle::from_size(size);
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
@@ -66,9 +85,25 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         state.send_frames(started.elapsed());
         display.flush_clients()?;
         backend.submit(Some(&[damage])).context("present nested framebuffer")?;
-        // Bound idle polling; production backend will use calloop and damage-driven scheduling.
+        last_present = Some(Instant::now());
+        dirty = false;
+        // Keep protocol polling responsive, independently of presentation.
         std::thread::sleep(Duration::from_millis(4));
     }
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nested_redraws_only_on_invalidation_or_idle_refresh() {
+        let now = Instant::now();
+        assert!(needs_frame(false, None, now));
+        assert!(needs_frame(true, Some(now), now));
+        assert!(!needs_frame(false, Some(now), now));
+        assert!(!needs_frame(false, Some(now), now + IDLE_REFRESH - Duration::from_millis(1)));
+        assert!(needs_frame(false, Some(now), now + IDLE_REFRESH));
+        assert!(needs_frame(true, Some(now), now + Duration::from_millis(1)));
+    }
+}
