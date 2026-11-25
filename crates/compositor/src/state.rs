@@ -123,7 +123,7 @@ impl Atelier {
         for window in full{
             self.space.map_element(window.clone(),(0,0),false);
             if let Some(surface)=window.toplevel(){
-                surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some(mode.size);});
+                surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some((mode.size.w,mode.size.h).into());});
                 surface.send_pending_configure();
             }
         }
@@ -139,7 +139,7 @@ impl Atelier {
                     self.parked.iter().flatten().find(|(candidate,_)|candidate==w).map(|(_,p)|*p)));
                 self.fullscreen.push((surface.clone(),location));
             }
-            surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some(mode.size);});
+            surface.with_pending_state(|state|{state.states.set(XdgState::Fullscreen);state.size=Some((mode.size.w,mode.size.h).into());});
         }else{
             let saved=self.fullscreen.iter().position(|(s,_)|s==&surface).and_then(|i|self.fullscreen.remove(i).1);
             surface.with_pending_state(|state|{state.states.unset(XdgState::Fullscreen);state.size=None;});
