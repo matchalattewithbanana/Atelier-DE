@@ -47,8 +47,8 @@ pub fn build(parent:&gtk::Box){
     });}
     parent.append(&presets);parent.append(&cursor_theme);
     let cursor_size=spin(parent,"Pointer size (when a theme is selected)",8.0,128.0);
-    parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Bibata_Cursor/releases","Get Bibata cursors"));
-    parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Google_Cursor/releases","Get GoogleDot cursors"));
+    parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Bibata_Cursor/releases",Some("Get Bibata cursors")));
+    parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Google_Cursor/releases",Some("Get GoogleDot cursors")));
     let height=spin(parent,"Panel minimum height",32.0,80.0);
     let spacing=spin(parent,"Panel item spacing",0.0,24.0);
     let radius=spin(parent,"Button radius",0.0,24.0);
