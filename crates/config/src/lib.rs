@@ -1,11 +1,13 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
 mod appearance;
+mod window_rules;
+pub use window_rules::{WindowRule,WindowRules};
 #[cfg(feature = "wallpaper")]
 pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
-pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency};
+pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

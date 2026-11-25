@@ -43,6 +43,9 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
         display.dispatch_clients(&mut state)?;
         state.popups.cleanup();
         state.space.refresh();
+        // Nested still renders continuously; advance/prune the same clock
+        // used by the native damage-driven frame queue.
+        state.take_scene_dirty();
 
         let size = backend.window_size();
         if size.w <= 0 || size.h <= 0 {

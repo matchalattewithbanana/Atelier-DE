@@ -140,6 +140,24 @@ impl Transparency{
     }
 }
 
+/// Local accessibility preference, deliberately not part of portable themes.
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct Motion{
+    pub opening_fade_ms:u32,
+    pub reduced_motion:bool,
+}
+impl Motion{
+    pub fn validate(&self)->Result<()>{
+        if self.opening_fade_ms!=0&&!(80..=400).contains(&self.opening_fade_ms){bail!("opening fade must be off (0) or 80–400 ms");}
+        Ok(())
+    }
+    pub fn opening_duration(&self)->Duration{
+        Duration::from_millis(if self.reduced_motion{0}else{u64::from(self.opening_fade_ms.min(400))})
+    }
+    pub fn is_default(&self)->bool{*self==Self::default()}
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -169,16 +187,20 @@ pub struct Appearance {
     pub window_border:WindowBorder,
     pub window_shadow:WindowShadow,
     pub window_corner_radius:u32,
+    #[serde(skip_serializing_if="crate::WindowRules::is_empty")]
+    pub window_rules:crate::WindowRules,
     pub backdrop_blur:u32,
     pub panel_backdrop_blur:u32,
     pub dock_backdrop_blur:u32,
     pub widget_backdrop_blur:u32,
     pub transparency:Transparency,
+    #[serde(skip_serializing_if="Motion::is_default")]
+    pub motion:Motion,
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,window_rules:crate::WindowRules::default(),backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),motion:Motion::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -194,9 +216,11 @@ impl Appearance{
         self.window_spacing.validate()?;
         self.window_border.validate()?;
         self.window_shadow.validate()?;
+        self.window_rules.validate()?;
         if [self.backdrop_blur,self.panel_backdrop_blur,self.dock_backdrop_blur,self.widget_backdrop_blur].into_iter().any(|value|value>16){bail!("backdrop blur must be 0–16 logical pixels");}
         if self.window_corner_radius>24{bail!("window corner radius must be 0–24 logical pixels");}
         self.transparency.validate()?;
+        self.motion.validate()?;
         if self.wallpaper_blur>24{bail!("wallpaper blur must be 0–24");}
         if let Some(slideshow)=&self.wallpaper_slideshow{slideshow.validate()?;}
         if let Some(palette)=&self.shell_palette{palette.validate()?;}
@@ -402,6 +426,29 @@ mod tests{
         assert!(Appearance{dock_backdrop_blur:17,..a.clone()}.validate().is_err());
         assert!(Appearance{widget_backdrop_blur:17,..a.clone()}.validate().is_err());
         assert!(Appearance{backdrop_blur:17,..a}.validate().is_err());
+    }
+    #[test]
+    fn application_rules_roundtrip_and_theme_preservation(){
+        let mut a=Appearance::default();
+        assert!(a.window_rules.is_empty());
+        a.window_rules.insert("org.example.Video".into(),crate::WindowRule{focused_opacity:Some(100),corner_radius:Some(0),disable_shadow:true,..Default::default()}).unwrap();
+        let saved=encoded(&a).unwrap();
+        assert_eq!(decode(Some(&saved)).unwrap(),a);
+        let theme=crate::themes::PortableTheme::capture("test".into(),&Appearance::default());
+        assert_eq!(theme.applied(&a).unwrap().window_rules,a.window_rules);
+        assert!(!theme.json().unwrap().contains("org.example.Video"));
+    }
+    #[test]
+    fn motion_is_bounded_local_and_reduced_motion_wins(){
+        let a=Appearance{motion:Motion{opening_fade_ms:180,reduced_motion:true},..Appearance::default()};
+        assert_eq!(a.motion.opening_duration(),Duration::ZERO);
+        assert_eq!(decode(Some(&encoded(&a).unwrap())).unwrap(),a);
+        assert!(Motion{opening_fade_ms:79,reduced_motion:false}.validate().is_err());
+        assert!(Motion{opening_fade_ms:401,reduced_motion:false}.validate().is_err());
+        assert_eq!(Motion{opening_fade_ms:180,reduced_motion:false}.opening_duration(),Duration::from_millis(180));
+        let theme=crate::themes::PortableTheme::capture("motion test".into(),&Appearance::default());
+        assert_eq!(theme.applied(&a).unwrap().motion,a.motion);
+        assert!(!theme.json().unwrap().contains("reduced_motion"));
     }
     #[test]
     fn corner_radius_roundtrip(){
