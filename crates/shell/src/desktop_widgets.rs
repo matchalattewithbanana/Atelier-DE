@@ -128,5 +128,6 @@ pub fn build(app:&gtk::Application,prefs:&DesktopWidgets,radius:u32)->Option<Wid
     {let (publisher,radius)=(Rc::downgrade(&publisher),radius.clone());
     scroll.vadjustment().connect_value_changed(move|_|{if let Some(p)=publisher.upgrade(){p.borrow_mut().publish(radius.get());}});}
     window.present();
+    println!("Atelier widget group requested");
     Some(WidgetGroup{window,radius,source:Some(source)})
 }
