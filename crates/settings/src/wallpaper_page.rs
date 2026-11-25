@@ -16,6 +16,7 @@ pub fn build(parent:&gtk::Box){
     let preview=gtk::Button::with_label("Preview image");form.append(&preview);
     let clear=gtk::Button::with_label("Use solid background");form.append(&clear);
     let reload=gtk::Button::with_label("Reload saved appearance");form.append(&reload);
+    let previous=gtk::Button::with_label("Load previous wallpaper into draft");form.append(&previous);
     let save=gtk::Button::with_label("Save wallpaper");save.add_css_class("suggested-action");form.append(&save);
     let status=description("Images remain in their original location. Native panel mode only.");status.set_selectable(true);parent.append(&status);
     let baseline=Rc::new(RefCell::new(None::<AppearanceReview>));
@@ -37,6 +38,17 @@ pub fn build(parent:&gtk::Box){
         reload.connect_clicked(move|_|match AppearanceReview::load(&path){
             Ok(r)=>{image.set_text(&r.value.wallpaper_path);fit.set_active_id(Some(match r.value.wallpaper_fit{WallpaperFit::Cover=>"cover",WallpaperFit::Contain=>"contain",WallpaperFit::Stretch=>"stretch"}));*baseline.borrow_mut()=Some(r);if let Some(s)=save.upgrade(){s.set_sensitive(true);}status.set_text("Saved wallpaper loaded. Preview or choose another image.");}
             Err(e)=>{baseline.borrow_mut().take();if let Some(s)=save.upgrade(){s.set_sensitive(false);}status.set_text(&format!("Cannot load appearance: {e:#}"));}
+        });
+    }
+    {
+        let (baseline,image,fit,status)=(baseline.clone(),image.downgrade(),fit.downgrade(),status.downgrade());
+        previous.connect_clicked(move|_|{
+            let (Some(image),Some(fit),Some(status))=(image.upgrade(),fit.upgrade(),status.upgrade())else{return;};
+            let state=baseline.borrow();let Some(review)=state.as_ref()else{status.set_text("Reload saved appearance first.");return;};
+            match review.previous(){
+                Ok(value)=>{image.set_text(&value.wallpaper_path);fit.set_active_id(Some(match value.wallpaper_fit{WallpaperFit::Cover=>"cover",WallpaperFit::Contain=>"contain",WallpaperFit::Stretch=>"stretch"}));status.set_text("Previous wallpaper in draft only. Save to restore wallpaper without changing other appearance preferences.");}
+                Err(error)=>status.set_text(&format!("Previous appearance unavailable: {error:#}")),
+            }
         });
     }
     for (button,commit) in [(&preview,false),(&save,true)]{
