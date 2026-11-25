@@ -83,7 +83,8 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
             let elements = crate::scene::elements(&state,renderer,&mut shaders,color)?;
             timing.scene_ready();
             let mut frame = renderer.render(&mut target, size, Transform::Flipped180)?;
-            frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
+            let clear=if state.desktop_visible(){Color32F::new(color[0],color[1],color[2],color[3])}else{Color32F::new(0.0,0.0,0.0,1.0)};
+            frame.clear(clear, &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
             let _sync = frame.finish()?;
         }

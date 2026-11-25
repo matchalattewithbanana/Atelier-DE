@@ -13,6 +13,9 @@ fn clamp_position(x: f64, y: f64, width: i32, height: i32) -> (f64, f64) {
 }
 
 pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, intercepted: &mut HashSet<smithay::input::keyboard::Keycode>) {
+    // No ordinary seat dispatch in a protected state. A future lock-surface
+    // router must own input, including grabs and pressed-key bookkeeping.
+    if !state.desktop_visible(){return;}
     let serial = SERIAL_COUNTER.next_serial();
     match input {
         InputEvent::Keyboard { event } => {

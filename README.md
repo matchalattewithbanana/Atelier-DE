@@ -382,3 +382,7 @@ Preview an installed theme with `atelier-manager login-theme selection-plan NAME
 ### Screen locker diagnostics
 
 Manager → Screen lockers or `atelier-manager locker check --json` inspects current Wayland session-lock/layer-shell advertisements and Swaylock, Hyprlock and GTKLock package/PAM-file prerequisites. It never claims verified locking or launches a locker. Native secure session locking remains pending.
+
+### Native session-lock groundwork (not enabled)
+
+The compositor has an internal owner-bound lifecycle and a protected-frame presentation barrier. Ordinary scene elements, cursor surfaces, input routing, task activation and frame callbacks are excluded in protected states; native protected frames are full opaque-black repaints and carry a generation token until real flip completion. An owner loss retains a protected state. This is unreachable during ordinary sessions: no session-lock global or lock command is exposed. Lock-surface composition/input, selection and grab isolation, owner-aware protocol dispatch and seat-loss handling are still required. Do not use Atelier as a secure locker. See docs/SESSION_LOCK.md for the security contract and acceptance gates.

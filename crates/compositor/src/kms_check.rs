@@ -584,6 +584,7 @@ pub fn run_native(
             let color = config.theme.background();
             let mut metrics = crate::frame_metrics::FrameMetrics::new("native");
             let mut pending_since: Option<Instant> = None;
+            let mut pending_protected_frame=None;
             let mut last_route_check = Instant::now();
             println!("Atelier native ready: WAYLAND_DISPLAY={socket}");
             while running.load(Ordering::SeqCst) || queue.pending().is_some() {
@@ -596,7 +597,8 @@ pub fn run_native(
                 if queue.pending().is_some() && flip_completed(&card, route.crtc)? {
                     queue.completed();
                     metrics.flip_completed(pending_since.take());
-                    let state = state.borrow();
+                    let mut state = state.borrow_mut();
+                    if let Some(frame)=pending_protected_frame.take(){state.protected_frame_presented(frame);}
                     state.send_frames(started.elapsed());
                     state.send_cursor_frames(started.elapsed());
                 }
@@ -647,13 +649,16 @@ pub fn run_native(
                 let cursor_bounds;
                 let snapshot;
                 let custom_cursor;
+                let protected_frame;
                 {
                     let state = state.borrow();
+                    let desktop_visible=state.desktop_visible();
+                    protected_frame=state.protected_frame();
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
                     let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&mut cursor_theme,started.elapsed());
                     let bounds=cursor.bounds();
-                    custom_cursor=bounds.is_none();
+                    custom_cursor=!desktop_visible||bounds.is_none();
                     cursor_bounds=bounds.unwrap_or(output_damage);
                     let damage=if !custom_cursor{
                         let fallback=queue.damage(next,output_damage,cursor_bounds);
@@ -670,7 +675,8 @@ pub fn run_native(
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
-                    frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
+                    let clear=if desktop_visible{Color32F::new(color[0],color[1],color[2],color[3])}else{Color32F::new(0.0,0.0,0.0,1.0)};
+                    frame.clear(clear, &[damage])?;
                     draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
                     cursor.draw(&mut frame,damage)?;
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
@@ -685,6 +691,7 @@ pub fn run_native(
                 queue.submitted(next,cursor_bounds);
                 if custom_cursor{queue.forget_damage_history();}
                 client_damage.submitted(next,snapshot);
+                pending_protected_frame=protected_frame;
                 pending_since = Some(Instant::now());
                 metrics.submitted(timing);
             }

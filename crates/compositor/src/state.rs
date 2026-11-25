@@ -75,6 +75,7 @@ pub struct Atelier {
     parked: [Vec<(Window, Point<i32, Logical>)>; 4],
     focused: Option<Window>,
     scene_dirty: bool,
+    session_lock: crate::session_lock::Lifecycle<smithay::reexports::wayland_server::backend::ObjectId>,
 }
 
 impl Atelier {
@@ -105,7 +106,7 @@ impl Atelier {
             cursor_shapes:None,
             seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cursor_status: CursorImageStatus::default_named(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,window_rules:appearance.window_rules,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,widget_backdrop_blur:appearance.widget_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
-            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
+            active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true, session_lock:Default::default(),
         })
     }
 
@@ -121,12 +122,26 @@ impl Atelier {
 
     #[cfg(feature = "native-session")]
     pub(crate) fn send_cursor_frames(&self,time:std::time::Duration){
+        if !self.desktop_visible(){return;}
         use smithay::reexports::wayland_server::Resource;
         if let CursorImageStatus::Surface(surface)=&self.cursor_status{
             if surface.is_alive(){
                 smithay::desktop::utils::send_frames_surface_tree(surface,&self.output,time,None,|_,_|Some(self.output.clone()));
             }
         }
+    }
+
+    /// Ordinary desktop surfaces must never be used as a lock fallback.
+    pub(crate) fn desktop_visible(&self)->bool{self.session_lock.desktop_visible()}
+    #[cfg(feature = "native-session")]
+    pub(crate) fn protected_frame(&self)->Option<crate::session_lock::ProtectedFrame>{
+        self.session_lock.protected_frame()
+    }
+    #[cfg(feature = "native-session")]
+    pub(crate) fn protected_frame_presented(&mut self,frame:crate::session_lock::ProtectedFrame){
+        // The eventual protocol adapter must send the locked event only
+        // when this transition succeeds. No protocol is currently exposed.
+        if self.session_lock.presented(frame){self.scene_dirty=true;}
     }
 
     pub fn take_scene_dirty(&mut self) -> bool {
@@ -262,6 +277,7 @@ impl Atelier {
     }
 
     pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
+        if !self.desktop_visible(){return;}
         self.scene_dirty = true;
         self.focused_layer = None;
         self.focused = window.clone();
@@ -303,6 +319,7 @@ impl Atelier {
     pub fn active_workspace(&self) -> usize { self.active_workspace }
 
     pub fn select_workspace(&mut self, target: usize, move_focused: bool, serial: Serial) {
+        if !self.desktop_visible(){return;}
         if target >= self.parked.len() || target == self.active_workspace { return; }
         if self.seat.get_pointer().is_some_and(|p| p.is_grabbed()) || self.seat.get_keyboard().is_some_and(|k| k.is_grabbed()) { return; }
         if move_focused {
@@ -339,6 +356,7 @@ impl Atelier {
 
     pub fn task_inventory(&self,session:[u8;16])->atelier_config::tasks::TaskSnapshot{
         use atelier_config::tasks::{TaskSnapshot,TaskWindow,MAX_WINDOWS};
+        if !self.desktop_visible(){return TaskSnapshot{version:2,session,truncated:false,windows:vec![],fullscreen_active:Some(false)};}
         let mut windows=Vec::new();
         let mut truncated=false;
         let all=self.windows.iter().map(|w|(self.active_workspace,w)).chain(
@@ -363,6 +381,7 @@ impl Atelier {
     }
 
     pub fn activate_task(&mut self,id:u64,serial:Serial)->bool{
+        if !self.desktop_visible(){return false;}
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         // Do not steal keyboard focus from an interactive layer surface.
         if self.focused_layer.is_some(){return false;}
@@ -418,6 +437,7 @@ impl Atelier {
         None
     }
     pub fn surface_under_pointer(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if !self.desktop_visible(){return None;}
         if let Some((_, surface, origin)) = self.layer_hit(&[Layer::Overlay, Layer::Top]) {
             return Some((surface, origin));
         }
@@ -426,6 +446,7 @@ impl Atelier {
     }
 
     pub fn focus_pointer(&mut self, serial: Serial) {
+        if !self.desktop_visible(){return;}
         let layer = self.layer_hit(&[Layer::Overlay, Layer::Top]).map(|(layer, _, _)| layer);
         let window = self.window_hit().map(|(window,_,_)|window);
         let layer = layer.or_else(|| if window.is_none() { self.layer_hit(&[Layer::Bottom, Layer::Background]).map(|(layer, _, _)| layer) } else { None });
@@ -443,6 +464,7 @@ impl Atelier {
     }
 
     pub fn send_frames(&self, time: std::time::Duration) {
+        if !self.desktop_visible(){return;}
         for window in self.space.elements_for_output(&self.output) {
             window.send_frame(&self.output, time, None, |_, _| Some(self.output.clone()));
         }
