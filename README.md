@@ -362,3 +362,7 @@ Atelier Manager → Customization catalog provides read-only discovery and prepa
 ### Custom component registry
 
 Manager → Custom components supports reviewed import, unregister and previous-registry restoration for metadata-only JSON manifests. Entries appear in the unified customization catalog under the custom: namespace. See [manifest example and boundaries](docs/CUSTOMIZATIONS.md#custom-component-references). Declared target compatibility is not verified. No source is downloaded or executed during registration.
+
+### Community customization discovery
+
+Manager → Customization catalog → Discover online (GitHub) searches public repositories by category topic and optional bounded keywords. The first page lists source, description, stars and advertised license metadata, with explicit unverified compatibility/trust status. CLI: `atelier-manager customizations discover login "dark"`. Requires the existing GitHub CLI transport; no automatic installation, source checkout or registration. Local browsing works independently. See docs/CUSTOMIZATIONS.md.

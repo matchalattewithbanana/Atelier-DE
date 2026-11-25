@@ -102,6 +102,9 @@ pub fn filtered(category:Option<&str>)->Result<Vec<Item>>{
 }
 pub fn preview(id:&str)->Result<Item>{filtered(None)?.into_iter().find(|item|item.id==id).context("unknown customization ID")}
 pub fn run(args:&[String])->Result<()>{
+    if args.first().is_some_and(|a|a=="discover"){
+        return crate::customization_discovery::run(&args[1..]);
+    }
     if args.first().is_some_and(|a|matches!(a.as_str(),"register"|"unregister"|"restore-registry")){
         return crate::customization_registry::run(args);
     }
