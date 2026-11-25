@@ -23,3 +23,24 @@ Atelier should expose a single browse and review experience without a universal 
 - Future privileged transactions need an exact change plan, root-owned destinations, previous config backups, ownership checks, and tested restoration before activation.
 
 Current implementation: shared typed category catalog, read-only local detection and source review, CLI JSON, GTK browse/filter and optional package choices. Cursor preparation and native preference selection use #115. Online community discovery for other categories, custom registry, trusted SDDM preview, per-target activation and recovery adapters remain separate future work. Do not represent catalog entries as installed or functional without validation.
+
+## Custom component references
+
+Import a local JSON manifest through Manager → Custom components or `atelier-manager customizations register --from /absolute/manifest.json`. Example:
+
+```json
+{
+  "schema": 1,
+  "id": "my-cursor",
+  "name": "My cursor",
+  "category": "cursor",
+  "source": "https://example.org/cursors",
+  "targets": [
+    "atelier",
+    "hyprland"
+  ],
+  "description": "My preferred custom cursor pack"
+}
+```
+
+Allowed categories match the catalog; target IDs are atelier, mango, hyprland, niri and other. Targets are declarations, not proof of compatibility. A custom ID is namespaced as custom:my-cursor and cannot shadow curated entries. The source is only an HTTPS reference or absolute local path, not an executable command. Import, unregister and restore require explicit review; no download, installation or activation occurs. `atelier-manager customizations unregister custom:my-cursor` removes the reference only. `atelier-manager customizations restore-registry` restores the previous metadata registry. The registry lives under the user's config directory, with bounded reads, advisory locking, stale-review checks and a previous-version backup. A registered rice/shell still requires its dedicated trusted workflow.

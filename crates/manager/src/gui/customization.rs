@@ -29,7 +29,7 @@ pub(super) fn build()->gtk::Box{
             match result{
                 Ok(items)=>{
                     status.set_text("Read-only review. Use Installation for optional packages; use Settings or the dedicated appearance pages for selection.");
-                    display_rows(&list,items.into_iter().map(|i|Row::new(i.name,i.readiness,format!("{} · {} · {}\nSource: {}\nPrepare: {}\nSelect: {}\n{}",i.id,i.category,i.scope,i.source,i.install,i.activation,i.detail))).collect());
+                    display_rows(&list,items.into_iter().map(|i|Row::new(i.name,i.readiness,format!("{} · {} · {}\nSource: {}\nDeclared targets: {}\nPrepare: {}\nSelect: {}\n{}",i.id,i.category,i.scope,i.source,if i.declared_targets.is_empty(){"not specified".into()}else{i.declared_targets.join(", ")},i.install,i.activation,i.detail))).collect());
                 }
                 Err(error)=>{status.set_text("Catalog unavailable.");display_rows(&list,vec![Row::error("Customization catalog",error)]);}
             }
