@@ -98,10 +98,11 @@ pub struct Appearance {
     pub widgets:DesktopWidgets,
     pub window_spacing:WindowSpacing,
     pub window_border:WindowBorder,
+    pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default()}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -116,6 +117,7 @@ impl Appearance{
         self.widgets.validate()?;
         self.window_spacing.validate()?;
         self.window_border.validate()?;
+        if let Some(palette)=&self.shell_palette{palette.validate()?;}
         if !self.wallpaper_path.is_empty() && (!Path::new(&self.wallpaper_path).is_absolute() || self.wallpaper_path.len()>4096 || self.wallpaper_path.chars().any(char::is_control)) { bail!("wallpaper requires an absolute local image path"); }
         Ok(())
     }
@@ -133,6 +135,7 @@ impl Appearance{
         css.push_str(&format!(" .atelier-dock {{ background: @theme_bg_color; border-radius: {}px; padding: 6px; }} .atelier-dock button {{ border-radius: {}px; padding: 6px; }}",self.button_radius,self.button_radius));
         css.push_str(" .atelier-dock button.running-task { border-bottom: 2px solid currentColor; }");
         css.push_str(&format!(" .atelier-widget {{ background: @theme_bg_color; border-radius: {}px; padding: 12px; }} .atelier-widget button {{ border-radius: {}px; }}",self.button_radius,self.button_radius));
+        if let Some(palette)=&self.shell_palette{css.push_str(&palette.css()?);}
         Ok(css)
     }
 }
@@ -151,7 +154,7 @@ pub fn validate_dock_pins(pins:&[String])->Result<()>{
     Ok(())
 }
 pub fn appearance_path()->Result<PathBuf>{Ok(crate::config_path()?.with_file_name("appearance.toml"))}
-fn read(path:&Path)->Result<Option<Vec<u8>>>{
+pub(crate) fn read(path:&Path)->Result<Option<Vec<u8>>>{
     let file=match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path){
         Ok(file)=>file,
         Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(None),

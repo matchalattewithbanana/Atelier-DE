@@ -4,6 +4,7 @@ mod appearance;
 #[cfg(feature = "wallpaper")]
 pub mod wallpaper;
 pub mod tasks;
+pub mod themes;
 pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder};
 
 use anyhow::{bail, Context, Result};

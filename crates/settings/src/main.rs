@@ -4,6 +4,7 @@ mod appearance_page;
 mod wallpaper_page;
 mod widgets_page;
 mod windows_page;
+mod themes_page;
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
@@ -14,9 +15,9 @@ fn main() -> glib::ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let initial_page = match args.as_slice() {
         [] => "appearance".to_owned(),
-        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "wallpaper", "widgets", "windows", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
+        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "wallpaper", "widgets", "windows", "themes", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("atelier-settings [--page appearance|shell-appearance|wallpaper|widgets|windows|applications|session|network|power|audio|bluetooth|about]");
+            println!("atelier-settings [--page appearance|shell-appearance|wallpaper|widgets|windows|themes|applications|session|network|power|audio|bluetooth|about]");
             return glib::ExitCode::SUCCESS;
         }
         _ => { eprintln!("Invalid settings page; use --help."); return glib::ExitCode::FAILURE; }
@@ -126,6 +127,8 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     widgets_page::build(&widgets);
     let windows=page(&stack,"windows","Window appearance","Native grid spacing. Saved changes apply to a running updated compositor.");
     windows_page::build(&windows);
+    let themes=page(&stack,"themes","Native themes","Generate, preview, import and export portable native visual preferences.");
+    themes_page::build(&themes);
 
     let applications = page(&stack, "applications", "Applications", "Set the terminal that Atelier launches. This only changes Atelier's own preference.");
     let terminal_label = gtk::Label::new(Some("Terminal executable (name or absolute path)"));
