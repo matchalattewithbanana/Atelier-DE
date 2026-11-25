@@ -1,6 +1,8 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
 mod appearance;
+mod window_rules;
+pub use window_rules::{WindowRule,WindowRules};
 #[cfg(feature = "wallpaper")]
 pub mod wallpaper;
 pub mod tasks;
