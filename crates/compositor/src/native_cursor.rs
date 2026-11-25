@@ -1,11 +1,12 @@
 //! Native software cursor composition, separate from desktop scene effects.
 use crate::state::Atelier;
+use std::time::Duration;
 use smithay::{
     backend::renderer::{
-        element::{Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
+        element::{Element,Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
         gles::{GlesRenderer,GlesFrame,GlesError,GlesTexture},utils::draw_render_elements,Color32F,Renderer,ImportMem,
     },
-    input::pointer::{CursorImageStatus,CursorImageSurfaceData},
+    input::pointer::{CursorIcon,CursorImageStatus,CursorImageSurfaceData},
     reexports::wayland_server::Resource,
     utils::{Physical,Point,Rectangle,Size,Scale,Transform},
     wayland::compositor::with_states,
@@ -28,9 +29,105 @@ fn hotspot_origin(position:Point<i32,Physical>,hotspot:(i32,i32))->Point<i32,Phy
     (position.x.saturating_sub(hotspot.0),position.y.saturating_sub(hotspot.1)).into()
 }
 
-/// A single immutable default-theme image, imported once per renderer.
+// Use i64 while clipping client-provided geometry so extreme coordinates
+// cannot overflow the envelope calculation. Never guess invalid extents.
+fn cursor_envelope(geometries:impl IntoIterator<Item=Rectangle<i32,Physical>>,output:Rectangle<i32,Physical>,
+    empty:Rectangle<i32,Physical>)->Option<Rectangle<i32,Physical>>{
+    let mut bounds:Option<(i64,i64,i64,i64)>=None;
+    let ox=i64::from(output.loc.x);let oy=i64::from(output.loc.y);
+    let or=ox+i64::from(output.size.w);let ob=oy+i64::from(output.size.h);
+    for rect in geometries{
+        if rect.size.w<0||rect.size.h<0{return None;}
+        if rect.size.w==0||rect.size.h==0{continue;}
+        let x=i64::from(rect.loc.x);let y=i64::from(rect.loc.y);
+        let l=x.max(ox);let t=y.max(oy);
+        let r=(x+i64::from(rect.size.w)).min(or);
+        let b=(y+i64::from(rect.size.h)).min(ob);
+        if l>=r||t>=b{continue;}
+        bounds=Some(match bounds{Some((a,c,d,e))=>(a.min(l),c.min(t),d.max(r),e.max(b)),None=>(l,t,r,b)});
+    }
+    match bounds{
+        Some((l,t,r,b))=>Some(Rectangle::new((i32::try_from(l).ok()?,i32::try_from(t).ok()?).into(),
+            (i32::try_from(r-l).ok()?,i32::try_from(b-t).ok()?).into())),
+        None=>Some(empty),
+    }
+}
+
+type ThemeTexture=(GlesTexture,(i32,i32));
+const MAX_CACHED_SHAPES:usize=40;
+const MAX_FRAMES:usize=32;
+const MAX_SHAPE_BYTES:usize=512*1024;
+
+struct ThemeFrame{
+    image:ThemeTexture,
+    delay_ms:u32,
+}
+
+// Select one frame and the time until its next boundary. Static assets
+// never schedule a wakeup. Clamp zero/very short delays at import.
+fn animation_frame(delays:impl Iterator<Item=u32>+Clone,elapsed:Duration)->(usize,Option<Duration>){
+    if delays.clone().count()<=1{return (0,None);}
+    let total:u64=delays.clone().map(u64::from).sum();
+    if total==0{return (0,None);}
+    let mut offset=(elapsed.as_millis()%u128::from(total)) as u64;
+    for (index,delay) in delays.enumerate(){
+        let delay=u64::from(delay);
+        if offset<delay{return (index,Some(Duration::from_millis(delay-offset)));}
+        offset-=delay;
+    }
+    (0,None)
+}
+
+/// Session-local cache of bounded images, including unsuccessful lookups.
+/// No repeated decoding or GPU upload on pointer motion.
 pub struct CursorTheme {
-    texture:Option<(GlesTexture,(i32,i32))>,
+    theme:xcursor::CursorTheme,
+    size:u32,
+    cache:Vec<(CursorIcon,Option<Vec<ThemeFrame>>)>,
+    next_frame:Option<Duration>,
+}
+
+fn shape_names(icon:CursorIcon)->&'static [&'static str]{
+    use CursorIcon::*;
+    match icon{
+        Default=>&["default","left_ptr"],
+        ContextMenu=>&["context-menu","left_ptr"],
+        Help=>&["help","question_arrow"],
+        Pointer=>&["pointer","hand2","hand1"],
+        Progress=>&["progress","left_ptr_watch"],
+        Wait=>&["wait","watch"],
+        Cell=>&["cell","plus"],
+        Crosshair=>&["crosshair","cross"],
+        Text=>&["text","xterm"],
+        VerticalText=>&["vertical-text","xterm"],
+        Alias=>&["alias","link"],
+        Copy=>&["copy","dnd-copy"],
+        Move=>&["move","fleur"],
+        NoDrop=>&["no-drop","dnd-none"],
+        NotAllowed=>&["not-allowed","crossed_circle"],
+        Grab=>&["grab","openhand"],
+        Grabbing=>&["grabbing","closedhand"],
+        EResize=>&["e-resize","right_side"],
+        NResize=>&["n-resize","top_side"],
+        NeResize=>&["ne-resize","top_right_corner"],
+        NwResize=>&["nw-resize","top_left_corner"],
+        SResize=>&["s-resize","bottom_side"],
+        SeResize=>&["se-resize","bottom_right_corner"],
+        SwResize=>&["sw-resize","bottom_left_corner"],
+        WResize=>&["w-resize","left_side"],
+        EwResize=>&["ew-resize","sb_h_double_arrow"],
+        NsResize=>&["ns-resize","sb_v_double_arrow"],
+        NeswResize=>&["nesw-resize","fd_double_arrow"],
+        NwseResize=>&["nwse-resize","bd_double_arrow"],
+        ColResize=>&["col-resize","sb_h_double_arrow"],
+        RowResize=>&["row-resize","sb_v_double_arrow"],
+        AllScroll=>&["all-scroll","fleur"],
+        ZoomIn=>&["zoom-in"],
+        ZoomOut=>&["zoom-out"],
+        DndAsk=>&["dnd-ask","question_arrow"],
+        AllResize=>&["all-resize","fleur"],
+        _=>&["default","left_ptr"],
+    }
 }
 
 fn requested_size(value:Option<&str>)->u32{
@@ -81,46 +178,76 @@ fn bounded_file(data:&[u8])->bool{
 
 impl CursorTheme {
     pub fn load(renderer:&mut GlesRenderer)->Self{
-        use std::io::Read;
         let prefs=atelier_config::appearance_path().and_then(|path|atelier_config::Appearance::load(&path)).map(|a|a.cursor).unwrap_or_default();
         let (name,size)=if prefs.theme.is_empty(){
             (std::env::var("XCURSOR_THEME").ok().filter(|s|!s.is_empty()).unwrap_or_else(||"default".into()),
                 requested_size(std::env::var("XCURSOR_SIZE").ok().as_deref()))
         }else{(prefs.theme,prefs.size)};
-        let result=(||->anyhow::Result<_>{
-            let theme=xcursor::CursorTheme::load(&name);
-            let path=theme.load_icon("default").or_else(||theme.load_icon("left_ptr"))
-                .ok_or_else(||anyhow::anyhow!("no default cursor in theme"))?;
-            const MAX_FILE:u64=8*1024*1024;
-            let file=std::fs::File::open(path)?;
-            anyhow::ensure!(file.metadata()?.is_file(),"cursor image is not a regular file");
-            let mut data=Vec::new();
-            file.take(MAX_FILE+1).read_to_end(&mut data)?;
-            anyhow::ensure!(data.len() as u64<=MAX_FILE&&bounded_file(&data),"invalid or oversized cursor file");
-            let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
-            let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(size))
-                .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
-            let rgba=file_pixels_to_rgba(&image.pixels_rgba);
-            let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
-                (image.width as i32,image.height as i32).into(),false)?;
-            Ok((texture,(image.xhot as i32,image.yhot as i32)))
-        })();
-        match result{
-            Ok(texture)=>Self{texture:Some(texture)},
-            Err(error)=>{tracing::debug!(?error,"cursor theme unavailable; using default glyph");Self{texture:None}}
-        }
+        let mut theme=Self{theme:xcursor::CursorTheme::load(&name),size,cache:Vec::new(),next_frame:None};
+        theme.ensure(renderer,CursorIcon::Default);
+        theme
     }
 
-    fn element(&self,renderer:&GlesRenderer,position:Point<i32,Physical>)->Option<TextureRenderElement<GlesTexture>>{
-        let (texture,hotspot)=self.texture.as_ref()?;
+    fn import(&self,renderer:&mut GlesRenderer,icon:CursorIcon)->anyhow::Result<Vec<ThemeFrame>>{
+        use std::io::Read;
+        let path=shape_names(icon).iter().find_map(|name|self.theme.load_icon(name))
+            .ok_or_else(||anyhow::anyhow!("cursor shape missing from theme"))?;
+        const MAX_FILE:u64=8*1024*1024;
+        anyhow::ensure!(std::fs::metadata(&path)?.is_file(),"cursor image is not a regular file");
+        let file=std::fs::File::open(path)?;
+        anyhow::ensure!(file.metadata()?.is_file(),"cursor image is not a regular file");
+        let mut data=Vec::new();
+        file.take(MAX_FILE+1).read_to_end(&mut data)?;
+        anyhow::ensure!(data.len() as u64<=MAX_FILE&&bounded_file(&data),"invalid or oversized cursor file");
+        let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
+        let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(self.size))
+            .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
+        // Animate only complete, bounded nominal-size groups. An oversized
+        // sequence uses its first selected image rather than truncating a loop.
+        let mut frames:Vec<_>=images.iter().filter(|candidate|valid_image(candidate)&&candidate.size==image.size).collect();
+        let bytes=frames.iter().map(|frame|frame.pixels_rgba.len()).sum::<usize>();
+        if frames.len()>MAX_FRAMES||bytes>MAX_SHAPE_BYTES{frames=vec![image];}
+        let mut imported=Vec::with_capacity(frames.len());
+        for frame in frames{
+            let rgba=file_pixels_to_rgba(&frame.pixels_rgba);
+            let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
+                (frame.width as i32,frame.height as i32).into(),false)?;
+            imported.push(ThemeFrame{image:(texture,(frame.xhot as i32,frame.yhot as i32)),delay_ms:frame.delay.clamp(16,60_000)});
+        }
+        Ok(imported)
+    }
+
+    fn ensure(&mut self,renderer:&mut GlesRenderer,icon:CursorIcon){
+        if self.cache.len()>=MAX_CACHED_SHAPES||self.cache.iter().any(|(key,_)|*key==icon){return;}
+        let texture=match self.import(renderer,icon){
+            Ok(texture)=>Some(texture),
+            Err(error)=>{tracing::debug!(?icon,?error,"cursor shape unavailable; using fallback");None}
+        };
+        self.cache.push((icon,texture));
+    }
+
+    pub fn animation_due(&self,now:Duration)->bool{
+        self.next_frame.is_some_and(|deadline|now>=deadline)
+    }
+
+    fn element(&mut self,renderer:&mut GlesRenderer,position:Point<i32,Physical>,icon:CursorIcon,now:Duration)->Option<TextureRenderElement<GlesTexture>>{
+        self.ensure(renderer,icon);
+        let lookup=|key|self.cache.iter().find(|(cached,_)|*cached==key).and_then(|(_,image)|image.as_ref());
+        let frames=lookup(icon).or_else(||lookup(CursorIcon::Default))?;
+        let (index,remaining)=animation_frame(frames.iter().map(|frame|frame.delay_ms),now);
+        let (texture,hotspot)=&frames.get(index)?.image;
         let origin=hotspot_origin(position,*hotspot);
-        Some(TextureRenderElement::from_static_texture(Id::new(),renderer.context_id(),origin.to_f64(),
-            texture.clone(),1,Transform::Normal,Some(1.0),None,None,None,Kind::Cursor))
+        let element=TextureRenderElement::from_static_texture(Id::new(),renderer.context_id(),origin.to_f64(),
+            texture.clone(),1,Transform::Normal,Some(1.0),None,None,None,Kind::Cursor);
+        self.next_frame=remaining.and_then(|delay|now.checked_add(delay));
+        Some(element)
     }
 }
 
 impl NativeCursor {
-    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&CursorTheme)->Self{
+    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&mut CursorTheme,now:Duration)->Self{
+        // Hidden and client-owned images must not inherit a theme timer.
+        theme.next_frame=None;
         let position:Point<i32,Physical>=((state.pointer_position.x as i32).clamp(0,output.w-1),
             (state.pointer_position.y as i32).clamp(0,output.h-1)).into();
         let image=match state.cursor_status(){
@@ -139,13 +266,27 @@ impl NativeCursor {
                     Image::Client(render_elements_from_surface_tree(renderer,surface,origin,Scale::from(1.0),1.0,Kind::Cursor))
                 }
             }
-            _=>theme.element(renderer,position).map_or(Image::Default,Image::Theme),
+            CursorImageStatus::Named(icon)=>theme.element(renderer,position,*icon,now).map_or(Image::Default,Image::Theme),
+            _=>theme.element(renderer,position,CursorIcon::Default,now).map_or(Image::Default,Image::Theme),
         };
         Self{position,output,image}
     }
-    pub fn is_default(&self)->bool{matches!(&self.image,Image::Default)}
-    pub fn default_bounds(&self)->Rectangle<i32,Physical>{
-        Rectangle::new(self.position,(11.min(self.output.w-self.position.x),16.min(self.output.h-self.position.y)).into())
+    /// A conservative envelope of everything drawn by this cursor.
+    /// None means uncertain geometry and forces a full-frame baseline.
+    /// Hidden or fully offscreen cursors retain a single harmless pixel
+    /// at the pointer position to keep the existing damage API nonempty.
+    pub fn bounds(&self)->Option<Rectangle<i32,Physical>>{
+        let output=Rectangle::from_size(self.output);
+        let empty=Rectangle::new(self.position,(1,1).into());
+        match &self.image{
+            Image::Default=>Some(Rectangle::new(self.position,(11.min(self.output.w-self.position.x),16.min(self.output.h-self.position.y)).into())),
+            Image::Hidden=>Some(empty),
+            Image::Theme(element)=>cursor_envelope(std::iter::once(element.geometry(Scale::from(1.0))),output,empty),
+            Image::Client(elements)=>{
+                if elements.len()>64{return None;}
+                cursor_envelope(elements.iter().map(|e|e.geometry(Scale::from(1.0))),output,empty)
+            }
+        }
     }
     pub fn draw(&self,frame:&mut GlesFrame<'_,'_>,output:Rectangle<i32,Physical>)->Result<(),GlesError>{
         match &self.image{
@@ -167,6 +308,26 @@ impl NativeCursor {
 mod tests{
     use super::*;
     #[test]
+    fn animation_boundaries_and_wraparound(){
+        let delays=[30,70,100];
+        let select=|ms|animation_frame(delays.into_iter(),Duration::from_millis(ms));
+        assert_eq!(select(0),(0,Some(Duration::from_millis(30))));
+        assert_eq!(select(29),(0,Some(Duration::from_millis(1))));
+        assert_eq!(select(30),(1,Some(Duration::from_millis(70))));
+        assert_eq!(select(100),(2,Some(Duration::from_millis(100))));
+        assert_eq!(select(200),(0,Some(Duration::from_millis(30))));
+        assert_eq!(select(430),(1,Some(Duration::from_millis(70))));
+        assert_eq!(animation_frame([16].into_iter(),Duration::from_secs(10)),(0,None));
+        assert_eq!(animation_frame([0,0].into_iter(),Duration::ZERO),(0,None));
+    }
+    #[test]
+    fn shape_names_include_legacy_fallbacks(){
+        assert_eq!(shape_names(CursorIcon::Default),&["default","left_ptr"]);
+        assert_eq!(shape_names(CursorIcon::Text),&["text","xterm"]);
+        assert_eq!(shape_names(CursorIcon::Pointer),&["pointer","hand2","hand1"]);
+        assert_eq!(shape_names(CursorIcon::NwseResize),&["nwse-resize","bd_double_arrow"]);
+    }
+    #[test]
     fn theme_size_and_channel_order(){
         assert_eq!(requested_size(Some("32")),32);
         for value in ["0","9999","-1","abc"]{assert_eq!(requested_size(Some(value)),24);}
@@ -174,6 +335,17 @@ mod tests{
         assert_eq!(file_pixels_to_rgba(&[20,40,60,128,0,0,0,0]),vec![60,40,20,128,0,0,0,0]);
         assert!(!bounded_file(&[]));
         assert!(!bounded_file(b"Xcur"));
+    }
+    #[test]
+    fn cursor_envelope_clips_and_unions_surface_trees(){
+        let rect=|x,y,w,h|Rectangle::new((x,y).into(),(w,h).into());
+        let output=rect(0,0,100,80);
+        let empty=rect(20,20,1,1);
+        assert_eq!(cursor_envelope([rect(-10,-5,30,25),rect(18,15,12,12)],output,empty),Some(rect(0,0,30,27)));
+        assert_eq!(cursor_envelope([rect(90,70,32,32)],output,empty),Some(rect(90,70,10,10)));
+        assert_eq!(cursor_envelope([rect(i32::MAX-1,0,100,10)],output,empty),Some(empty));
+        assert_eq!(cursor_envelope([],output,empty),Some(empty));
+        assert_eq!(cursor_envelope([rect(0,0,0,10)],output,empty),Some(empty));
     }
     #[test]
     fn cursor_hotspots_allow_offscreen_origins_without_integer_overflow(){
