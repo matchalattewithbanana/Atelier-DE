@@ -1,7 +1,7 @@
 //! Common input routing for nested and native backends.
 use crate::state::Atelier;
 use smithay::{
-    backend::input::{AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent, KeyboardKeyEvent, KeyState, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent},
+    backend::input::{AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, Event, InputBackend, InputEvent, KeyboardKeyEvent, KeyState, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent},
     input::{keyboard::FilterResult, pointer::{AxisFrame, ButtonEvent, MotionEvent}},
     utils::SERIAL_COUNTER,
 };
@@ -12,27 +12,19 @@ fn clamp_position(x: f64, y: f64, width: i32, height: i32) -> (f64, f64) {
      y.clamp(0.0, f64::from(height.saturating_sub(1).max(0))))
 }
 
-pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, intercepted: &mut HashSet<smithay::input::keyboard::Keycode>) {
-    state.sync_input_boundary(0);
-    let desktop=state.desktop_input_ready();
-    let blocked=state.input_gate.waiting()||(!desktop&&state.desktop_visible());
-    let serial = SERIAL_COUNTER.next_serial();
-    match input {
-        InputEvent::Keyboard { event } => {
-            let code=event.key_code();let pressed=event.state()==KeyState::Pressed;
+fn forward_key(state:&mut Atelier,code:smithay::input::keyboard::Keycode,key_state:KeyState,time:u32,desktop:bool,blocked:bool,intercepted:&mut HashSet<smithay::input::keyboard::Keycode>){
+    let serial=SERIAL_COUNTER.next_serial();let pressed=key_state==KeyState::Pressed;
             if let Some(keyboard) = state.seat.get_keyboard() {
                 if !desktop{
                     // No shortcuts in the lock domain. When quarantined the
                     // seat has no focus; update its physical/XKB state anyway.
                     intercepted.clear();
                     if blocked{keyboard.set_focus(state,None,serial);}
-                    keyboard.input(state,code,event.state(),serial,event.time_msec(),|_,_,_|FilterResult::<()>::Forward);
-                    state.input_gate.key(code,pressed);
-                    state.sync_input_boundary(event.time_msec());
+                    keyboard.input(state,code,key_state,serial,time,|_,_,_|FilterResult::<()>::Forward);
                     return;
                 }
                 let grabbed = keyboard.is_grabbed();
-                let action = keyboard.input(state, code, event.state(), serial, event.time_msec(), |_, modifiers, key| {
+                let action = keyboard.input(state, code, key_state, serial, time, |_, modifiers, key| {
                     if !pressed && intercepted.remove(&code) { return FilterResult::Intercept(None); }
                     if pressed && intercepted.contains(&code) { return FilterResult::Intercept(None); }
                     if !pressed || grabbed || !modifiers.alt || modifiers.ctrl || modifiers.logo { return FilterResult::Forward; }
@@ -47,12 +39,50 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
                     if let Some(pointer) = state.seat.get_pointer() {
                         let focus = state.input_pointer_focus();
                         let location = state.pointer_position;
-                        pointer.motion(state, focus, &MotionEvent { location, serial, time: event.time_msec() });
+                        pointer.motion(state, focus, &MotionEvent { location, serial, time: time });
                         pointer.frame(state);
                     }
                 }
             }
-            state.input_gate.key(code,pressed);
+}
+
+fn forward_button(state:&mut Atelier,button:u32,button_state:ButtonState,time:u32,desktop:bool,blocked:bool){
+    let serial=SERIAL_COUNTER.next_serial();let pressed=button_state==ButtonState::Pressed;
+            if let Some(pointer) = state.seat.get_pointer() {
+                if desktop&&pressed&&!pointer.is_grabbed(){state.focus_pointer(serial);}
+                if blocked{
+                    let location=state.pointer_position;
+                    let motion=MotionEvent{location,serial,time:time};
+                    pointer.motion(state,None,&motion);
+                    if pointer.is_grabbed(){pointer.unset_grab(state,serial,time);}
+                    pointer.motion(state,None,&motion);
+                }
+                pointer.button(state,&ButtonEvent{button,state:button_state,serial,time:time});
+                if blocked&&pointer.is_grabbed(){pointer.unset_grab(state,serial,time);}
+                pointer.frame(state);
+            }
+}
+
+pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, intercepted: &mut HashSet<smithay::input::keyboard::Keycode>) {
+    state.sync_input_boundary(0);
+    let desktop=state.desktop_input_ready();
+    let blocked=state.input_gate.waiting()||(!desktop&&state.desktop_visible());
+    let serial = SERIAL_COUNTER.next_serial();
+    match input {
+        InputEvent::DeviceRemoved {device}=>{
+            // Clear the removed device's controls using the pre-removal
+            // focus domain. No new focus until all releases reach the seat.
+            let (keys,buttons)=state.input_gate.remove_device(&device.id());
+            for key in keys{forward_key(state,key,KeyState::Released,0,desktop,blocked,intercepted);}
+            for button in buttons{forward_button(state,button,ButtonState::Released,0,desktop,blocked);}
+            state.sync_input_boundary(0);
+        }
+        InputEvent::Keyboard { event } => {
+            let code=event.key_code();let value=event.state();let time=event.time_msec();
+            if state.input_gate.key(&event.device().id(),code,value==KeyState::Pressed){
+                forward_key(state,code,value,time,desktop,blocked,intercepted);
+            }
+            state.sync_input_boundary(time);
         }
         InputEvent::PointerMotion { event } => {
             if let Some(region) = state.space.output_geometry(&state.output) {
@@ -83,22 +113,11 @@ pub fn handle_input<B: InputBackend>(state: &mut Atelier, input: InputEvent<B>, 
             }
         }
         InputEvent::PointerButton { event } => {
-            let button=event.button_code();let pressed=event.state()==ButtonState::Pressed;
-            if let Some(pointer) = state.seat.get_pointer() {
-                if desktop&&pressed&&!pointer.is_grabbed(){state.focus_pointer(serial);}
-                if blocked{
-                    let location=state.pointer_position;
-                    let motion=MotionEvent{location,serial,time:event.time_msec()};
-                    pointer.motion(state,None,&motion);
-                    if pointer.is_grabbed(){pointer.unset_grab(state,serial,event.time_msec());}
-                    pointer.motion(state,None,&motion);
-                }
-                pointer.button(state,&ButtonEvent{button,state:event.state(),serial,time:event.time_msec()});
-                if blocked&&pointer.is_grabbed(){pointer.unset_grab(state,serial,event.time_msec());}
-                pointer.frame(state);
+            let code=event.button_code();let value=event.state();let time=event.time_msec();
+            if state.input_gate.button(&event.device().id(),code,value==ButtonState::Pressed){
+                forward_button(state,code,value,time,desktop,blocked);
             }
-            state.input_gate.button(button,pressed);
-            state.sync_input_boundary(event.time_msec());
+            state.sync_input_boundary(time);
         }
         InputEvent::PointerAxis { event } => {
             if blocked{return;}
