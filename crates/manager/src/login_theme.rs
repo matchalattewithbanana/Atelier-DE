@@ -112,6 +112,11 @@ fn inspect_snapshot(source:&Path,s:&Snapshot)->Result<Review>{
     Ok(Review{info:Inspection{source:source.into(),name,fingerprint:s.fingerprint(),bytes:s.total,
         files:s.files.keys().cloned().collect(),main:m.main,screenshot,preview_status},preview})
 }
+/// Validate the declared local QML entry point without decoding any raster.
+/// Used by the administrator selection review only after ownership checks.
+pub(super) fn validate_entrypoint(source:&Path)->Result<()>{
+    Snapshot::read(source)?.metadata()?;Ok(())
+}
 pub(super) fn inspect(source:&Path)->Result<Review>{
     // Normalize the source once. Refuse symlink at the selected root.
     if !source.is_absolute()||!fs::symlink_metadata(source)?.is_dir(){bail!("choose an absolute real SDDM theme directory");}

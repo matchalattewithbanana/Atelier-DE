@@ -14,18 +14,19 @@ const LOCK:&str=".atelier-theme.lock";
 const MAX_CONFIG:usize=64*1024;
 const MAX_JOURNAL:usize=256*1024;
 
-struct Location{dropins:PathBuf,legacy:PathBuf,themes:PathBuf,owner:u32}
+struct Location{dropins:PathBuf,legacy:PathBuf,themes:PathBuf,owner:u32,anchor:PathBuf}
 impl Location{
     fn system()->Self{Self{dropins:"/etc/sddm.conf.d".into(),legacy:"/etc/sddm.conf".into(),
-        themes:"/usr/share/sddm/themes".into(),owner:0}}
+        themes:"/usr/share/sddm/themes".into(),owner:0,anchor:"/".into()}}
     fn safe(&self,m:&fs::Metadata)->bool{m.uid()==self.owner&&m.permissions().mode()&0o022==0}
     fn directory(&self,path:&Path)->Result<()>{
         let m=fs::symlink_metadata(path)?;
         if !m.is_dir()||!self.safe(&m){bail!("unsafe directory: {}",path.display());}Ok(())
     }
     fn protected_ancestors(&self,path:&Path)->Result<()>{
-        if !path.is_absolute(){bail!("expected absolute system path");}
-        for p in path.ancestors(){self.directory(p)?;}Ok(())
+        if !path.is_absolute()||!path.starts_with(&self.anchor){bail!("path outside protected system boundary");}
+        for p in path.ancestors(){self.directory(p)?;if p==self.anchor{return Ok(());}}
+        bail!("missing protected boundary")
     }
     fn read(&self,path:&Path,limit:usize)->Result<Option<Vec<u8>>>{
         let f=match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path){
@@ -55,7 +56,7 @@ impl Location{
             if index>=512{bail!("too many SDDM drop-ins");}
             let entry=entry?;
             let name=entry.file_name();let name=name.to_str().context("non-UTF8 SDDM drop-in name")?;
-            if name.ends_with(".conf")&&name!=MANAGED&&name>MANAGED{
+            if name.to_ascii_lowercase().ends_with(".conf")&&name!=MANAGED&&(name>MANAGED||name.to_ascii_lowercase().as_str()>=MANAGED){
                 bail!("later SDDM drop-in may override Atelier: {name}");
             }
         }
@@ -67,14 +68,17 @@ impl Location{
         let path=self.themes.join(name);self.directory(&path)?;
         let mut count=0;let mut total=0;let mut hash=Sha256::new();
         self.hash_tree(&path,&path,0,&mut count,&mut total,&mut hash)?;
-        // Existing local inspection also checks the declared QML entry point.
-        let review=crate::login_theme::inspect(&path)?;
-        hash.update(review.info.fingerprint.as_bytes());
+        // Validate only entry-point metadata as administrator. Screenshot
+        // decoding belongs exclusively to the unprivileged preview workflow.
+        crate::login_theme::validate_entrypoint(&path)?;
         Ok(format!("{:x}",hash.finalize()))
     }
     fn hash_tree(&self,base:&Path,dir:&Path,depth:usize,count:&mut usize,total:&mut usize,hash:&mut Sha256)->Result<()>{
         if depth>8{bail!("theme nesting exceeds limit");}
         self.directory(dir)?;
+        if fs::symlink_metadata(dir)?.permissions().mode()&0o005!=0o005{
+            bail!("theme directory is not accessible to the greeter");
+        }
         let mut entries=Vec::new();
         for entry in fs::read_dir(dir)?{
             *count+=1;if *count>512{bail!("theme exceeds entry limit");}
@@ -244,7 +248,7 @@ pub(super) fn run(args:&[String])->Result<()>{
 mod tests{
     use super::*;
     fn fixture(root:&Path)->Location{
-        let loc=Location{dropins:root.join("conf.d"),legacy:root.join("sddm.conf"),themes:root.join("themes"),owner:nix::unistd::Uid::effective().as_raw()};
+        let loc=Location{dropins:root.join("conf.d"),legacy:root.join("sddm.conf"),themes:root.join("themes"),owner:nix::unistd::Uid::effective().as_raw(),anchor:root.into()};
         fs::create_dir(&loc.dropins).unwrap();fs::create_dir(&loc.themes).unwrap();loc
     }
     #[test]
@@ -265,6 +269,39 @@ mod tests{
         loc.restore(Some(&old)).unwrap();assert_eq!(loc.managed().unwrap(),Some(old));
         loc.restore(None).unwrap();assert_eq!(loc.managed().unwrap(),None);
         assert_eq!(fs::read(loc.dropins.join("10-other.conf")).unwrap(),b"[General]\nNumlock=on\n");
+    }
+    #[test]
+    fn full_select_and_rollback_with_stale_review_protection(){
+        let root=tempfile::tempdir().unwrap();let loc=fixture(root.path());
+        for name in ["breeze","other"]{
+            let dir=loc.themes.join(name);fs::create_dir(&dir).unwrap();
+            fs::set_permissions(&dir,fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(dir.join("Main.qml"),b"// inert").unwrap();
+            fs::set_permissions(dir.join("Main.qml"),fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let old=Plan::review(&loc,"breeze").unwrap();
+        let stale=Plan::review(&loc,"other").unwrap();
+        assert!(!loc.dropins.join(MANAGED).exists());
+        assert!(old.commit(&loc).unwrap());assert!(stale.commit(&loc).is_err());
+        assert!(Plan::review(&loc,"other").unwrap().commit(&loc).unwrap());
+        let review=rollback_plan(&loc).unwrap();rollback(&loc,review).unwrap();
+        assert_eq!(parse_managed(&loc.managed().unwrap().unwrap()).unwrap(),"breeze");
+        assert!(rollback_plan(&loc).is_err());
+        fs::write(&loc.legacy,b"[Theme]\nCurrent=other\n").unwrap();
+        assert!(Plan::review(&loc,"breeze").is_err());fs::remove_file(&loc.legacy).unwrap();
+        fs::write(loc.dropins.join("zz-local.conf"),b"# conflict").unwrap();
+        assert!(Plan::review(&loc,"breeze").is_err());
+    }
+    #[test]
+    fn first_selection_rollback_removes_only_override(){
+        let root=tempfile::tempdir().unwrap();let loc=fixture(root.path());
+        let dir=loc.themes.join("breeze");fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir,fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("Main.qml"),b"// inert").unwrap();
+        fs::set_permissions(dir.join("Main.qml"),fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Plan::review(&loc,"breeze").unwrap().commit(&loc).unwrap());
+        rollback(&loc,rollback_plan(&loc).unwrap()).unwrap();
+        assert!(loc.managed().unwrap().is_none());
     }
     #[test]
     fn refuses_symlink_and_foreign_managed_config(){
