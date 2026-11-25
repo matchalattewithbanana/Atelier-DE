@@ -569,6 +569,7 @@ pub fn run_native(
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
                     snapshot=client_damage.capture(&elements,cursor_bounds);
                     let damage=client_damage.damage(next,output_damage,fallback,snapshot.as_ref());
+                    timing.repaint(damage,output_damage);
                     timing.scene_ready();
                     let mut frame = renderer.render(&mut target, size, Transform::Normal)
                         .map_err(|error| anyhow::anyhow!("begin native frame: {error}"))?;
