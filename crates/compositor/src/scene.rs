@@ -6,9 +6,10 @@ pub(crate) use backdrop::BlurTarget;
 use anyhow::{Context,Result};
 use smithay::{
     backend::renderer::{
-        gles::{GlesRenderer,GlesFrame,GlesError,GlesPixelProgram,Uniform,UniformName,UniformType,UniformValue,element::{PixelShaderElement,TextureShaderElement}},
+        Frame,
+        gles::{GlesRenderer,GlesFrame,GlesError,GlesPixelProgram,GlesTexProgram,Uniform,UniformName,UniformType,UniformValue,element::{PixelShaderElement,TextureShaderElement}},
         utils::CommitCounter,
-        element::{render_elements,AsRenderElements,Element,RenderElement,Id,Kind,solid::{SolidColorBuffer,SolidColorRenderElement},surface::{WaylandSurfaceRenderElement,render_elements_from_surface_tree}},
+        element::{render_elements,AsRenderElements,Element,RenderElement,Id,Kind,solid::{SolidColorBuffer,SolidColorRenderElement},surface::{WaylandSurfaceRenderElement,WaylandSurfaceTexture,render_elements_from_surface_tree}},
     },
     desktop::{layer_map_for_output,PopupManager},
     utils::{Buffer,Logical,Physical,Point,Rectangle,Scale,Transform},
@@ -19,7 +20,7 @@ render_elements!{
     Surface=WaylandSurfaceRenderElement<GlesRenderer>,
     Border=SolidColorRenderElement,
     Shadow=PixelShaderElement,
-    Rounded=Masked<WaylandSurfaceRenderElement<GlesRenderer>>,
+    Rounded=RoundedSurface,
     Backdrop=Masked<TextureShaderElement>,
 }
 /// Non-overlapping integer strips approximating a rounded rectangle at
@@ -108,6 +109,79 @@ impl<E:RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for Masked<E>{
         self.draw_scaled(frame,src,dst,damage,Scale::from(1.0))
     }
 }
+/// Shader mask in output-local logical coordinates. Only the framebuffer
+/// coordinate transform depends on the destination (including downsampling).
+#[derive(Clone,Copy)]
+struct CornerMask{
+    rect:Rectangle<i32,Logical>,
+    radius:f32,
+    output_height:i32,
+    scale:f64,
+}
+impl CornerMask{
+    fn new(rect:Rectangle<i32,Logical>,radius:u32,output_height:i32,scale:f64)->Self{
+        // Match the integer radius used by clipping, borders and input.
+        let radius=effective_radius(rect,radius) as f32;
+        Self{rect,radius,output_height,scale}
+    }
+    fn coordinates(&self,factor:Scale<f64>,transform:Transform)->Option<([f32;2],f32,f32)>{
+        let sx=(self.scale*factor.x) as f32;let sy=(self.scale*factor.y) as f32;
+        if !sx.is_finite()||!sy.is_finite()||sx<=0.0||sy<=0.0{return None;}
+        // Smithay GLES normal projection maps logical y to framebuffer y.
+        // Nested presentation uses Flipped180; scratch/native use Normal.
+        let (flip,height)=match transform{
+            Transform::Normal=>(0.0,0.0),
+            Transform::Flipped180=>(1.0,(f64::from(self.output_height)*self.scale*factor.y).round() as f32),
+            _=>return None,
+        };
+        Some(([sx,sy],flip,height))
+    }
+    fn uniforms(&self,factor:Scale<f64>,transform:Transform)->Option<Vec<Uniform<'static>>>{
+        let ([sx,sy],flip,height)=self.coordinates(factor,transform)?;
+        if self.radius<=0.0{return None;}
+        Some(vec![
+            Uniform::new("mask_rect",UniformValue::_4f(self.rect.loc.x as f32,self.rect.loc.y as f32,self.rect.size.w as f32,self.rect.size.h as f32)),
+            Uniform::new("mask_scale",UniformValue::_2f(sx,sy)),
+            Uniform::new("mask_y",UniformValue::_2f(flip,height)),
+            Uniform::new("mask_radius",UniformValue::_1f(self.radius)),
+        ])
+    }
+}
+/// Only textured root surface trees use the antialiasing program. Solid
+/// color protocol buffers and unavailable shaders retain the strip mask.
+/// Never override the frame's default program or advertise corner opacity.
+pub struct RoundedSurface{
+    masked:Masked<WaylandSurfaceRenderElement<GlesRenderer>>,
+    mask:CornerMask,
+    program:Option<GlesTexProgram>,
+}
+impl Element for RoundedSurface{
+    fn id(&self)->&Id{self.masked.id()}
+    fn current_commit(&self)->CommitCounter{self.masked.current_commit()}
+    fn src(&self)->Rectangle<f64,Buffer>{self.masked.src()}
+    fn geometry(&self,scale:Scale<f64>)->Rectangle<i32,Physical>{self.masked.geometry(scale)}
+    fn transform(&self)->Transform{self.masked.transform()}
+    fn alpha(&self)->f32{self.masked.alpha()}
+    fn kind(&self)->Kind{self.masked.kind()}
+}
+impl RoundedSurface{
+    pub(super) fn draw_scaled(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],factor:Scale<f64>)->Result<(),GlesError>{
+        if let (Some(program),WaylandSurfaceTexture::Texture(texture),Some(uniforms))=(
+            &self.program,self.masked.inner.texture(),self.mask.uniforms(factor,frame.transformation())){
+            // The shader multiplies premultiplied RGBA by edge coverage.
+            // Retain all damage so fractional corner pixels can be drawn.
+            // Explicit program applies to this draw only.
+            frame.render_texture_from_to(texture,src,dst,damage,&[],self.transform(),self.alpha(),Some(program),&uniforms)
+        }else{
+            self.masked.draw_scaled(frame,src,dst,damage,factor)
+        }
+    }
+}
+impl RenderElement<GlesRenderer> for RoundedSurface{
+    fn draw(&self,frame:&mut GlesFrame<'_,'_>,src:Rectangle<f64,Buffer>,dst:Rectangle<i32,Physical>,damage:&[Rectangle<i32,Physical>],_:&[Rectangle<i32,Physical>])->Result<(),GlesError>{
+        self.draw_scaled(frame,src,dst,damage,Scale::from(1.0))
+    }
+}
 pub fn inset_tile(tile:Tile,width:u32)->Tile{
     let inset=(width.min(8) as i32).min((tile.width-1).max(0)/2).min((tile.height-1).max(0)/2);
     Tile{x:tile.x+inset,y:tile.y+inset,width:tile.width-2*inset,height:tile.height-2*inset}
@@ -170,10 +244,24 @@ fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u
 #[derive(Default)]
 pub struct SceneShaders{
     shadow:Option<Option<GlesPixelProgram>>,
+    corners:Option<Option<GlesTexProgram>>,
     rounded_border:Option<Option<GlesPixelProgram>>,
     backdrop:backdrop::Backdrop,
 }
 impl SceneShaders{
+    fn corners(&mut self,renderer:&mut GlesRenderer)->Option<&GlesTexProgram>{
+        self.corners.get_or_insert_with(||{
+            match renderer.compile_custom_texture_shader(include_str!("scene/corners.frag"),&[
+                UniformName::new("mask_rect",UniformType::_4f),
+                UniformName::new("mask_scale",UniformType::_2f),
+                UniformName::new("mask_y",UniformType::_2f),
+                UniformName::new("mask_radius",UniformType::_1f),
+            ]){
+                Ok(program)=>{println!("Atelier rounded client shader ready");Some(program)}
+                Err(error)=>{tracing::warn!(?error,"rounded client shader unavailable; using pixel-aligned clipping");None}
+            }
+        }).as_ref()
+    }
     fn rounded_border(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
         self.rounded_border.get_or_insert_with(||{
             match renderer.compile_custom_pixel_shader(include_str!("rounded_border.frag"),&[
@@ -293,7 +381,12 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 }
                 let regions:Vec<_>=rounded_regions(geometry,radius).into_iter().map(|mut r|{r.loc-=bounds.loc;r}).collect();
                 let surfaces=render_elements_from_surface_tree::<GlesRenderer,WaylandSurfaceRenderElement<GlesRenderer>>(renderer,surface,location,Scale::from(scale),alpha,Kind::Unspecified);
-                for inner in surfaces{result.push(SceneElement::from(Masked{inner,regions:regions.clone(),scale}));}
+                let rect=Rectangle::new(geometry.loc-bounds.loc,geometry.size);
+                let mask=CornerMask::new(rect,radius,bounds.size.h,scale);
+                let program=shaders.corners(renderer).cloned();
+                for inner in surfaces{
+                    result.push(SceneElement::from(RoundedSurface{masked:Masked{inner,regions:regions.clone(),scale},mask,program:program.clone()}));
+                }
             }
         }else{
             result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),alpha));
@@ -477,6 +570,21 @@ mod tests{
         assert_eq!(requests.iter().map(|r|r.index).collect::<Vec<_>>(),vec![2,4,9]);
         let mut scene=vec![0;10];for request in requests.into_iter().rev(){scene.insert(request.index,request.index);}
         assert_eq!(scene.iter().filter(|&&i|i!=0).copied().collect::<Vec<_>>(),vec![2,4,9]);
+    }
+    #[test]
+    fn corner_mask_uses_correct_frame_coordinates_and_clamps_radius(){
+        let rect=Rectangle::new((20,30).into(),(12,80).into());
+        let mask=CornerMask::new(rect,24,1080,1.0);
+        assert_eq!(mask.radius,6.0);
+        let odd=Rectangle::new((0,0).into(),(5,7).into());
+        assert_eq!(CornerMask::new(odd,24,1080,1.0).radius,2.0);
+        let tiny=Rectangle::new((0,0).into(),(1,7).into());
+        assert!(CornerMask::new(tiny,24,1080,1.0).uniforms(Scale::from(1.0),Transform::Normal).is_none());
+        assert_eq!(mask.coordinates(Scale::from(1.0),Transform::Normal),Some(([1.0,1.0],0.0,0.0)));
+        assert_eq!(mask.coordinates(Scale::from(1.0),Transform::Flipped180),Some(([1.0,1.0],1.0,1080.0)));
+        assert_eq!(mask.coordinates(Scale::from(0.5),Transform::Normal),Some(([0.5,0.5],0.0,0.0)));
+        assert!(mask.coordinates(Scale::from(1.0),Transform::_90).is_none());
+        assert!(mask.coordinates(Scale::from(0.0),Transform::Normal).is_none());
     }
     #[test]
     fn tiny_tiles_retain_positive_content(){
