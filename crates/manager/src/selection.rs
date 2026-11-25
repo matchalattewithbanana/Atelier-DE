@@ -622,7 +622,16 @@ mod tests {
         drop(first);
         assert_eq!(runtime_status(&root.join("deployment-A")),"managed-in-use");
         drop(second);
-        assert_eq!(runtime_status(&root.join("deployment-A")),"no-managed-lease");
+        // Concurrent test subprocesses can briefly inherit CLOEXEC leases
+        // between fork and exec. Require bounded eventual release.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        loop {
+            let status=runtime_status(&root.join("deployment-A"));
+            if status=="no-managed-lease"{break;}
+            assert_eq!(status,"managed-in-use");
+            assert!(std::time::Instant::now()<deadline,"lease persisted after closing both holders");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(lease_selected(root,&["atelier-settings"]).is_err());
     }
     #[test]
