@@ -1,5 +1,6 @@
 //! Native software cursor composition, separate from desktop scene effects.
 use crate::state::Atelier;
+use std::time::Duration;
 use smithay::{
     backend::renderer::{
         element::{Element,Id,Kind,texture::TextureRenderElement,surface::{render_elements_from_surface_tree,WaylandSurfaceRenderElement}},
@@ -54,13 +55,36 @@ fn cursor_envelope(geometries:impl IntoIterator<Item=Rectangle<i32,Physical>>,ou
 
 type ThemeTexture=(GlesTexture,(i32,i32));
 const MAX_CACHED_SHAPES:usize=40;
+const MAX_FRAMES:usize=32;
+const MAX_SHAPE_BYTES:usize=512*1024;
 
-/// Session-local cache of static images, including unsuccessful lookups.
-/// No repeated file decoding or GPU upload on pointer motion.
+struct ThemeFrame{
+    image:ThemeTexture,
+    delay_ms:u32,
+}
+
+// Select one frame and the time until its next boundary. Static assets
+// never schedule a wakeup. Clamp zero/very short delays at import.
+fn animation_frame(delays:impl Iterator<Item=u32>+Clone,elapsed:Duration)->(usize,Option<Duration>){
+    if delays.clone().count()<=1{return (0,None);}
+    let total:u64=delays.clone().map(u64::from).sum();
+    if total==0{return (0,None);}
+    let mut offset=(elapsed.as_millis()%u128::from(total)) as u64;
+    for (index,delay) in delays.enumerate(){
+        let delay=u64::from(delay);
+        if offset<delay{return (index,Some(Duration::from_millis(delay-offset)));}
+        offset-=delay;
+    }
+    (0,None)
+}
+
+/// Session-local cache of bounded images, including unsuccessful lookups.
+/// No repeated decoding or GPU upload on pointer motion.
 pub struct CursorTheme {
     theme:xcursor::CursorTheme,
     size:u32,
-    cache:Vec<(CursorIcon,Option<ThemeTexture>)>,
+    cache:Vec<(CursorIcon,Option<Vec<ThemeFrame>>)>,
+    next_frame:Option<Duration>,
 }
 
 fn shape_names(icon:CursorIcon)->&'static [&'static str]{
@@ -156,12 +180,12 @@ impl CursorTheme {
     pub fn load(renderer:&mut GlesRenderer)->Self{
         let name=std::env::var("XCURSOR_THEME").ok().filter(|s|!s.is_empty()).unwrap_or_else(||"default".into());
         let size=requested_size(std::env::var("XCURSOR_SIZE").ok().as_deref());
-        let mut theme=Self{theme:xcursor::CursorTheme::load(&name),size,cache:Vec::new()};
+        let mut theme=Self{theme:xcursor::CursorTheme::load(&name),size,cache:Vec::new(),next_frame:None};
         theme.ensure(renderer,CursorIcon::Default);
         theme
     }
 
-    fn import(&self,renderer:&mut GlesRenderer,icon:CursorIcon)->anyhow::Result<ThemeTexture>{
+    fn import(&self,renderer:&mut GlesRenderer,icon:CursorIcon)->anyhow::Result<Vec<ThemeFrame>>{
         use std::io::Read;
         let path=shape_names(icon).iter().find_map(|name|self.theme.load_icon(name))
             .ok_or_else(||anyhow::anyhow!("cursor shape missing from theme"))?;
@@ -175,10 +199,19 @@ impl CursorTheme {
         let images=xcursor::parser::parse_xcursor(&data).ok_or_else(||anyhow::anyhow!("invalid XCursor image"))?;
         let image=images.iter().filter(|image|valid_image(image)).min_by_key(|image|image.size.abs_diff(self.size))
             .ok_or_else(||anyhow::anyhow!("no bounded usable cursor image"))?;
-        let rgba=file_pixels_to_rgba(&image.pixels_rgba);
-        let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
-            (image.width as i32,image.height as i32).into(),false)?;
-        Ok((texture,(image.xhot as i32,image.yhot as i32)))
+        // Animate only complete, bounded nominal-size groups. An oversized
+        // sequence uses its first selected image rather than truncating a loop.
+        let mut frames:Vec<_>=images.iter().filter(|candidate|valid_image(candidate)&&candidate.size==image.size).collect();
+        let bytes=frames.iter().map(|frame|frame.pixels_rgba.len()).sum::<usize>();
+        if frames.len()>MAX_FRAMES||bytes>MAX_SHAPE_BYTES{frames=vec![image];}
+        let mut imported=Vec::with_capacity(frames.len());
+        for frame in frames{
+            let rgba=file_pixels_to_rgba(&frame.pixels_rgba);
+            let texture=renderer.import_memory(&rgba,smithay::backend::allocator::Fourcc::Abgr8888,
+                (frame.width as i32,frame.height as i32).into(),false)?;
+            imported.push(ThemeFrame{image:(texture,(frame.xhot as i32,frame.yhot as i32)),delay_ms:frame.delay.clamp(16,60_000)});
+        }
+        Ok(imported)
     }
 
     fn ensure(&mut self,renderer:&mut GlesRenderer,icon:CursorIcon){
@@ -190,18 +223,28 @@ impl CursorTheme {
         self.cache.push((icon,texture));
     }
 
-    fn element(&mut self,renderer:&mut GlesRenderer,position:Point<i32,Physical>,icon:CursorIcon)->Option<TextureRenderElement<GlesTexture>>{
+    pub fn animation_due(&self,now:Duration)->bool{
+        self.next_frame.is_some_and(|deadline|now>=deadline)
+    }
+
+    fn element(&mut self,renderer:&mut GlesRenderer,position:Point<i32,Physical>,icon:CursorIcon,now:Duration)->Option<TextureRenderElement<GlesTexture>>{
         self.ensure(renderer,icon);
         let lookup=|key|self.cache.iter().find(|(cached,_)|*cached==key).and_then(|(_,image)|image.as_ref());
-        let (texture,hotspot)=lookup(icon).or_else(||lookup(CursorIcon::Default))?;
+        let frames=lookup(icon).or_else(||lookup(CursorIcon::Default))?;
+        let (index,remaining)=animation_frame(frames.iter().map(|frame|frame.delay_ms),now);
+        let (texture,hotspot)=&frames.get(index)?.image;
         let origin=hotspot_origin(position,*hotspot);
-        Some(TextureRenderElement::from_static_texture(Id::new(),renderer.context_id(),origin.to_f64(),
-            texture.clone(),1,Transform::Normal,Some(1.0),None,None,None,Kind::Cursor))
+        let element=TextureRenderElement::from_static_texture(Id::new(),renderer.context_id(),origin.to_f64(),
+            texture.clone(),1,Transform::Normal,Some(1.0),None,None,None,Kind::Cursor);
+        self.next_frame=remaining.and_then(|delay|now.checked_add(delay));
+        Some(element)
     }
 }
 
 impl NativeCursor {
-    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&mut CursorTheme)->Self{
+    pub fn prepare(state:&Atelier,renderer:&mut GlesRenderer,output:Size<i32,Physical>,theme:&mut CursorTheme,now:Duration)->Self{
+        // Hidden and client-owned images must not inherit a theme timer.
+        theme.next_frame=None;
         let position:Point<i32,Physical>=((state.pointer_position.x as i32).clamp(0,output.w-1),
             (state.pointer_position.y as i32).clamp(0,output.h-1)).into();
         let image=match state.cursor_status(){
@@ -220,8 +263,8 @@ impl NativeCursor {
                     Image::Client(render_elements_from_surface_tree(renderer,surface,origin,Scale::from(1.0),1.0,Kind::Cursor))
                 }
             }
-            CursorImageStatus::Named(icon)=>theme.element(renderer,position,*icon).map_or(Image::Default,Image::Theme),
-            _=>theme.element(renderer,position,CursorIcon::Default).map_or(Image::Default,Image::Theme),
+            CursorImageStatus::Named(icon)=>theme.element(renderer,position,*icon,now).map_or(Image::Default,Image::Theme),
+            _=>theme.element(renderer,position,CursorIcon::Default,now).map_or(Image::Default,Image::Theme),
         };
         Self{position,output,image}
     }
@@ -261,6 +304,19 @@ impl NativeCursor {
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn animation_boundaries_and_wraparound(){
+        let delays=[30,70,100];
+        let select=|ms|animation_frame(delays.into_iter(),Duration::from_millis(ms));
+        assert_eq!(select(0),(0,Some(Duration::from_millis(30))));
+        assert_eq!(select(29),(0,Some(Duration::from_millis(1))));
+        assert_eq!(select(30),(1,Some(Duration::from_millis(70))));
+        assert_eq!(select(100),(2,Some(Duration::from_millis(100))));
+        assert_eq!(select(200),(0,Some(Duration::from_millis(30))));
+        assert_eq!(select(430),(1,Some(Duration::from_millis(70))));
+        assert_eq!(animation_frame([16].into_iter(),Duration::from_secs(10)),(0,None));
+        assert_eq!(animation_frame([0,0].into_iter(),Duration::ZERO),(0,None));
+    }
     #[test]
     fn shape_names_include_legacy_fallbacks(){
         assert_eq!(shape_names(CursorIcon::Default),&["default","left_ptr"]);

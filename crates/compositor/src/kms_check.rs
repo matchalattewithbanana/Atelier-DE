@@ -641,6 +641,7 @@ pub fn run_native(
                     if state.take_scene_dirty() { queue.invalidate(); }
                 }
                 server.flush_clients()?;
+                if cursor_theme.animation_due(started.elapsed()){queue.invalidate_cursor();}
                 let Some(next) = queue.next() else { continue; };
                 let mut timing = metrics.begin_frame();
                 let cursor_bounds;
@@ -650,7 +651,7 @@ pub fn run_native(
                     let state = state.borrow();
                     let mut target = renderer.bind(&mut slots[next].2).map_err(|error| anyhow::anyhow!("bind native framebuffer: {error}"))?;
                     let elements = crate::scene::elements(&state,&mut renderer,&mut shaders,color)?;
-                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&mut cursor_theme);
+                    let cursor=crate::native_cursor::NativeCursor::prepare(&state,&mut renderer,size,&mut cursor_theme,started.elapsed());
                     let bounds=cursor.bounds();
                     custom_cursor=bounds.is_none();
                     cursor_bounds=bounds.unwrap_or(output_damage);
