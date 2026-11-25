@@ -29,6 +29,22 @@ pub fn decode(path:&Path,max_edge:u32)->Result<Raster>{
     let rgba=image.into_rgba8();let (width,height)=rgba.dimensions();
     Ok(Raster{width,height,rgba:rgba.into_raw()})
 }
+/// Sample a bounded thumbnail into coarse RGB buckets. Ignore transparent
+/// pixels; favor chromatic, mid-tone colors without letting a single pixel win.
+pub fn palette_seed(path:&Path)->Result<[u8;3]>{
+    let raster=decode(path,96)?;
+    let mut bins=std::collections::BTreeMap::<[u8;3],(u64,[u64;3])>::new();
+    for px in raster.rgba.chunks_exact(4){
+        if px[3]<192{continue;}
+        let entry=bins.entry([px[0]/32,px[1]/32,px[2]/32]).or_default();
+        entry.0+=1;for i in 0..3{entry.1[i]+=u64::from(px[i]);}
+    }
+    let (_, (count,sum))=bins.into_iter().max_by_key(|(key,(count,_))|{
+        let saturation=u64::from(key.iter().max().unwrap()-key.iter().min().unwrap());
+        count*(8+saturation*2)
+    }).ok_or_else(||anyhow::anyhow!("image contains no sufficiently opaque pixels"))?;
+    Ok(std::array::from_fn(|i|(sum[i]/count) as u8))
+}
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -36,6 +52,7 @@ mod tests{
     fn bounded_decode_and_path_rejection(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("sample.png");
         image::RgbaImage::from_pixel(800,400,image::Rgba([30,60,90,255])).save(&path).unwrap();
+        assert_eq!(palette_seed(&path).unwrap(),[30,60,90]);
         let raster=decode(&path,200).unwrap();
         assert_eq!((raster.width,raster.height,raster.rgba.len()),(200,100,80000));
         let link=dir.path().join("link.png");std::os::unix::fs::symlink(&path,&link).unwrap();

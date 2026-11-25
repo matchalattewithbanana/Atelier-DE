@@ -8,3 +8,5 @@ publish.workspace = true
 atelier-config = { workspace = true, features = ["wallpaper"] }
 gtk = { workspace = true, features = ["v4_8"] }
 atelier-services = { path = "../services" }
+
+anyhow.workspace = true
