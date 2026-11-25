@@ -551,12 +551,20 @@ impl ClientData for ClientState {
 
 impl CompositorHandler for Atelier {
     fn compositor_state(&mut self) -> &mut CompositorState { &mut self.compositor }
+    fn destroyed(&mut self,surface:&WlSurface){
+        #[cfg(feature = "native-session")]
+        self.lock_root_destroyed(surface);
+        #[cfg(not(feature = "native-session"))]
+        let _=surface;
+    }
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         &client.get_data::<ClientState>().expect("Atelier client data").compositor
     }
     fn commit(&mut self, surface: &WlSurface) {
         self.scene_dirty = true;
         on_commit_buffer_handler::<Self>(surface);
+        #[cfg(feature = "native-session")]
+        self.lock_root_committed(surface);
         self.popups.commit(surface);
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();

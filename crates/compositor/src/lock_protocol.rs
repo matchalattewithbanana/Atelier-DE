@@ -1,57 +1,60 @@
-//! Native session-lock adapter for Smithay 0.7. Deliberately unadvertised.
-//! The upstream resource handler must not see foreign or premature unlocks:
-//! it calls unlock even after posting InvalidUnlock in this pinned version.
+//! Own the exact lock and role resources rather than relying on Smithay 0.7's
+//! private output bookkeeping. The global is deliberately NOT registered.
 use super::Atelier;
 use smithay::{
     backend::renderer::utils::RendererSurfaceStateUserData,
     input::pointer::{CursorImageStatus,MotionEvent},
     utils::SERIAL_COUNTER,
-    wayland::selection::data_device::{set_data_device_focus,clear_data_device_selection},
+    wayland::{
+        compositor::{self,with_states,SurfaceAttributes,BufferAssignment},
+        selection::data_device::{set_data_device_focus,clear_data_device_selection},
+    },
     reexports::{
         wayland_protocols::ext::session_lock::v1::server::{
-            ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+            ext_session_lock_manager_v1::{self,ExtSessionLockManagerV1},
             ext_session_lock_v1::{self,ExtSessionLockV1},
             ext_session_lock_surface_v1::{self,ExtSessionLockSurfaceV1},
         },
-        wayland_server::{backend::{ClientId,ObjectId},protocol::{wl_output::WlOutput,wl_surface::WlSurface},
-            Client,DataInit,Dispatch,DisplayHandle,Resource},
+        wayland_server::{backend::{ClientId,ObjectId},protocol::wl_surface::WlSurface,
+            Client,DataInit,Dispatch,DisplayHandle,GlobalDispatch,New,Resource},
     },
-    wayland::{compositor::with_states,session_lock::{ExtLockSurfaceUserData,LockSurface,SessionLockHandler,
-        SessionLockManagerGlobalData,SessionLockManagerState,SessionLockState,SessionLocker}},
 };
 use crate::session_lock::ProtectedFrame;
 
+const ROLE:&str="ext_session_lock_surface_v1";
+
+#[derive(Debug)]
+struct Configure{
+    serial:u32,
+    size:(i32,i32),
+    acked:bool,
+}
+impl Configure{
+    fn ack(&mut self,serial:u32)->bool{
+        if self.acked||serial!=self.serial{return false;}
+        self.acked=true;true
+    }
+    fn matches(&self,size:Option<(i32,i32)>)->bool{self.acked&&size==Some(self.size)}
+}
+struct AcceptedSurface{
+    role:ExtSessionLockSurfaceV1,
+    root:WlSurface,
+    configure:Configure,
+    committed:bool,
+    invalid:bool,
+}
 #[derive(Default)]
 pub(super) struct Protocol{
-    // None for every shipped backend. No code currently creates the global.
-    manager:Option<SessionLockManagerState>,
-    pending:Option<SessionLocker>,
-    owner:Option<ObjectId>,
-    surface:Option<LockSurface>,
-    surface_issued:bool,
-    authorized_unlock:Option<ObjectId>,
+    owner:Option<ExtSessionLockV1>,
+    surface:Option<AcceptedSurface>,
 }
-
-// Delegate global and manager creation, but NOT lock resource requests.
-smithay::reexports::wayland_server::delegate_global_dispatch!(Atelier: [
-    ExtSessionLockManagerV1: SessionLockManagerGlobalData
-] => SessionLockManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Atelier: [
-    ExtSessionLockManagerV1: ()
-] => SessionLockManagerState);
 
 impl Atelier{
     pub(super) fn confirm_lock_frame(&mut self,frame:ProtectedFrame){
         if self.session_lock.protected_frame()!=Some(frame){return;}
-        let Some(pending)=self.lock_protocol.pending.take()else{return;};
-        let id=pending.ext_session_lock().id();
-        if !pending.ext_session_lock().is_alive(){
-            self.lock_owner_lost(&id);return;
-        }
-        if self.session_lock.presented(frame){
-            pending.lock();
-            self.scene_dirty=true;
-        }
+        let Some(owner)=self.lock_protocol.owner.clone()else{return;};
+        if !owner.is_alive(){self.lock_owner_lost(&owner.id());return;}
+        if self.session_lock.presented(frame){owner.locked();self.scene_dirty=true;}
     }
     // Lock admission refuses existing grabs; at the other boundary only
     // lock-era click grabs can remain (data-device start_drag is guarded).
@@ -121,143 +124,191 @@ impl Atelier{
             }
         }
     }
-    fn clear_lock_surface_for_client(&mut self,client:&ClientId){
-        let accepted=self.lock_protocol.surface.as_ref().and_then(|s|s.wl_surface().client());
-        if accepted.as_ref().is_some_and(|c|&c.id()==client){
+
+    fn clear_role(&mut self,id:&ObjectId){
+        if self.lock_protocol.surface.as_ref().is_some_and(|s|s.role.id()==*id){
             self.lock_protocol.surface=None;
             self.isolate_input(0);
+        }
+    }
+    pub(super) fn lock_root_destroyed(&mut self,root:&WlSurface){
+        if let Some(id)=self.lock_protocol.surface.as_ref().filter(|s|s.root==*root).map(|s|s.role.id()){
+            self.clear_role(&id);
         }
     }
     fn lock_owner_lost(&mut self,id:&ObjectId){
         if self.session_lock.disconnected(id){
-            self.lock_protocol.pending=None;
-            self.lock_protocol.owner=None;
-            self.lock_protocol.surface=None;
-            self.lock_protocol.authorized_unlock=None;
+            self.lock_protocol=Protocol::default();
             self.isolate_input(0);
         }
     }
-    /// Direct surface only, not a desktop window. The accepted root must
-    /// be alive and have a committed output-sized buffer.
-    pub(crate) fn lock_surface(&self)->Option<&WlSurface>{
-        if self.desktop_visible(){return None;}
-        let owner=self.lock_protocol.owner.as_ref()?;
-        if !self.session_lock.owns_request(owner){return None;}
-        let surface=self.lock_protocol.surface.as_ref()?;
-        if !surface.alive(){return None;}
-        let mode=self.output.current_mode()?;
-        let size=surface.current_state().size?;
-        if mode.size.w<=0||mode.size.h<=0||size.w!=mode.size.w as u32||size.h!=mode.size.h as u32{return None;}
-        let wl=surface.wl_surface();
-        let mapped=with_states(wl,|states|{
-            states.data_map.get::<RendererSurfaceStateUserData>()
-                .is_some_and(|state|state.lock().is_ok_and(|s|s.buffer().is_some()&&s.surface_size()==Some((mode.size.w,mode.size.h).into())))
+    fn buffer_size(root:&WlSurface)->Option<(i32,i32)>{
+        with_states(root,|states|{
+            let state=states.data_map.get::<RendererSurfaceStateUserData>()?.lock().ok()?;
+            state.buffer()?;
+            let size=state.surface_size()?;
+            Some((size.w,size.h))
+        })
+    }
+    // Validate the request at submission time as well as after application:
+    // a delayed surface transaction must not be legitimized by a later ack.
+    fn validate_lock_commit(&mut self,root:&WlSurface){
+        use ext_session_lock_surface_v1::Error;
+        let Some(s)=self.lock_protocol.surface.as_mut().filter(|s|s.root==*root)else{return;};
+        if s.invalid{return;}
+        let removed=with_states(root,|states|{
+            matches!(states.cached_state.get::<SurfaceAttributes>().pending().buffer,Some(BufferAssignment::Removed))
         });
-        mapped.then_some(wl)
-    }
-}
-impl SessionLockHandler for Atelier{
-    fn lock_state(&mut self)->&mut SessionLockManagerState{
-        self.lock_protocol.manager.as_mut().expect("session-lock manager must be initialized before dispatch")
-    }
-    fn lock(&mut self,confirmation:SessionLocker){
-        let id=confirmation.ext_session_lock().id();
-        if !self.desktop_input_ready()||self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return;}
-        if !self.session_lock.begin(id.clone()){return;}
-        self.isolate_input(0);
-        // Do not offer the previous desktop selection to the lock client.
-        clear_data_device_selection(&self.display,&self.seat);
-        self.lock_protocol.owner=Some(id);
-        self.lock_protocol.surface_issued=false;
-        self.lock_protocol.pending=Some(confirmation);
-        self.scene_dirty=true;
-    }
-    fn unlock(&mut self){
-        // Only the guarded resource dispatch can arm this one-shot context.
-        let Some(id)=self.lock_protocol.authorized_unlock.take()else{return;};
-        if !self.session_lock.can_unlock(&id){return;}
-        self.isolate_input(0);
-        self.restore_input=true;
-        if self.session_lock.unlock(&id){
-            self.lock_protocol.owner=None;
-            self.lock_protocol.surface=None;
-            self.lock_protocol.pending=None;
+        let error=if !s.configure.acked{Some(Error::CommitBeforeFirstAck)}
+            else if removed{Some(Error::NullBuffer)}else{None};
+        if let Some(error)=error{
+            s.invalid=true;s.role.post_error(error,"invalid lock surface commit submission");
             self.scene_dirty=true;
         }
     }
-    fn new_surface(&mut self,surface:LockSurface,output:WlOutput){
-        // GetLockSurface dispatch has already authorized the object and
-        // physical output. The single output is currently unscaled.
-        if !self.output.owns(&output)||self.lock_protocol.surface.is_some(){return;}
-        let Some(mode)=self.output.current_mode()else{return;};
-        if mode.size.w<=0||mode.size.h<=0{return;}
-        surface.with_pending_state(|s|s.size=Some((mode.size.w as u32,mode.size.h as u32).into()));
-        self.lock_protocol.surface=Some(surface);
-        self.lock_protocol.surface_issued=true;
-        self.scene_dirty=true;
+    // Called after Smithay processes the root commit, before any render or
+    // input dispatch. A failed commit removes the accepted role immediately.
+    pub(super) fn lock_root_committed(&mut self,root:&WlSurface){
+        use ext_session_lock_surface_v1::Error;
+        let Some(s)=self.lock_protocol.surface.as_mut().filter(|s|s.root==*root)else{return;};
+        if s.invalid{let id=s.role.id();self.clear_role(&id);return;}
+        let size=Self::buffer_size(root);
+        let error=if !s.configure.acked{Some(Error::CommitBeforeFirstAck)}
+            else if size.is_none(){Some(Error::NullBuffer)}
+            else if !s.configure.matches(size){Some(Error::DimensionsMismatch)}
+            else{None};
+        if let Some(error)=error{
+            s.role.post_error(error,"invalid lock surface commit");
+            let id=s.role.id();self.clear_role(&id);
+        }else{s.committed=true;}
+    }
+    pub(crate) fn lock_surface(&self)->Option<&WlSurface>{
+        let owner=self.lock_protocol.owner.as_ref()?;
+        if self.desktop_visible()||!owner.is_alive()||!self.session_lock.owns_request(&owner.id()){return None;}
+        let s=self.lock_protocol.surface.as_ref()?;
+        if !s.role.is_alive()||!s.root.is_alive()||!s.committed||s.invalid{return None;}
+        let mode=self.output.current_mode()?;
+        if s.configure.size!=(mode.size.w,mode.size.h)||!s.configure.matches(Self::buffer_size(&s.root)){return None;}
+        Some(&s.root)
+    }
+    fn accept_lock(&mut self,owner:ExtSessionLockV1){
+        if !self.desktop_input_ready()||self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||
+            self.seat.get_keyboard().is_some_and(|k|k.is_grabbed())||!self.session_lock.begin(owner.id()){
+            owner.finished();return;
+        }
+        self.lock_protocol.owner=Some(owner);
+        self.isolate_input(0);
+        clear_data_device_selection(&self.display,&self.seat);
+    }
+    fn unlock_owner(&mut self,owner:&ExtSessionLockV1){
+        if !self.session_lock.can_unlock(&owner.id()){
+            owner.post_error(ext_session_lock_v1::Error::InvalidUnlock,"only the confirmed lock object may unlock");return;
+        }
+        self.isolate_input(0);
+        self.restore_input=true;
+        if self.session_lock.unlock(&owner.id()){
+            self.lock_protocol=Protocol::default();
+            self.scene_dirty=true;
+        }
     }
 }
 
-impl Dispatch<ExtSessionLockV1,SessionLockState> for Atelier{
-    fn request(state:&mut Self,client:&Client,lock:&ExtSessionLockV1,request:ext_session_lock_v1::Request,
-        data:&SessionLockState,display:&DisplayHandle,init:&mut DataInit<'_,Self>){
+// These implementations intentionally have no create_global call in any
+// production or nested backend.
+impl GlobalDispatch<ExtSessionLockManagerV1,()> for Atelier{
+    fn bind(_state:&mut Self,_dh:&DisplayHandle,_client:&Client,manager:New<ExtSessionLockManagerV1>,_data:&(),init:&mut DataInit<'_,Self>){
+        init.init(manager,());
+    }
+}
+impl Dispatch<ExtSessionLockManagerV1,()> for Atelier{
+    fn request(state:&mut Self,_client:&Client,_manager:&ExtSessionLockManagerV1,request:ext_session_lock_manager_v1::Request,
+        _data:&(),_dh:&DisplayHandle,init:&mut DataInit<'_,Self>){
+        if let ext_session_lock_manager_v1::Request::Lock{id}=request{
+            state.accept_lock(init.init(id,()));
+        }
+    }
+}
+impl Dispatch<ExtSessionLockV1,()> for Atelier{
+    fn request(state:&mut Self,_client:&Client,lock:&ExtSessionLockV1,request:ext_session_lock_v1::Request,
+        _data:&(),_dh:&DisplayHandle,init:&mut DataInit<'_,Self>){
         use ext_session_lock_v1::{Error,Request};
-        let owner=lock.id();
-        match &request{
-            Request::UnlockAndDestroy=>{
-                if !state.session_lock.can_unlock(&owner){
-                    lock.post_error(Error::InvalidUnlock,"only the confirmed lock object may unlock");
-                    return;
-                }
-                state.lock_protocol.authorized_unlock=Some(owner);
-            }
-            Request::GetLockSurface{output,..}=>{
-                if !state.session_lock.owns_request(&owner){
-                    // Follow the upstream fatal-error pattern for a rejected
-                    // constructor, without touching its shared output registry.
-                    lock.post_error(Error::InvalidUnlock,"rejected lock cannot create lock surfaces");
-                    return;
-                }
-                if state.lock_protocol.surface_issued||!state.output.owns(output)||
-                    !state.output.current_mode().is_some_and(|m|m.size.w>0&&m.size.h>0){
-                    lock.post_error(Error::DuplicateOutput,"only one lock surface on the active output is supported");
-                    return;
-                }
-            }
+        match request{
+            Request::UnlockAndDestroy=>state.unlock_owner(lock),
             Request::Destroy=>{
-                if state.session_lock.can_unlock(&owner){
+                if state.session_lock.can_unlock(&lock.id()){
                     lock.post_error(Error::InvalidDestroy,"confirmed lock requires unlock_and_destroy");
                 }
-                // No upstream mutation for rejected or abandoned locks.
-                state.lock_owner_lost(&owner);
-                return;
+                state.lock_owner_lost(&lock.id());
             }
-            _=>return,
+            Request::GetLockSurface{id,surface,output}=>{
+                if !state.session_lock.owns_request(&lock.id()){
+                    lock.post_error(Error::InvalidUnlock,"rejected lock cannot create lock surfaces");return;
+                }
+                if state.lock_protocol.surface.is_some()||!state.output.owns(&output){
+                    lock.post_error(Error::DuplicateOutput,"only one role on the active output is supported");return;
+                }
+                let Some(mode)=state.output.current_mode().filter(|m|m.size.w>0&&m.size.h>0)else{
+                    lock.post_error(Error::DuplicateOutput,"no usable output");return;
+                };
+                if compositor::get_role(&surface).is_some(){
+                    lock.post_error(Error::Role,"surface already has a role");return;
+                }
+                let has_buffer=with_states(&surface,|states|{
+                    let mut attrs=states.cached_state.get::<SurfaceAttributes>();
+                    matches!(attrs.pending().buffer,Some(BufferAssignment::NewBuffer(_)))||
+                        matches!(attrs.current().buffer,Some(BufferAssignment::NewBuffer(_)))||
+                        states.data_map.get::<RendererSurfaceStateUserData>()
+                            .is_some_and(|s|s.lock().map_or(true,|s|s.buffer().is_some()))
+                });
+                if has_buffer{lock.post_error(Error::AlreadyConstructed,"surface already has a buffer");return;}
+                if compositor::give_role(&surface,ROLE).is_err(){lock.post_error(Error::Role,"surface already has a role");return;}
+                let role=init.init(id,());
+                let serial:u32=SERIAL_COUNTER.next_serial().into();
+                let size=(mode.size.w,mode.size.h);
+                role.configure(serial,size.0 as u32,size.1 as u32);
+                compositor::add_pre_commit_hook::<Atelier,_>(&surface,|state,_,root|state.validate_lock_commit(root));
+                state.lock_protocol.surface=Some(AcceptedSurface{role,root:surface,configure:Configure{serial,size,acked:false},committed:false,invalid:false});
+                state.scene_dirty=true;
+            }
+            _=>{}
         }
-        <SessionLockManagerState as Dispatch<ExtSessionLockV1,SessionLockState,Self>>::request(
-            state,client,lock,request,data,display,init);
-        state.lock_protocol.authorized_unlock=None;
     }
-    fn destroyed(state:&mut Self,_client:ClientId,lock:&ExtSessionLockV1,_data:&SessionLockState){
+    fn destroyed(state:&mut Self,_client:ClientId,lock:&ExtSessionLockV1,_data:&()){
         state.lock_owner_lost(&lock.id());
     }
 }
-
-impl Dispatch<ExtSessionLockSurfaceV1,ExtLockSurfaceUserData> for Atelier{
-    fn request(state:&mut Self,client:&Client,role:&ExtSessionLockSurfaceV1,request:ext_session_lock_surface_v1::Request,
-        data:&ExtLockSurfaceUserData,display:&DisplayHandle,init:&mut DataInit<'_,Self>){
-        // The pinned Smithay role userdata is private. On any destroy by
-        // the accepted surface's client, conservatively drop the entire
-        // accepted tree, rather than risk retaining a destroyed role.
-        // Stale same-client role destruction may blank the lock UI; a
-        // precise resource association and recovery remain release gates.
-        if matches!(&request,ext_session_lock_surface_v1::Request::Destroy){
-            state.clear_lock_surface_for_client(&client.id());
+impl Dispatch<ExtSessionLockSurfaceV1,()> for Atelier{
+    fn request(state:&mut Self,_client:&Client,role:&ExtSessionLockSurfaceV1,request:ext_session_lock_surface_v1::Request,
+        _data:&(),_dh:&DisplayHandle,_init:&mut DataInit<'_,Self>){
+        use ext_session_lock_surface_v1::{Error,Request};
+        match request{
+            Request::Destroy=>state.clear_role(&role.id()),
+            Request::AckConfigure{serial}=>{
+                let Some(s)=state.lock_protocol.surface.as_mut().filter(|s|s.role.id()==role.id())else{return;};
+                if s.invalid{return;}
+                if !s.configure.ack(serial){
+                    role.post_error(Error::InvalidSerial,"unknown or repeated configure serial");
+                    state.clear_role(&role.id());
+                }
+            }
+            _=>{}
         }
-        <SessionLockManagerState as Dispatch<ExtSessionLockSurfaceV1,ExtLockSurfaceUserData,Self>>::request(
-            state,client,role,request,data,display,init);
     }
-    fn destroyed(state:&mut Self,client:ClientId,_role:&ExtSessionLockSurfaceV1,_data:&ExtLockSurfaceUserData){
-        state.clear_lock_surface_for_client(&client);
+    fn destroyed(state:&mut Self,_client:ClientId,role:&ExtSessionLockSurfaceV1,_data:&()){
+        state.clear_role(&role.id());
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn configure_requires_exact_serial_and_dimensions(){
+        let mut c=Configure{serial:12,size:(1920,1080),acked:false};
+        assert!(!c.matches(Some((1920,1080))));
+        assert!(!c.ack(11));assert!(!c.acked);
+        assert!(c.ack(12));assert!(!c.ack(12));
+        assert!(!c.matches(None));assert!(!c.matches(Some((1920,1079))));
+        assert!(c.matches(Some((1920,1080))));
     }
 }
