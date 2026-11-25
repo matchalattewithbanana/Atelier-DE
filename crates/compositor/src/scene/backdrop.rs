@@ -1,5 +1,5 @@
 //! Bounded backdrop passes, separate renderer-owned scratch textures for
-//! focused window, panel and dock. No recursive blur or CPU readback.
+//! focused window, panel, dock and widget group. No recursive blur or CPU readback.
 use super::SceneElement;
 use smithay::{
     backend::{allocator::Fourcc,renderer::{
@@ -62,11 +62,11 @@ impl RenderElement<GlesRenderer> for SnapshotElement<'_>{
     }
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub(crate) enum BlurTarget{Focused,Panel,Dock}
+pub(crate) enum BlurTarget{Focused,Panel,Dock,Widgets}
 impl BlurTarget{
-    pub const COUNT:usize=3;
-    pub fn slot(self)->usize{match self{Self::Focused=>0,Self::Panel=>1,Self::Dock=>2}}
-    fn name(self)->&'static str{match self{Self::Focused=>"focused",Self::Panel=>"panel",Self::Dock=>"dock"}}
+    pub const COUNT:usize=4;
+    pub fn slot(self)->usize{match self{Self::Focused=>0,Self::Panel=>1,Self::Dock=>2,Self::Widgets=>3}}
+    fn name(self)->&'static str{match self{Self::Focused=>"focused",Self::Panel=>"panel",Self::Dock=>"dock",Self::Widgets=>"widgets"}}
 }
 #[derive(Default)]
 pub(super) struct Backdrop{
@@ -133,8 +133,8 @@ mod tests{
     use super::*;
     #[test]
     fn distinct_slots_for_each_role(){
-        assert_eq!([BlurTarget::Focused.slot(),BlurTarget::Panel.slot(),BlurTarget::Dock.slot()],[0,1,2]);
-        assert_eq!(MAX_PIXELS*4*BlurTarget::COUNT as i64,48*1024*1024);
+        assert_eq!([BlurTarget::Focused.slot(),BlurTarget::Panel.slot(),BlurTarget::Dock.slot(),BlurTarget::Widgets.slot()],[0,1,2,3]);
+        assert_eq!(MAX_PIXELS*4*BlurTarget::COUNT as i64,64*1024*1024);
     }
     #[test]
     fn limits_scratch_allocation(){
