@@ -148,7 +148,7 @@ mod tests{
         assert!(SnapshotPlan::new((i32::MAX,i32::MAX).into()).is_none());
         let odd=SnapshotPlan::new((1919,1079).into()).unwrap();
         assert_eq!(odd.scratch,(960,540).into());
-        assert_eq!(odd.output.w as f64*odd.factor.x,960.0);
+        assert!((odd.output.w as f64*odd.factor.x-960.0).abs()<1e-9);
         assert!((odd.output.h as f64*odd.factor.y-540.0).abs()<1e-9);
     }
 }
