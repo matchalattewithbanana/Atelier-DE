@@ -35,9 +35,11 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
     let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
     let mut intercepted_keys = HashSet::new();
     let mut shaders=crate::scene::SceneShaders::default();
+    let mut metrics = crate::frame_metrics::FrameMetrics::new("nested");
     let mut last_present = None;
     let mut dirty = true;
     while running.load(Ordering::SeqCst) {
+        metrics.report_due();
         let status = events.dispatch_new_events(|event| {
             // Input, host resize and expose/redraw notifications may change
             // the next frame. Treat all backend events conservatively.
@@ -73,18 +75,22 @@ pub fn run(socket: &str, color: [f32; 4], layout: atelier_config::Layout) -> Res
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
+        let mut timing = metrics.begin_frame();
         let damage = Rectangle::from_size(size);
         {
             let (renderer, mut target) = backend.bind().context("bind nested framebuffer")?;
             let elements = crate::scene::elements(&state,renderer,&mut shaders,color)?;
+            timing.scene_ready();
             let mut frame = renderer.render(&mut target, size, Transform::Flipped180)?;
             frame.clear(Color32F::new(color[0], color[1], color[2], color[3]), &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
             let _sync = frame.finish()?;
         }
+        timing.render_ready();
         state.send_frames(started.elapsed());
         display.flush_clients()?;
         backend.submit(Some(&[damage])).context("present nested framebuffer")?;
+        metrics.submitted(timing);
         last_present = Some(Instant::now());
         dirty = false;
         // Keep protocol polling responsive, independently of presentation.

@@ -5,6 +5,7 @@ mod state;
 mod layout;
 mod scene;
 mod motion;
+mod frame_metrics;
 mod workspace_control;
 #[cfg(any(feature = "native-session", test))]
 mod frame_queue;
