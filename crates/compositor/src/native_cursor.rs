@@ -286,7 +286,7 @@ mod tests{
         assert_eq!(cursor_envelope([rect(90,70,32,32)],output,empty),Some(rect(90,70,10,10)));
         assert_eq!(cursor_envelope([rect(i32::MAX-1,0,100,10)],output,empty),Some(empty));
         assert_eq!(cursor_envelope([],output,empty),Some(empty));
-        assert!(cursor_envelope([rect(0,0,-1,10)],output,empty).is_none());
+        assert_eq!(cursor_envelope([rect(0,0,0,10)],output,empty),Some(empty));
     }
     #[test]
     fn cursor_hotspots_allow_offscreen_origins_without_integer_overflow(){
