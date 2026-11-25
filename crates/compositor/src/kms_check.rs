@@ -239,6 +239,84 @@ fn active_route(card: &Card<'_>) -> Result<(Route, u64)> {
     bail!("no active, unscaled, single-monitor primary plane with a restorable framebuffer")
 }
 
+// Hardware cursor feasibility is independent of taking ownership of a plane.
+#[cfg(feature = "native-session")]
+fn cursor_plane_available(kind:u64,compatible:bool,argb:bool,crtc:u64,fb:u64)->bool{
+    // DRM_PLANE_TYPE_CURSOR is 2. Never replace an already bound plane.
+    kind==2&&compatible&&argb&&crtc==0&&fb==0
+}
+
+#[cfg(feature = "native-session")]
+fn cursor_extent(output:(u16,u16),position:(u16,u16),edge:u32)->Option<(u32,u32)>{
+    if edge==0||position.0>=output.0||position.1>=output.1{return None;}
+    Some((edge.min(u32::from(output.0-position.0)),edge.min(u32::from(output.1-position.1))))
+}
+
+/// Read-only plane selection and atomic TEST_ONLY validation. No cursor
+/// framebuffer is ever submitted for actual presentation.
+#[cfg(feature = "native-session")]
+fn probe_cursor_plane(card:&Card<'_>,fd:&OwnedFd,route:&Route)->Result<()>{
+    use drm::buffer::PlanarBuffer;
+    use smithay::{backend::allocator::{
+        gbm::{GbmAllocator,GbmBufferFlags,GbmDevice},Allocator,Fourcc,Modifier,
+    },utils::DeviceFd};
+    let resources=card.resource_handles()?;
+    let mut candidates=Vec::new();
+    for plane in card.plane_handles()?{
+        let info=card.get_plane(plane)?;
+        if cursor_plane_available(property(card,plane,"type")?.1,
+            resources.filter_crtcs(info.possible_crtcs()).contains(&route.crtc),
+            info.formats().contains(&(Fourcc::Argb8888 as u32)),
+            property(card,plane,"CRTC_ID")?.1,property(card,plane,"FB_ID")?.1){
+            candidates.push(plane);
+        }
+    }
+    if candidates.is_empty(){bail!("no unused compatible ARGB8888 cursor plane");}
+    // A conservative fixed-size probe, not a claim about maximum cursor size.
+    const EDGE:u32=64;
+    let device=GbmDevice::new(DeviceFd::from(fd.try_clone()?))
+        .map_err(|error|anyhow::anyhow!("create cursor probe GBM device: {error}"))?;
+    let mut allocator=GbmAllocator::new(device,GbmBufferFlags::SCANOUT|GbmBufferFlags::RENDERING);
+    let buffer=allocator.create_buffer(EDGE,EDGE,Fourcc::Argb8888,&[Modifier::Linear])
+        .map_err(|error|anyhow::anyhow!("allocate cursor probe buffer: {error}"))?;
+    let flags=if PlanarBuffer::modifier(&*buffer).is_some(){control::FbCmd2Flags::MODIFIERS}else{control::FbCmd2Flags::empty()};
+    let fb=card.add_planar_framebuffer(&*buffer,flags).context("register cursor probe framebuffer")?;
+    let outcome=(||->Result<()>{
+        let output=route.mode.size();
+        let edge_position=(output.0.saturating_sub(1),output.1.saturating_sub(1));
+        for plane in candidates{
+            let test=(||->Result<()>{
+                // Recheck the candidate immediately before constructing tests.
+                if property(card,plane,"CRTC_ID")?.1!=0||property(card,plane,"FB_ID")?.1!=0{
+                    bail!("cursor plane no longer unused");
+                }
+                for position in [(0,0),edge_position]{
+                    let (w,h)=cursor_extent(output,position,EDGE).context("invalid cursor probe extent")?;
+                    let mut request=control::atomic::AtomicModeReq::new();
+                    for (name,value) in [
+                        ("FB_ID",u64::from(u32::from(fb))),("CRTC_ID",u64::from(u32::from(route.crtc))),
+                        ("SRC_X",0),("SRC_Y",0),("SRC_W",u64::from(w)<<16),("SRC_H",u64::from(h)<<16),
+                        ("CRTC_X",u64::from(position.0)),("CRTC_Y",u64::from(position.1)),
+                        ("CRTC_W",u64::from(w)),("CRTC_H",u64::from(h)),
+                    ]{set(card,&mut request,plane,name,value)?;}
+                    // No ALLOW_MODESET, no event, and no non-test commit.
+                    card.atomic_commit(control::AtomicCommitFlags::TEST_ONLY,request)
+                        .context("cursor plane TEST_ONLY rejected")?;
+                }
+                Ok(())
+            })();
+            match test{
+                Ok(())=>{println!("Atelier hardware cursor preflight accepted {plane:?} (64x64 ARGB8888, origin and clipped edge); software cursor retained");return Ok(());}
+                Err(error)=>tracing::debug!(?plane,?error,"cursor probe candidate rejected"),
+            }
+        }
+        bail!("all unused cursor candidates rejected the bounded TEST_ONLY probe")
+    })();
+    let cleanup=card.destroy_framebuffer(fb).context("destroy cursor probe framebuffer");
+    if let Err(error)=&cleanup{if outcome.is_err(){eprintln!("{error:#}");}}
+    outcome.and(cleanup)
+}
+
 fn framebuffer_request(card: &Card<'_>, plane: control::plane::Handle, fb: u64) -> Result<control::atomic::AtomicModeReq> {
     let mut request = control::atomic::AtomicModeReq::new();
     set(card, &mut request, plane, "FB_ID", fb)?;
@@ -426,6 +504,11 @@ pub fn run_native(
     card.set_client_capability(ClientCapability::UniversalPlanes, true)?;
     card.set_client_capability(ClientCapability::Atomic, true)?;
     let (route, original) = active_route(&card)?;
+    if std::env::var("ATELIER_CURSOR_PROBE").as_deref()==Ok("1"){
+        if let Err(error)=probe_cursor_plane(&card,fd,&route){
+            tracing::warn!(?error,"hardware cursor preflight unavailable; retaining software cursor");
+        }
+    }
     let (width, height) = route.mode.size();
     let size = (i32::from(width), i32::from(height)).into();
     let output_damage = Rectangle::from_size(size);
@@ -626,6 +709,20 @@ pub fn run_native(
 #[cfg(all(test,feature = "native-session"))]
 mod recovery_tests {
     use super::*;
+    #[test]
+    fn cursor_probe_never_selects_bound_or_incompatible_planes(){
+        assert!(cursor_plane_available(2,true,true,0,0));
+        assert!(!cursor_plane_available(1,true,true,0,0));
+        assert!(!cursor_plane_available(2,false,true,0,0));
+        assert!(!cursor_plane_available(2,true,false,0,0));
+        assert!(!cursor_plane_available(2,true,true,3,0));
+        assert!(!cursor_plane_available(2,true,true,0,4));
+        assert_eq!(cursor_extent((1920,1080),(0,0),64),Some((64,64)));
+        assert_eq!(cursor_extent((1920,1080),(1919,1079),64),Some((1,1)));
+        assert_eq!(cursor_extent((1920,1080),(1900,1060),64),Some((20,20)));
+        assert_eq!(cursor_extent((1920,1080),(1920,0),64),None);
+        assert_eq!(cursor_extent((0,0),(0,0),64),None);
+    }
     #[test]
     fn recovery_restores_only_owned_framebuffers_on_verified_route(){
         let owned=[11,12];
