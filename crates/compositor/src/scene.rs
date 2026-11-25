@@ -4,7 +4,7 @@ use crate::{state::Atelier,layout::Tile};
 use anyhow::{Context,Result};
 use smithay::{
     backend::renderer::{
-        gles::GlesRenderer,
+        gles::{GlesRenderer,GlesPixelProgram,Uniform,UniformName,UniformType,UniformValue,element::PixelShaderElement},
         element::{render_elements,AsRenderElements,Kind,solid::{SolidColorBuffer,SolidColorRenderElement},surface::WaylandSurfaceRenderElement},
     },
     desktop::layer_map_for_output,
@@ -15,6 +15,7 @@ render_elements!{
     pub SceneElement<=GlesRenderer>;
     Surface=WaylandSurfaceRenderElement<GlesRenderer>,
     Border=SolidColorRenderElement,
+    Shadow=PixelShaderElement,
 }
 pub fn inset_tile(tile:Tile,width:u32)->Tile{
     let inset=(width.min(8) as i32).min((tile.width-1).max(0)/2).min((tile.height-1).max(0)/2);
@@ -55,7 +56,34 @@ fn shadow_bands(rect:Rectangle<i32,Logical>,clip:Rectangle<i32,Logical>,border:u
     }
     result
 }
-pub fn elements(state:&Atelier,renderer:&mut GlesRenderer)->Result<Vec<SceneElement>>{
+/// Owned by one renderer for its lifetime. Compile once on first use and
+/// retain the banded path if the driver's shader compiler rejects the program.
+#[derive(Default)]
+pub struct SceneShaders{
+    shadow:Option<Option<GlesPixelProgram>>,
+}
+impl SceneShaders{
+    fn shadow(&mut self,renderer:&mut GlesRenderer)->Option<&GlesPixelProgram>{
+        self.shadow.get_or_insert_with(||{
+            match renderer.compile_custom_pixel_shader(include_str!("shadow.frag"),&[
+                UniformName::new("outline",UniformType::_4f),
+                UniformName::new("radius",UniformType::_1f),
+            ]){
+                Ok(program)=>Some(program),
+                Err(error)=>{tracing::warn!(?error,"smooth shadow shader unavailable; using banded shadows");None}
+            }
+        }).as_ref()
+    }
+}
+/// Outline bounds relative to the individual clipped strip's local coordinates.
+/// Wider arithmetic avoids overflow from client-provided dimensions.
+fn relative_outline(content:Rectangle<i32,Logical>,strip:Rectangle<i32,Logical>,border:u32)->[f32;4]{
+    let x=i64::from(content.loc.x)-i64::from(strip.loc.x);
+    let y=i64::from(content.loc.y)-i64::from(strip.loc.y);
+    let b=i64::from(border.min(8));
+    [(x-b) as f32,(y-b) as f32,(x+i64::from(content.size.w)+b) as f32,(y+i64::from(content.size.h)+b) as f32]
+}
+pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShaders)->Result<Vec<SceneElement>>{
     let output=&state.output;
     let bounds=state.space.output_geometry(output).context("unmapped output")?;
     let scale=output.current_scale().fractional_scale();
@@ -87,9 +115,25 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer)->Result<Vec<SceneElem
         }
         if let Some(shadow)=state.window_shadow(window){
             let border=state.window_border(window).map_or(0,|(b,_)|b.width);
-            for (strip,alpha) in shadow_bands(geometry,clip,border,shadow){
-                let buffer=SolidColorBuffer::new(strip.size,[0.0,0.0,0.0,alpha]);
-                result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
+            if let Some(program)=shaders.shadow(renderer){
+                // Draw only outside the outline: four clipped strips, not the
+                // entire window interior. Euclidean distance rounds the shadow
+                // corners without changing client content or hit testing.
+                for strip in ring(geometry,clip,border,border+shadow.radius){
+                    let [l,t,r,b]=relative_outline(geometry,strip,border);
+                    let area=Rectangle::new(strip.loc-bounds.loc,strip.size);
+                    result.push(SceneElement::from(PixelShaderElement::new(
+                        program.clone(),area,None,shadow.opacity as f32/100.0,
+                        vec![Uniform::new("outline",UniformValue::_4f(l,t,r,b)),
+                             Uniform::new("radius",UniformValue::_1f(shadow.radius as f32))],
+                        Kind::Unspecified,
+                    )));
+                }
+            }else{
+                for (strip,alpha) in shadow_bands(geometry,clip,border,shadow){
+                    let buffer=SolidColorBuffer::new(strip.size,[0.0,0.0,0.0,alpha]);
+                    result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
+                }
             }
         }
     }
@@ -124,6 +168,21 @@ mod tests{
             assert!(shadow[i+1..].iter().all(|(other,a)|!other.overlaps(*r)&&*a<=*alpha));
         }
         assert!(shadow_bands(content,clip,3,atelier_config::WindowShadow::default()).is_empty());
+    }
+    #[test]
+    fn gpu_strip_coordinates_preserve_clipped_outline(){
+        let content=Rectangle::new((20,30).into(),(60,40).into());
+        let clip=Rectangle::new((0,10).into(),(100,100).into());
+        let strips=ring(content,clip,2,26);
+        assert_eq!(strips.len(),4);
+        for (i,strip) in strips.iter().enumerate(){
+            let [l,t,r,b]=relative_outline(content,*strip,2);
+            assert_eq!(r-l,64.0);assert_eq!(b-t,44.0);
+            assert_eq!(l+strip.loc.x as f32,18.0);assert_eq!(t+strip.loc.y as f32,28.0);
+            assert_eq!(strip.intersection(clip),Some(*strip));
+            assert!(!strip.overlaps(content));
+            assert!(strips[i+1..].iter().all(|other|!strip.overlaps(*other)));
+        }
     }
     #[test]
     fn tiny_tiles_retain_positive_content(){
