@@ -62,6 +62,8 @@ pub struct Atelier {
     dock_backdrop_blur:u32,
     shell_radius:u32,
     transparency:atelier_config::Transparency,
+    motion:atelier_config::Motion,
+    opening_fades:crate::motion::OpeningFades<Window>,
     appearance_monitor:Option<atelier_config::AppearanceMonitor>,
     next_task_id: u64,
     active_workspace: usize,
@@ -94,14 +96,17 @@ impl Atelier {
             layer_shell: WlrLayerShellState::new::<Self>(display), focused_layer: None,
             shm: ShmState::new::<Self>(display, vec![]), seats,
             data_device: DataDeviceState::new::<Self>(display), _outputs: OutputManagerState::new_with_xdg_output::<Self>(display),
-            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,
+            seat, space, output, popups: PopupManager::default(), pointer_position: (0.0, 0.0).into(), cascade: 0, pending: Vec::new(), layout, windows: Vec::new(), task_ids:Vec::new(), next_task_id:1, placements:Vec::new(), spacing:appearance.window_spacing,border:appearance.window_border,shadow:appearance.window_shadow,corner_radius:appearance.window_corner_radius,backdrop_blur:appearance.backdrop_blur,panel_backdrop_blur:appearance.panel_backdrop_blur,dock_backdrop_blur:appearance.dock_backdrop_blur,shell_radius:appearance.button_radius,transparency:appearance.transparency,motion:appearance.motion,opening_fades:Default::default(),
             appearance_monitor:atelier_config::appearance_path().ok().map(atelier_config::AppearanceMonitor::new),
             active_workspace: 0, parked: std::array::from_fn(|_| Vec::new()), focused: None, scene_dirty: true,
         })
     }
 
     #[cfg(feature = "native-session")]
-    pub fn take_scene_dirty(&mut self) -> bool { std::mem::take(&mut self.scene_dirty) }
+    pub fn take_scene_dirty(&mut self) -> bool {
+        let changed=self.opening_fades.tick(std::time::Instant::now());
+        std::mem::take(&mut self.scene_dirty)||changed
+    }
 
     pub fn resize(&mut self, width: i32, height: i32) {
         self.resize_with_refresh(width, height, 60_000);
@@ -132,6 +137,11 @@ impl Atelier {
         if self.focused.as_ref()==Some(window)&&self.placement(window).is_none()&&self.window_alpha(window)<1.0{
             self.backdrop_blur
         }else{0}
+    }
+    /// Leave backdrop replacements at their settled opacity. A focused
+    /// window with actual blur does not run a partial fade in this milestone.
+    pub(crate) fn window_opening_factor(&self,window:&Window)->f32{
+        if self.placement(window).is_some()||self.window_backdrop_blur(window)>0{1.0}else{self.opening_fades.factor(window)}
     }
     pub(crate) fn window_corner_radius(&self,window:&Window)->u32{
         if self.placement(window).is_some(){0}else{self.corner_radius}
@@ -201,7 +211,10 @@ impl Atelier {
             state.size=if placement.fullscreen{Some((mode.size.w,mode.size.h).into())}
                 else if placement.maximized{Some((zone.size.w.max(1),zone.size.h.max(1)).into())}else{None};
         });
-        if active{self.placements.push(placement);}
+        if active{
+            if let Some(window)=&window{self.opening_fades.cancel(window);}
+            self.placements.push(placement);
+        }
         else if let (Some(window),Some(location))=(&window,placement.normal){
             if self.windows.contains(window){self.space.map_element(window.clone(),location,false);}
             else{for (candidate,position) in self.parked.iter_mut().flatten(){if candidate==window{*position=location;}}}
@@ -232,9 +245,11 @@ impl Atelier {
         if self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||self.seat.get_keyboard().is_some_and(|k|k.is_grabbed()){return false;}
         let Some(monitor)=self.appearance_monitor.as_mut()else{return false;};
         match monitor.poll(){
-            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.backdrop_blur!=self.backdrop_blur||appearance.panel_backdrop_blur!=self.panel_backdrop_blur||appearance.dock_backdrop_blur!=self.dock_backdrop_blur||appearance.button_radius!=self.shell_radius||appearance.transparency!=self.transparency=>{
+            Ok(Some(appearance)) if appearance.window_spacing!=self.spacing||appearance.window_border!=self.border||appearance.window_shadow!=self.shadow||appearance.window_corner_radius!=self.corner_radius||appearance.backdrop_blur!=self.backdrop_blur||appearance.panel_backdrop_blur!=self.panel_backdrop_blur||appearance.dock_backdrop_blur!=self.dock_backdrop_blur||appearance.button_radius!=self.shell_radius||appearance.transparency!=self.transparency||appearance.motion!=self.motion=>{
                 let geometry=appearance.window_spacing!=self.spacing||appearance.window_border.width!=self.border.width;
                 let input_changed=geometry||appearance.window_corner_radius!=self.corner_radius;
+                if appearance.motion!=self.motion||appearance.transparency!=self.transparency||appearance.backdrop_blur!=self.backdrop_blur{self.opening_fades.clear();}
+                self.motion=appearance.motion;
                 self.spacing=appearance.window_spacing;self.border=appearance.window_border;self.shadow=appearance.window_shadow;self.corner_radius=appearance.window_corner_radius;self.backdrop_blur=appearance.backdrop_blur;self.panel_backdrop_blur=appearance.panel_backdrop_blur;self.dock_backdrop_blur=appearance.dock_backdrop_blur;self.shell_radius=appearance.button_radius;self.transparency=appearance.transparency;
                 if geometry{self.reflow();}self.scene_dirty=true;input_changed
             }
@@ -261,6 +276,7 @@ impl Atelier {
             self.parked[target].push((window, position));
             return;
         }
+        self.opening_fades.clear();
         self.focus(None, serial);
         // Preserve stacking and floating coordinates while removing every hidden window from rendering and hit testing.
         let outgoing: Vec<_> = self.space.elements().filter_map(|w| self.space.element_location(w).map(|p| (w.clone(), p))).collect();
@@ -404,11 +420,16 @@ impl Atelier {
         self.windows.push(window.clone());
         if let Some(next)=self.next_task_id.checked_add(1){self.task_ids.push((window.clone(),self.next_task_id));self.next_task_id=next;}
         self.reflow();
-        self.focus(Some(window), SERIAL_COUNTER.next_serial());
+        self.focus(Some(window.clone()), SERIAL_COUNTER.next_serial());
+        if self.placement(&window).is_none()&&self.window_backdrop_blur(&window)==0{
+            let duration=self.motion.opening_duration();
+            self.opening_fades.start(window,std::time::Instant::now(),duration);
+        }
     }
 
     fn unmap(&mut self, window: &Window) {
         self.scene_dirty = true;
+        self.opening_fades.cancel(window);
         self.task_ids.retain(|(candidate,_)|candidate!=window);
         if let Some(surface)=window.toplevel(){self.placements.retain(|p|&p.surface!=surface);}
         for hidden in &mut self.parked { hidden.retain(|(candidate, _)| candidate != window); }

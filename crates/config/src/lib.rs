@@ -5,7 +5,7 @@ mod appearance;
 pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
-pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency};
+pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

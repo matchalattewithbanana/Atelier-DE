@@ -216,7 +216,8 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
         let Some(geometry)=state.space.element_geometry(window)else{continue;};
         let origin=geometry.loc-window.geometry().loc-bounds.loc;
         let radius=state.window_corner_radius(window);
-        let alpha=state.window_alpha(window);
+        let opening=state.window_opening_factor(window);
+        let alpha=state.window_alpha(window)*opening;
         if radius>0{
             if let Some(toplevel)=window.toplevel(){
                 let surface=toplevel.wl_surface();
@@ -235,7 +236,8 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
             result.extend(window.render_elements::<SceneElement>(renderer,origin.to_physical_precise_round(scale),Scale::from(scale),alpha));
         }
         if let Some((border,focused))=state.window_border(window){
-            let color=border.color(focused)?;
+            let mut color=border.color(focused)?;
+            for channel in &mut color{*channel*=opening;}
             let strips=if radius>0{rounded_border(geometry,clip,radius,border.width)}else{strips(geometry,clip,border.width)};
             for strip in strips{
                 let buffer=SolidColorBuffer::new(strip.size,color);
@@ -252,7 +254,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                     let [l,t,r,b]=relative_outline(geometry,strip,border);
                     let area=Rectangle::new(strip.loc-bounds.loc,strip.size);
                     result.push(SceneElement::from(PixelShaderElement::new(
-                        program.clone(),area,None,shadow.opacity as f32/100.0,
+                        program.clone(),area,None,shadow.opacity as f32/100.0*opening,
                         vec![Uniform::new("outline",UniformValue::_4f(l,t,r,b)),
                              Uniform::new("radius",UniformValue::_1f(shadow.radius as f32))],
                         Kind::Unspecified,
@@ -260,7 +262,7 @@ pub fn elements(state:&Atelier,renderer:&mut GlesRenderer,shaders:&mut SceneShad
                 }
             }else{
                 for (strip,alpha) in shadow_bands(geometry,clip,border,shadow){
-                    let buffer=SolidColorBuffer::new(strip.size,[0.0,0.0,0.0,alpha]);
+                    let buffer=SolidColorBuffer::new(strip.size,[0.0,0.0,0.0,alpha*opening]);
                     result.push(SceneElement::from(SolidColorRenderElement::from_buffer(&buffer,(strip.loc-bounds.loc).to_physical_precise_round(scale),scale,1.0,Kind::Unspecified)));
                 }
             }
