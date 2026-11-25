@@ -73,6 +73,22 @@ fn request(endpoint: &str, binary: bool, limit: u64, output: &mut impl Write) ->
     if !status.success() { bail!("GitHub release query failed ({status}); check network and gh auth status"); }
     Ok(count)
 }
+/// Public repository metadata search. Encode the entire query as data,
+/// not an endpoint, shell expression, or caller-supplied option.
+pub(super) fn search_repositories(query:&str)->Result<Vec<u8>>{
+    let mut encoded=String::new();
+    for byte in query.bytes(){
+        if byte.is_ascii_alphanumeric()||matches!(byte,b'-'|b'_'|b'.'|b'~'){
+            encoded.push(char::from(byte));
+        }else{
+            use std::fmt::Write;
+            write!(&mut encoded,"%{byte:02X}")?;
+        }
+    }
+    let mut bytes=Vec::new();
+    request(&format!("search/repositories?q={encoded}&sort=stars&order=desc&per_page=20"),false,MAX_RESPONSE,&mut bytes)?;
+    Ok(bytes)
+}
 fn fetch(repo: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     request(&format!("repos/{repo}/releases?per_page=20"), false, MAX_RESPONSE, &mut bytes)?;
