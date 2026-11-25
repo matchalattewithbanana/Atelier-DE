@@ -57,8 +57,19 @@ fn missing_from_output(output: Output, packages: &BTreeSet<String>) -> Option<BT
     if missing.is_empty() || !missing.is_subset(packages) { return None; }
     Some(missing)
 }
+fn cursor_notes(providers:&[String],notes:&mut Vec<String>){
+    for (id,package,url) in [
+        ("bibata-cursors","bibata-cursor-theme-bin","https://github.com/ful1e5/Bibata_Cursor/releases"),
+        ("googledot-cursors","googledot-cursor-theme","https://github.com/ful1e5/Google_Cursor/releases"),
+    ]{
+        if providers.iter().any(|p|p==id){
+            notes.push(format!("{id}: optional AUR package {package}, or upstream XCursor assets at {url}. Not part of the privileged pacman transaction. Use the repository scripts/install-cursors.py user-local installer or install independently; then select the theme in Settings."));
+        }
+    }
+}
 pub fn preview(plan: &Plan, report: &Report, providers: &[String]) -> PackagePreview {
     let mut notes = Vec::new();
+    cursor_notes(providers,&mut notes);
     if !arch_family(report) {
         notes.push("No package mapping enabled for the detected distribution. Product inventory remains available.".into());
         return PackagePreview { schema: 1, backend: None, candidates: vec![], notes, apply_supported: false };
@@ -193,6 +204,8 @@ pub fn install(plan: &Plan, report: &Report, providers: &[String]) -> Result<()>
         bail!("package installation requires an interactive terminal");
     }
     for path in [PACMAN, SUDO, TIMEOUT] { trusted_tool(path)?; }
+    let mut cursor_instructions=Vec::new();cursor_notes(providers,&mut cursor_instructions);
+    for note in cursor_instructions{println!("{note}");}
     let requested: BTreeSet<_> = candidates(plan, providers).into_keys().collect();
     if requested.is_empty() { println!("No package candidates. Nothing to install."); return Ok(()); }
     let missing = missing_from_output(query("-T", &requested)?, &requested)

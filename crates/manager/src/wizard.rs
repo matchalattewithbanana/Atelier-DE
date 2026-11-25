@@ -5,7 +5,7 @@ use std::io::{BufRead, Write};
 use crate::{catalog::{self, Plan}, Report};
 
 pub(super) const EXTERNAL: &[&str] = &["mangowm", "hyprland", "niri"];
-pub(super) const PROVIDERS: &[&str] = &["media", "audio", "network", "bluetooth"];
+pub(super) const PROVIDERS: &[&str] = &["media", "audio", "network", "bluetooth", "bibata-cursors", "googledot-cursors"];
 
 #[derive(Debug, Serialize)]
 pub struct RiceChoice { pub compositor: String, pub rice: String }
@@ -118,7 +118,7 @@ pub fn run(input: &mut impl BufRead, out: &mut impl Write, report: &Report) -> R
         }
     } else { None };
 
-    writeln!(out, "4. Optional providers: media, audio, network, bluetooth (or none).")?;
+    writeln!(out, "4. Optional providers: media, audio, network, bluetooth, bibata-cursors, googledot-cursors (or none). Cursor packs require a separate user-approved install.")?;
     let optional_providers = loop {
         let Some(value) = ask(input, out, "Provider IDs, comma-separated [none]:")? else { return Ok(None); };
         if value.is_empty() || value == "none" { break Vec::new(); }
