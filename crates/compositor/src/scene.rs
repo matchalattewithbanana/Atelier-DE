@@ -120,7 +120,9 @@ struct CornerMask{
 }
 impl CornerMask{
     fn new(rect:Rectangle<i32,Logical>,radius:u32,output_height:i32,scale:f64)->Self{
-        Self{rect,radius:(radius.min(24) as f32).min(rect.size.w.max(0) as f32/2.0).min(rect.size.h.max(0) as f32/2.0),output_height,scale}
+        // Match the integer radius used by clipping, borders and input.
+        let radius=(radius.min(24) as i32).min(rect.size.w.max(0)/2).min(rect.size.h.max(0)/2) as f32;
+        Self{rect,radius,output_height,scale}
     }
     fn coordinates(&self,factor:Scale<f64>,transform:Transform)->Option<([f32;2],f32,f32)>{
         let sx=(self.scale*factor.x) as f32;let sy=(self.scale*factor.y) as f32;
@@ -455,6 +457,10 @@ mod tests{
         let rect=Rectangle::new((20,30).into(),(12,80).into());
         let mask=CornerMask::new(rect,24,1080,1.0);
         assert_eq!(mask.radius,6.0);
+        let odd=Rectangle::new((0,0).into(),(5,7).into());
+        assert_eq!(CornerMask::new(odd,24,1080,1.0).radius,2.0);
+        let tiny=Rectangle::new((0,0).into(),(1,7).into());
+        assert!(CornerMask::new(tiny,24,1080,1.0).uniforms(Scale::from(1.0),Transform::Normal).is_none());
         assert_eq!(mask.coordinates(Scale::from(1.0),Transform::Normal),Some(([1.0,1.0],0.0,0.0)));
         assert_eq!(mask.coordinates(Scale::from(1.0),Transform::Flipped180),Some(([1.0,1.0],1.0,1080.0)));
         assert_eq!(mask.coordinates(Scale::from(0.5),Transform::Normal),Some(([0.5,0.5],0.0,0.0)));
