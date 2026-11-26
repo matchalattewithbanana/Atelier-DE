@@ -4,7 +4,7 @@ use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use std::{fs,io::Write,path::Path};
 
-fn rgb(value:&str)->Result<[u8;3]>{
+pub(super) fn rgb(value:&str)->Result<[u8;3]>{
     if value.len()!=7||!value.starts_with('#')||!value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit){bail!("expected #RRGGBB color");}
     let n=u32::from_str_radix(&value[1..],16)?;
     Ok([(n>>16) as u8,(n>>8) as u8,n as u8])
@@ -13,7 +13,7 @@ fn luminance(c:[u8;3])->f64{
     let lin=|n:u8|{let v=f64::from(n)/255.0;if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)}};
     0.2126*lin(c[0])+0.7152*lin(c[1])+0.0722*lin(c[2])
 }
-fn contrast(a:[u8;3],b:[u8;3])->f64{
+pub(super) fn contrast(a:[u8;3],b:[u8;3])->f64{
     let (a,b)=(luminance(a),luminance(b));(a.max(b)+0.05)/(a.min(b)+0.05)
 }
 fn hex(c:[u8;3])->String{format!("#{:02x}{:02x}{:02x}",c[0],c[1],c[2])}

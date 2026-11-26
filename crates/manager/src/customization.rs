@@ -81,6 +81,9 @@ pub fn catalog()->Vec<Item>{
             detail:format!("Package candidate: {}. {}",c.package,c.detail)});
     }
     items.extend(crate::login_packs::items());
+    for (id,name) in atelier_config::access_theme::PRESETS{
+        items.push(Item{id:format!("access-theme:{id}"),category:"login",name:format!("Native: {name}"),source:"https://github.com/matchalattewithbanana/Atelier-DE".into(),declared_targets:vec!["atelier".into()],scope:"portable appearance data",install:"export in Native access theme Studio or access-theme export ID FILE",activation:"not implemented; future native greeter and ordinary locker",readiness:"Built-in offline preview".into(),detail:"Validated data-only preset; no executable code, external QML or authentication settings.".into()});
+    }
     for name in login_themes(Path::new("/usr/share/sddm/themes")){
         items.push(Item{id:format!("sddm-theme:{name}"),category:"login",name:format!("SDDM theme: {name}"),source:"https://github.com/sddm/sddm/wiki/Theming".into(),declared_targets:vec![],scope:"system",
             install:"existing local files; no installation",activation:"not implemented; trusted greeter test and reviewed system config required",
