@@ -1,7 +1,7 @@
 //! Optional layer-shell notification cards. No daemon ownership or replay.
 use crate::notification_bus::{self,Request};
 use atelier_config::{Appearance, NotificationAppearance, NotificationPosition, NotificationStyle};
-use gtk::{glib, prelude::*};
+use gtk::{gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc, collections::HashMap, sync::mpsc, time::{Duration, Instant}};
@@ -94,7 +94,7 @@ fn snapshot(json:&str) -> Result<Popup, String> {
 fn clipped(value: &str, length: usize) -> String { value.chars().take(length).collect() }
 fn label(text: &str, class: &str, limit: usize) -> gtk::Label {
     let label = gtk::Label::new(Some(&clipped(text, limit)));
-    label.set_xalign(0.0); label.set_wrap(true); label.set_max_width_chars(36);
+    label.set_xalign(0.0); label.set_wrap(true); label.set_wrap_mode(gtk::pango::WrapMode::WordChar); label.set_max_width_chars(36);
     if !class.is_empty() { label.add_css_class(class); }
     label
 }
@@ -137,7 +137,8 @@ fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requ
         }
         if notice.revision != 0 {
             for action in notice.actions.iter().take(8) {
-                let button = gtk::Button::with_label(&clipped(&action.label, 64));
+                let button = gtk::Button::new();
+                let action_label=label(&action.label,"",64);action_label.set_xalign(0.5);button.set_child(Some(&action_label));
                 let sender = requests.clone(); let instance = instance.clone();
                 let key = action.key.clone(); let revision = notice.revision;
                 button.connect_clicked(move |button| {
@@ -196,19 +197,47 @@ fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
     true
 }
 
-fn apply_layout(window:&gtk::ApplicationWindow,root:&gtk::Box,revealer:&gtk::Revealer,appearance:&Appearance,island:bool){
-    let n=appearance.notifications;
+// One presenter follows a single selected output. Never duplicate actions on
+// several outputs. Missing connectors fall back to the panel, then the first
+// available monitor; the original preference is retained for hotplug.
+#[derive(Clone,PartialEq,Eq)]
+struct Output { monitor:gdk::Monitor,width:i32,height:i32 }
+fn select_output(panel:&gtk::ApplicationWindow,connector:&str)->Option<Output>{
+    let display=gdk::Display::default()?;
+    let monitors=display.monitors();
+    let available:Vec<_>=(0..monitors.n_items()).filter_map(|i|monitors.item(i).and_downcast::<gdk::Monitor>()).collect();
+    let selected=if connector.is_empty(){None}else{
+        available.iter().find(|m|m.connector().is_some_and(|name|name.as_str()==connector)).cloned()
+    };
+    let monitor=selected.or_else(||panel.surface().and_then(|surface|display.monitor_at_surface(&surface))
+        .filter(|m|available.contains(m))).or_else(||available.first().cloned())?;
+    let geometry=monitor.geometry();
+    Some(Output{monitor,width:geometry.width(),height:geometry.height()})
+}
+#[derive(Debug,PartialEq,Eq)]
+struct Geometry { width:i32,height:i32,top:i32,margin:i32 }
+fn geometry(preferred:u32,panel_height:u32,output:Option<(i32,i32)>)->Geometry{
+    let (width,height)=output.unwrap_or((1024,768));
+    let width=width.max(1);let height=height.max(1);
+    let margin=12.min((width-1)/2).min((height-1)/2);
+    let top=(panel_height as i32+12).min((height/3).max(0));
+    Geometry{width:(preferred as i32).min((width-2*margin).max(1)),height:(height-top-margin).max(1),top,margin}
+}
+fn apply_layout(window:&gtk::ApplicationWindow,scroll:&gtk::ScrolledWindow,revealer:&gtk::Revealer,appearance:&Appearance,island:bool,output:Option<&Output>){
+    let n=&appearance.notifications;
     let style=n.style_for_launch(island);
     let position=n.position_for_style(style);
+    let g=geometry(n.width,appearance.panel_height,output.map(|o|(o.width,o.height)));
     window.set_anchor(Edge::Left,position==NotificationPosition::TopLeft);
     window.set_anchor(Edge::Right,position==NotificationPosition::TopRight);
-    window.set_margin(Edge::Left,12);window.set_margin(Edge::Right,12);
-    window.set_margin(Edge::Top,appearance.panel_height as i32+12);
-    window.set_default_size(n.width as i32,-1);
-    root.set_size_request(n.width as i32-16,-1);
+    window.set_margin(Edge::Left,g.margin);window.set_margin(Edge::Right,g.margin);
+    window.set_margin(Edge::Top,g.top);
+    window.set_default_size(g.width,-1);
+    scroll.set_min_content_width(g.width);
+    scroll.set_max_content_height(g.height);
     revealer.set_transition_duration(n.transition_ms(appearance.motion));
 }
-fn limit(n:NotificationAppearance,island:bool)->usize{
+fn limit(n:&NotificationAppearance,island:bool)->usize{
     if n.style_for_launch(island)==NotificationStyle::Floating{1}else{n.max_cards as usize}
 }
 
@@ -220,21 +249,34 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     window.set_keyboard_mode(KeyboardMode::None); window.set_exclusive_zone(0);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
     root.set_margin_top(4); root.set_margin_bottom(4); root.set_margin_start(8); root.set_margin_end(8);
+    let scroll=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vscrollbar_policy(gtk::PolicyType::Automatic).propagate_natural_height(true).child(&root).build();
     let revealer = gtk::Revealer::new(); revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
-    revealer.set_child(Some(&root)); window.set_child(Some(&revealer));
-    let mut applied=live.borrow().clone();apply_layout(&window,&root,&revealer,&applied,island);
+    revealer.set_child(Some(&scroll)); window.set_child(Some(&revealer));
+    let mut applied=live.borrow().clone();
+    let mut output=select_output(panel,&applied.notifications.output);
+    window.set_monitor(output.as_ref().map(|o|&o.monitor));
+    apply_layout(&window,&scroll,&revealer,&applied,island,output.as_ref());
+    let mut next_output_check=Instant::now();
     let (requests,receive,watch)=notification_bus::start("Popup",snapshot);
     let panel = panel.downgrade(); let mut cursor = Cursor::default();
     let mut rendered = Vec::new(); let mut rendered_instance = None; let mut rendered_queued = 0;
     glib::timeout_add_local(Duration::from_millis(100), move || {
-        if panel.upgrade().is_none() { window.close(); return glib::ControlFlow::Break; }
+        let Some(panel)=panel.upgrade()else{window.close();return glib::ControlFlow::Break;};
         let _=&watch;
         let now = Instant::now();
         let current=live.borrow();
-        let layout_changed=applied.notifications!=current.notifications || applied.motion!=current.motion || applied.panel_height!=current.panel_height;
-        if layout_changed{apply_layout(&window,&root,&revealer,&current,island);applied=current.clone();}
+        let mut layout_changed=applied.notifications!=current.notifications || applied.motion!=current.motion || applied.panel_height!=current.panel_height;
+        if now>=next_output_check || applied.notifications.output!=current.notifications.output{
+            next_output_check=now+Duration::from_secs(1);
+            let next=select_output(&panel,&current.notifications.output);
+            if output!=next{
+                if output.as_ref().map(|o|&o.monitor)!=next.as_ref().map(|o|&o.monitor){window.set_monitor(next.as_ref().map(|o|&o.monitor));}
+                output=next;layout_changed=true;
+            }
+        }
+        if layout_changed{apply_layout(&window,&scroll,&revealer,&current,island,output.as_ref());applied=current.clone();}
         drop(current);
-        let prefs=applied.notifications;
+        let prefs=&applied.notifications;
         let style=prefs.style_for_launch(island);
         let card_limit=limit(prefs,island);
         let mut action_reply = None;
@@ -277,6 +319,13 @@ mod tests {
         Popup {schema:1,instance:instance.into(),last_id:10,dnd,notice:None,latest_revision:revision,cards,queued:0}
     }
     #[test]
+    fn geometry_respects_logical_output_bounds(){
+        assert_eq!(geometry(480,48,Some((1920,1080))),Geometry{width:480,height:1008,top:60,margin:12});
+        assert_eq!(geometry(480,48,Some((320,240))),Geometry{width:296,height:168,top:60,margin:12});
+        let tiny=geometry(340,96,Some((10,10)));
+        assert_eq!(tiny.width,2);assert_eq!(tiny.height,3);
+    }
+    #[test]
     fn icon_names_are_not_file_paths(){
         assert_eq!(safe_icon("emblem-ok-symbolic"),"emblem-ok-symbolic");
         for invalid in ["","/tmp/image.png","../image","file:icon"]{assert_eq!(safe_icon(invalid),"dialog-information-symbolic");}
@@ -304,9 +353,9 @@ mod tests {
         c.expire(now+Duration::from_secs(1));assert_eq!(c.cards().len(),2);
         c.expire(now+lifetime);assert!(c.cards().is_empty());
         let mut prefs=NotificationAppearance::default();
-        assert_eq!(limit(prefs,false),1);assert_eq!(limit(prefs,true),3);
+        assert_eq!(limit(&prefs,false),1);assert_eq!(limit(&prefs,true),3);
         prefs.style=NotificationStyle::Compact;prefs.max_cards=2;
-        assert_eq!(limit(prefs,false),2);
+        assert_eq!(limit(&prefs,false),2);
     }
     #[test]
     fn stack_and_dnd_never_replay_old_cards() {
