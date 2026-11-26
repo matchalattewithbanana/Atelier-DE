@@ -66,6 +66,23 @@ impl Guard{
         self.probe.get_or_insert_with(Probe::start).permits(now)
     }
 }
+/// A blocked interval invalidates all earlier popup deliveries. On resume
+/// the presenter must establish a new watermark from a fresh snapshot.
+pub struct Gate{permitted:bool,resumed:Option<Instant>}
+impl Default for Gate{
+    fn default()->Self{Self{permitted:true,resumed:None}}
+}
+impl Gate{
+    pub fn update(&mut self,permitted:bool,now:Instant)->bool{
+        if self.permitted==permitted{return false;}
+        self.permitted=permitted;
+        self.resumed=permitted.then_some(now);
+        true
+    }
+    pub fn accepts(&self,started:Instant)->bool{
+        self.permitted&&self.resumed.is_none_or(|resumed|started>=resumed)
+    }
+}
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -78,6 +95,14 @@ mod tests{
         properties.insert("LockedHint".into(),false.to_variant());
         properties.insert("Active".into(),false.to_variant());assert!(!allowed(&properties));
         properties.insert("Active".into(),"true".to_variant());assert!(!allowed(&properties));
+    }
+    #[test]
+    fn resume_rejects_snapshots_started_before_new_baseline(){
+        let now=Instant::now();let later=now+Duration::from_secs(1);let mut gate=Gate::default();
+        assert!(gate.accepts(now));
+        assert!(gate.update(false,now));assert!(!gate.accepts(now));
+        assert!(gate.update(true,later));assert!(!gate.accepts(now));assert!(gate.accepts(later));
+        assert!(!gate.update(true,later));
     }
     #[test]
     fn stale_samples_do_not_allow_popups(){
