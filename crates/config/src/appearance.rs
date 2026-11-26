@@ -479,6 +479,16 @@ impl AppearanceReview{
         let bytes=read(&self.path.with_file_name("appearance.previous.toml"))?.context("No previous appearance backup")?;
         decode(Some(&bytes))
     }
+    /// Change just one pin in the reviewed profile. Other preferences and
+    /// pin order are preserved; save retains the normal backup/stale checks.
+    pub fn set_dock_pin(&mut self,id:&str,pinned:bool)->Result<bool>{
+        validate_dock_pins(&[id.to_owned()])?;
+        let mut next=self.value.clone();
+        if pinned{
+            if !next.dock_pins.iter().any(|pin|pin==id){next.dock_pins.push(id.to_owned());}
+        }else{next.dock_pins.retain(|pin|pin!=id);}
+        self.save(next)
+    }
     pub fn save(&mut self,next:Appearance)->Result<bool>{
         next.validate()?;
         let parent=self.path.parent().context("appearance directory missing")?;
@@ -517,6 +527,26 @@ mod tests{
         assert!(css.contains(".atelier-control-window scale.atelier-expressive-slider"));
         assert!(css.contains("background-color: #abc4ff; color: #000000"));
         assert!(Appearance::default().css().unwrap().contains("@theme_selected_bg_color"));
+    }
+    #[test]
+    fn reviewed_pin_edit_preserves_order_other_preferences_and_stale_checks(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
+        let mut review=AppearanceReview::load(&path).unwrap();
+        let initial=Appearance{dock_pins:vec!["first.desktop".into(),"second.desktop".into()],dock_enabled:false,accent:"#123456".into(),..Appearance::default()};
+        review.save(initial.clone()).unwrap();
+        let mut stale=AppearanceReview::load(&path).unwrap();
+        assert!(review.set_dock_pin("third.desktop",true).unwrap());
+        assert_eq!(review.previous().unwrap(),initial);
+        assert!(!review.set_dock_pin("third.desktop",true).unwrap());
+        assert!(stale.set_dock_pin("first.desktop",false).is_err());
+        assert!(review.set_dock_pin("second.desktop",false).unwrap());
+        assert_eq!(review.value,Appearance{dock_pins:vec!["first.desktop".into(),"third.desktop".into()],..initial});
+        assert!(review.set_dock_pin("../invalid.desktop",true).is_err());
+        assert!(!review.value.dock_enabled);
+        let mut full=review.value.clone();full.dock_pins=(0..32).map(|i|format!("app{i}.desktop")).collect();
+        review.save(full.clone()).unwrap();
+        assert!(review.set_dock_pin("overflow.desktop",true).is_err());
+        assert_eq!(Appearance::load(&path).unwrap(),full);
     }
     #[test]
     fn reviewed_save_preserves_previous_and_rejects_stale(){
