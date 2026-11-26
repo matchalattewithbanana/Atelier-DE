@@ -16,7 +16,6 @@ fn luminance(c:[u8;3])->f64{
 pub(super) fn contrast(a:[u8;3],b:[u8;3])->f64{
     let (a,b)=(luminance(a),luminance(b));(a.max(b)+0.05)/(a.min(b)+0.05)
 }
-fn hex(c:[u8;3])->String{format!("#{:02x}{:02x}{:02x}",c[0],c[1],c[2])}
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellPalette{
@@ -111,19 +110,19 @@ impl PortableTheme{
 fn validate_path(path:&Path)->Result<()>{
     if !path.is_absolute()||path.extension().and_then(|s|s.to_str())!=Some("json"){bail!("use an absolute .json theme path");}Ok(())
 }
-/// Derive restrained tinted surfaces and a readable foreground, using the
-/// sampled color as an accent. This does not change the wallpaper or geometry.
+/// Derive Material tonal-spot colors for a reviewed desktop appearance draft.
+/// Geometry, wallpaper, motion and machine-local choices remain unchanged.
 pub fn from_seed(seed:[u8;3],light:bool,base:&Appearance)->Result<PortableTheme>{
-    let mix=|a:[u8;3],b:[u8;3],ratio:f64|std::array::from_fn(|i|((f64::from(a[i])*(1.0-ratio)+f64::from(b[i])*ratio).round()) as u8);
-    let (surface,elevated,text,muted,accent)=if light{
-        (mix([250;3],seed,0.055),mix([238;3],seed,0.09),[23;3],[70;3],mix(seed,[0;3],0.34))
-    }else{
-        (mix([18;3],seed,0.09),mix([30;3],seed,0.13),[245;3],[186;3],mix(seed,[255;3],0.35))
-    };
-    let mut theme=PortableTheme::capture(if light{"Wallpaper light".into()}else{"Wallpaper dark".into()},base);
-    theme.accent=hex(accent);theme.shell_palette=Some(ShellPalette{surface:hex(surface),elevated:hex(elevated),text:hex(text),muted:hex(muted)});
-    theme.window_border.focused=hex(accent);
-    theme.window_border.unfocused=hex(mix(seed,if light{[80;3]}else{[150;3]},0.65));
+    use crate::dynamic_palette::{Options,Variant,Contrast};
+    from_seed_with(seed,Options{variant:Variant::TonalSpot,light,contrast:Contrast::Normal},base)
+}
+pub fn from_seed_with(seed:[u8;3],options:crate::dynamic_palette::Options,base:&Appearance)->Result<PortableTheme>{
+    let generated=crate::dynamic_palette::generate(seed,options)?;
+    let mut theme=PortableTheme::capture(if options.light{"Wallpaper light".into()}else{"Wallpaper dark".into()},base);
+    theme.shell_palette=Some(generated.shell());
+    theme.accent=generated.access.accent;
+    theme.window_border.focused=theme.accent.clone();
+    theme.window_border.unfocused=generated.outline;
     theme.applied(base)?;Ok(theme)
 }
 #[cfg(test)]
