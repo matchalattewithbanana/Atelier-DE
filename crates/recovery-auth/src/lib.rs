@@ -3,7 +3,7 @@
 #![cfg(all(target_os = "linux", feature = "pam"))]
 
 use libc::{c_char, c_int, c_void};
-use std::{ffi::{CStr, CString}, ptr, sync::atomic::{compiler_fence, Ordering}};
+use std::{ffi::{CStr, CString}, fs, os::unix::fs::MetadataExt, path::Path, ptr, sync::atomic::{compiler_fence, Ordering}};
 
 // Linux-PAM ABI: security/_pam_types.h and security/_pam_appl.h.
 const SUCCESS: c_int = 0;
@@ -100,6 +100,16 @@ unsafe fn responses(count: c_int, messages: *mut *const Message,
     SUCCESS
 }
 
+// Refuse Linux-PAM's fallback to the "other" service when the dedicated
+// administrator-installed policy is missing. This does not audit its modules.
+fn service_present() -> bool {
+    let path = Path::new("/etc/pam.d/atelier-recovery-locker");
+    let Ok(file) = fs::symlink_metadata(path) else { return false; };
+    file.is_file() && file.uid() == 0 && file.mode() & 0o022 == 0 &&
+        path.parent().is_some_and(|parent| parent.ancestors().all(|p|
+            fs::symlink_metadata(p).is_ok_and(|m| m.is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0)))
+}
+
 fn current_user() -> Option<CString> {
     let uid = unsafe { libc::getuid() };
     if uid == 0 || uid != unsafe { libc::geteuid() } { return None; }
@@ -136,14 +146,16 @@ pub fn authenticate(password: &mut [u8]) -> bool {
     if secret.0.is_empty() || secret.0.len() > MAX_SECRET || secret.0.contains(&0) {
         return false;
     }
+    if !service_present() { return false; }
     let Some(user) = current_user() else { return false; };
-    let mut attempt = Attempt { secret: secret.0, used: false, failed: false, allow_secret: true };
+    let mut attempt = Attempt { secret: &*secret.0, used: false, failed: false, allow_secret: false };
     let conv = Conversation { callback: converse, data: (&mut attempt as *mut Attempt<'_>).cast() };
     let mut handle = ptr::null_mut();
     unsafe {
         let start = pam_start(SERVICE.as_ptr().cast(), user.as_ptr(), &conv, &mut handle);
         if start != SUCCESS || handle.is_null() { return false; }
-        let mut status = pam_authenticate(handle, DISALLOW_NULL_AUTHTOK);
+        attempt.allow_secret = true;
+        let mut status = if attempt.failed { CONV_ERR } else { pam_authenticate(handle, DISALLOW_NULL_AUTHTOK) };
         attempt.allow_secret = false;
         if status == SUCCESS && (!attempt.used || attempt.failed || !same_user(handle, &user)) {
             status = CONV_ERR;
