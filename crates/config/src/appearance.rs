@@ -381,7 +381,11 @@ impl Appearance{
             .atelier-launcher .atelier-launcher-results row:selected {{ background-color: {primary}; color: {on_primary}; }} \
             .atelier-launcher .atelier-launcher-results row:selected .dim-label {{ color: {on_primary}; opacity: 1; }} \
             .atelier-launcher .atelier-launcher-app {{ padding: 10px 12px; }} \
-            .atelier-launcher .atelier-launcher-app-name {{ font-size: 16px; font-weight: 500; }}",self.button_radius));
+            .atelier-launcher .atelier-launcher-app-name {{ font-size: 16px; font-weight: 500; }} \
+            .atelier-launcher .atelier-launcher-grid {{ background-color: {container}; border-radius: 28px; padding: 6px; }} \
+            .atelier-launcher .atelier-launcher-grid flowboxchild {{ border-radius: {}px; }} \
+            .atelier-launcher .atelier-launcher-grid flowboxchild:selected {{ background-color: {primary}; color: {on_primary}; }} \
+            .atelier-launcher .atelier-launcher-tile {{ padding: 10px; }}",self.button_radius,self.button_radius));
         Ok(css)
     }
 }
