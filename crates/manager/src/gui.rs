@@ -18,6 +18,7 @@ mod customization;
 mod customization_registry;
 mod cursor_preview;
 mod login_theme;
+mod access_themes;
 mod locker;
 
 #[derive(Clone, Copy, Debug)]
@@ -260,6 +261,7 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     stack.add_titled(&customization::build(), Some("customizations"), "Customization catalog");
     stack.add_titled(&cursor_preview::build(), Some("cursor-preview"), "Cursor previews");
     stack.add_titled(&login_theme::build(), Some("login-themes"), "Login themes");
+    stack.add_titled(&access_themes::build(), Some("access-themes"), "Native access theme Studio");
     stack.add_titled(&locker::build(), Some("lockers"), "Screen lockers");
     stack.add_titled(&customization_registry::build(), Some("custom-components"), "Custom components");
     stack.add_titled(&registry::build(), Some("registry"), "Custom rices");

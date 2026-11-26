@@ -70,3 +70,32 @@ Manager → Login themes accepts an installed theme directory or an absolute loc
 Manager → Screen lockers and `atelier-manager locker check [--json]` inspect the current explicit WAYLAND_DISPLAY, using a bounded five-second wayland-info query with system-owned tools. The probe checks ext_session_lock_manager_v1, layer-shell and advertised output count; it also checks known locker executables and the first matching PAM service file in conventional system locations. Selecting swaylock, hyprlock or gtklock in the setup package review includes wayland-utils and coreutils. Missing/unsafe files and failed registry queries are distinguished from successful advertisements. This is not an authentication or lock test. It does not establish compositor correctness, output isolation, PAM validity, actual locker-version compatibility or host protection from a nested session. No locker is launched, no authentication is attempted, no config changes are made. Native secure locking remains blocked on a compositor implementation and physical acceptance. GTKLock also requires layer-shell in this initial conservative check.
 
 Native lock groundwork is tracked separately in [SESSION_LOCK.md](SESSION_LOCK.md). There is no advertised native session-lock protocol yet; locker diagnostics must not imply native lock support.
+
+## Curated upstream login collections
+
+Manager's customization catalog and Login themes page include the original four [rd SDDM themes](https://github.com/rd6260/sddm-themes/tree/e5362dae5b38e79527737d4b32e95f001f8aa9e2) (MIT code) and 42 individual [Qylock themes](https://github.com/Darkkal44/qylock/tree/c2933f27b655a999911e6699e1b2c67e59cbd428) (GPLv3 code), including three Clockwork variants. They are optional external SDDM theme sources, not native Atelier lock-screen themes. Source revisions are pinned; separately licensed fonts, artwork and videos are not covered by a blanket redistribution or compatibility claim.
+
+Browse in Manager, choose a theme and click Download selected upstream theme for review. CLI equivalents:
+
+```sh
+atelier-manager customizations list login
+atelier-manager login-theme pack-prepare login-pack:rd:CBRPNK
+atelier-manager login-theme pack-prepare login-pack:qylock:clockwork/tape
+```
+
+The existing bounded GitHub CLI transport downloads only the selected theme and upstream license to a temporary directory, verifies file sizes and Git blob identities, and rejects special files, symlinks, traversal, truncated trees and oversized content. The existing local inspector supplies a file inventory, fingerprint and any supported static screenshot; preparing the inert user-local copy requires explicit review confirmation. The copied tree contains the upstream license and pinned source record. The temporary source is retained only for the review. No QML or upstream installer script is run, no system folders are written, and no display manager is activated. Download access requires working system gh and timeout executables and GitHub access. Pinning and content checks are not a security audit or a signed publisher trust grant.
+
+Forest, Last of Us, Pixel Hollow Knight and Sword exceed the existing 32 MiB individual-file/64 MiB aggregate staging bounds and remain reference-only until a bounded media strategy is designed. Some other themes require separate fonts, modules or dependencies; no compatibility guarantee is made. The Qylock Quickshell locker collection is also listed as an external reference, not an executable adapter. Its original runtime, including process cleanup and unlock behavior, must be reviewed separately; Atelier never executes that launcher or falls back to a cosmetic fullscreen window. Native recovery authentication remains independent of external QML. The intended native theme engine will use declarative themes without arbitrary authentication code.
+
+## Install a reviewed SDDM theme into the system
+
+User-local preparation is deliberately separate from administrator installation. An administrator must inspect the QML and asset licenses, and place an approved copy of the theme in a protected, administrator-owned directory (for example under /var/lib/atelier/sddm-imports). Do not pass the original user-writable checkout or staging directory to a privileged command. The source, all ancestors and all entries must be administrator-owned and not group/other-writable; symlinks and special files are refused. A private administrator source is allowed. Use a separately installed, root-owned Manager binary in a protected executable path. No automatic sudo or privilege elevation is provided.
+
+```sh
+atelier-manager login-theme install-plan atelier-ironclad --from /var/lib/atelier/sddm-imports/ironclad
+# From an administrator terminal, using the installed trusted binary:
+atelier-manager login-theme install atelier-ironclad --from /var/lib/atelier/sddm-imports/ironclad
+atelier-manager login-theme selection-plan atelier-ironclad
+```
+
+Installation checks the bounded source tree, shows the content fingerprint and destination, requires exact typed confirmation and rejects a changed source. It copies reviewed regular files with non-executable 0644 permissions into a fresh private temporary tree, normalizes directories to 0755, verifies the copied file-content fingerprint and publishes with a no-replace atomic rename. Existing themes are never overwritten; only new atelier-NAME directories are supported. Empty directories are not copied. The existing 32 MiB per-file and 64 MiB aggregate limits remain. The import itself never changes the active theme, runs QML or restarts SDDM. Selection and its previous-configuration rollback are separate reviewed operations. Administrator ownership is not an audit of executable QML. Test greeter compatibility and keep a working spare TTY before selection. No automatic system cleanup is performed; unused new theme directories can be removed by an administrator after checking that they are not selected. Actual greeter activation is not covered by the unit tests.

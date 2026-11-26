@@ -76,8 +76,18 @@ pub fn validate_candidate(path:&Path)->Result<()>{
 /// pixels; favor chromatic, mid-tone colors without letting a single pixel win.
 pub fn palette_seed(path:&Path)->Result<[u8;3]>{
     let raster=decode(path,96)?;
+    seed_from_raster(&raster)
+}
+/// Bounded sampling of already-decoded pixels, including imported bundles.
+/// This selects a source RGB color; HCT scheme generation is separate.
+pub fn seed_from_raster(raster:&Raster)->Result<[u8;3]>{
+    let expected=u64::from(raster.width)*u64::from(raster.height);
+    if expected==0||expected.checked_mul(4)!=Some(raster.rgba.len() as u64){
+        anyhow::bail!("invalid wallpaper raster");
+    }
+    let step=(raster.rgba.len()/4).div_ceil(9216).max(1);
     let mut bins=std::collections::BTreeMap::<[u8;3],(u64,[u64;3])>::new();
-    for px in raster.rgba.chunks_exact(4){
+    for px in raster.rgba.chunks_exact(4).step_by(step){
         if px[3]<192{continue;}
         let entry=bins.entry([px[0]/32,px[1]/32,px[2]/32]).or_default();
         entry.0+=1;for i in 0..3{entry.1[i]+=u64::from(px[i]);}

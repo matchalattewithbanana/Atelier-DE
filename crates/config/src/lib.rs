@@ -8,6 +8,11 @@ pub use window_rules::{WindowRule,WindowRules};
 pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
+pub mod access_theme;
+pub mod design;
+pub mod dynamic_palette;
+#[cfg(feature = "wallpaper")]
+pub mod access_bundle;
 pub mod cursor_images;
 pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS, NotificationAppearance, NotificationStyle, NotificationPosition};
 
