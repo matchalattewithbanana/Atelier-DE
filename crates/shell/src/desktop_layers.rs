@@ -33,6 +33,7 @@ impl DesktopLayers{
             if dock.enabled{self.dock=Some(crate::dock::build(app,prefs));}
             self.dock_preferences=Some(dock);
         }
+        if let Some(dock)=&self.dock{dock.set_reduced_motion(prefs.motion.reduced_motion);}
         if native{
             self.wallpaper.update(app,prefs);
             if self.widget_preferences.as_ref()!=Some(&prefs.widgets){
@@ -73,7 +74,7 @@ mod tests{
     #[test]
     fn dock_rebuild_key_excludes_unrelated_appearance(){
         let mut prefs=Appearance::default();let original=DockPreferences::from(&prefs);
-        prefs.accent="#123456".into();prefs.button_radius=20;prefs.wallpaper_path="/tmp/wall.png".into();
+        prefs.accent="#123456".into();prefs.button_radius=20;prefs.wallpaper_path="/tmp/wall.png".into();prefs.motion.reduced_motion=true;
         assert_eq!(DockPreferences::from(&prefs),original);
         prefs.dock_pins.push("foot.desktop".into());assert_ne!(DockPreferences::from(&prefs),original);
         let pinned=DockPreferences::from(&prefs);prefs.dock_auto_hide=true;assert_ne!(DockPreferences::from(&prefs),pinned);

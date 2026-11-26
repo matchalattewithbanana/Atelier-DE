@@ -14,6 +14,10 @@ pub struct Dock {
     window:gtk::ApplicationWindow,
     tasks:Option<glib::SourceId>,
     visibility:crate::dock_visibility::Visibility,
+    motion:crate::dock_motion::Preference,
+}
+impl Dock{
+    pub fn set_reduced_motion(&self,reduced:bool){self.motion.set(reduced);}
 }
 impl Drop for Dock{
     fn drop(&mut self){
@@ -40,6 +44,7 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
     let open_menus=Rc::new(Cell::new(0usize));
     let grouping=backend.is_some()&&gtk4_layer_shell::protocol_version()>=4;
     let apps=applications::installed();
+    let motion=crate::dock_motion::Preference::new(appearance.motion.reduced_motion);
     for id in &appearance.dock_pins{
         let Some(info)=apps.iter().find(|info|info.id().as_deref()==Some(id.as_str())).cloned()else{
             let missing=gtk::Button::with_label("?");
@@ -49,10 +54,10 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
         let name=info.display_name();
         let button=gtk::Button::new();button.set_tooltip_text(Some(&name));
         let icon=info.icon().map(|icon|gtk::Image::from_gicon(&icon)).unwrap_or_else(||gtk::Image::from_icon_name("application-x-executable"));
-        icon.set_pixel_size(appearance.dock_icon_size as i32);
+        let icon_slot=crate::dock_motion::icon_slot(&button,&icon,appearance.dock_icon_size,motion.clone());
         let indicator=Indicator::new();
         let tile=gtk::Box::new(gtk::Orientation::Vertical,3);
-        tile.append(&icon);tile.append(&indicator.root);button.set_child(Some(&tile));
+        tile.append(&icon_slot);tile.append(&indicator.root);button.set_child(Some(&tile));
         button.add_css_class("atelier-dock-tile");
         button.update_property(&[gtk::accessible::Property::Label(&name)]);
         let native_tasks=backend.is_some();
@@ -101,7 +106,7 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
     window.set_child(Some(&scroll));window.present();
     let tasks=backend.map(|backend|watch_tasks(&window,&tasks,backend,snapshot.clone(),pins,grouping));
     let visibility=crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen,open_menus);
-    Dock{window,tasks,visibility}
+    Dock{window,tasks,visibility,motion}
 }
 
 
