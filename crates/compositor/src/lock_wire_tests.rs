@@ -431,7 +431,7 @@ fn actual_recovery_client_binds_keyboard_without_unlocking(){
     // collect text or turn them into authentication or unlock requests.
     for key in [38u32,36]{
         for event in [KeyState::Pressed,KeyState::Released]{
-            keyboard.input(&mut h.state,key.into(),SERIAL_COUNTER.next_serial(),0,|_,_,_|FilterResult::<()>::Forward);
+            keyboard.input(&mut h.state,key.into(),event,SERIAL_COUNTER.next_serial(),0,|_,_,_|FilterResult::<()>::Forward);
         }
     }
     let until=Instant::now()+Duration::from_millis(200);
