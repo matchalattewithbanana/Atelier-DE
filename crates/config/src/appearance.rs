@@ -375,7 +375,7 @@ fn encoded(value:&Appearance)->Result<Vec<u8>>{
     if bytes.len()>65536{bail!("appearance exceeds 64 KiB after serialization");}
     Ok(bytes)
 }
-fn replace(path:&Path,bytes:&[u8])->Result<()>{
+pub(crate) fn replace(path:&Path,bytes:&[u8])->Result<()>{
     let parent=path.parent().context("appearance directory missing")?;
     let mut temp=tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(bytes)?;temp.as_file().sync_all()?;temp.persist(path)?;
