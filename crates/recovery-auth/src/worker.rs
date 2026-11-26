@@ -2,12 +2,12 @@
 use std::{io::{self, Read, Write}, os::{fd::{AsRawFd, FromRawFd}, unix::net::UnixStream}, time::Duration};
 use crate::{Secret, MAX_SECRET};
 
-const VERSION: u8 = 1;
+pub(super) const VERSION: u8 = 1;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Call at the beginning of the dedicated executable, before accepting secrets.
 /// This is defense in depth, not isolation from a compromised desktop UID.
-fn harden() -> io::Result<()> {
+pub(super) fn harden() -> io::Result<()> {
     unsafe {
         if libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) != 0 {
             return Err(io::Error::last_os_error());
