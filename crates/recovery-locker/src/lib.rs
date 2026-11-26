@@ -1,17 +1,17 @@
 //! Experimental black-only lock client. No executable or unlock authority.
 //! The caller must provide a compositor-created private socket, never an
 //! ambient desktop socket. This is not yet an interactive or secure locker.
-// Not connected to protocol events until exact keyboard focus is tracked.
+// The black-only client binds keyboard events but never enables entry.
 #[allow(dead_code)]
 mod entry;
-#[allow(dead_code)]
 mod keyboard;
+mod seat;
 
 use anyhow::{bail, Context, Result};
 use std::{fs::File, os::{fd::{AsFd, FromRawFd}, unix::net::UnixStream}};
 use wayland_client::{
     delegate_noop, Connection, Dispatch, QueueHandle,
-    protocol::{wl_registry, wl_compositor, wl_output, wl_surface, wl_shm, wl_shm_pool, wl_buffer},
+    protocol::{wl_registry, wl_compositor, wl_output, wl_surface, wl_shm, wl_shm_pool, wl_buffer, wl_seat},
 };
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1 as manager,
@@ -27,6 +27,8 @@ struct State {
     shm_name: Option<u32>,
     output: Option<u32>,
     manager: Option<u32>,
+    seat_name: Option<u32>,
+    input: seat::Input,
     shm: Option<wl_shm::WlShm>,
     surface: Option<wl_surface::WlSurface>,
     configured: bool,
@@ -42,19 +44,24 @@ impl State {
             "wl_shm" => &mut self.shm_name,
             "wl_output" => &mut self.output,
             "ext_session_lock_manager_v1" => &mut self.manager,
+            "wl_seat" => &mut self.seat_name,
             _ => return,
         };
         if self.started || target.is_some() {
-            self.failure = Some("unsupported global or output topology change");
+            self.fail("unsupported global or output topology change");
         } else {
             *target = Some(name);
         }
     }
 
     fn remove(&mut self, name: u32) {
-        if [self.compositor, self.shm_name, self.output, self.manager].contains(&Some(name)) {
-            self.failure = Some("required global removed");
+        if [self.compositor, self.shm_name, self.output, self.manager,self.seat_name].contains(&Some(name)) {
+            self.fail("required global removed");
         }
+    }
+
+    fn fail(&mut self, reason:&'static str){
+        self.input.revoke();self.failure=Some(reason);
     }
 
     fn check(&self) -> Result<()> {
@@ -90,7 +97,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(state: &mut Self, _: &wl_registry::WlRegistry, event: wl_registry::Event,
         _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
-            wl_registry::Event::Global { name, interface, .. } => state.global(name, &interface),
+            wl_registry::Event::Global { name, interface, version } => {
+                if interface=="wl_seat" && version<3 {state.fail("unsupported seat protocol version");}
+                else {state.global(name,&interface);}
+            },
             wl_registry::Event::GlobalRemove { name } => state.remove(name),
             _ => {},
         }
@@ -102,8 +112,8 @@ impl Dispatch<lock::ExtSessionLockV1, ()> for State {
         _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
             lock::Event::Locked if !state.confirmed => state.confirmed = true,
-            lock::Event::Locked => state.failure = Some("duplicate lock confirmation"),
-            lock::Event::Finished => state.failure = Some("lock rejected or revoked"),
+            lock::Event::Locked => state.fail("duplicate lock confirmation"),
+            lock::Event::Finished => state.fail("lock rejected or revoked"),
             _ => {},
         }
     }
@@ -116,19 +126,19 @@ impl Dispatch<role::ExtSessionLockSurfaceV1, ()> for State {
             // The compositor currently supports one fixed unscaled output.
             // Do not acknowledge or commit on unsupported reconfiguration.
             if state.failure.is_some() || state.configured {
-                state.failure = Some("unsupported lock surface reconfiguration");
+                state.fail("unsupported lock surface reconfiguration");
                 return;
             }
             let Some((w,h,stride,bytes)) = layout(width,height) else {
-                state.failure = Some("invalid lock buffer dimensions");
+                state.fail("invalid lock buffer dimensions");
                 return;
             };
             let Ok(file) = black_file(bytes) else {
-                state.failure = Some("could not allocate protected buffer");
+                state.fail("could not allocate protected buffer");
                 return;
             };
             let (Some(shm), Some(surface)) = (&state.shm, &state.surface) else {
-                state.failure = Some("missing lock surface prerequisites");
+                state.fail("missing lock surface prerequisites");
                 return;
             };
             let pool = shm.create_pool(file.as_fd(), bytes, qh, ());
@@ -160,7 +170,9 @@ delegate_noop!(State: ignore wl_output::WlOutput);
 delegate_noop!(State: ignore manager::ExtSessionLockManagerV1);
 
 /// Exercise the private protocol with an opaque black surface. Never sends
-/// unlock_and_destroy, accepts keyboard input, or performs authentication.
+/// unlock_and_destroy, accepts password input, or performs authentication.
+/// An optional single seat is bound to validate keyboard protocol routing;
+/// entry readiness remains false because this surface has no prompt.
 /// Blocks until disconnection or failure; the supervising compositor must
 /// keep the desktop protected even if this client exits. No runtime caller
 /// exists. Do not invoke this on an ordinary desktop session.
@@ -180,6 +192,10 @@ pub fn hold_black(socket: UnixStream) -> Result<()> {
     let surface = compositor.create_surface(&qh, ());
     state.shm = Some(shm);
     state.surface = Some(surface.clone());
+    if let Some(name)=state.seat_name{
+        let seat:wl_seat::WlSeat=registry.bind(name,3,&qh,());
+        state.input.bind(seat);
+    }
     let lock = manager.lock(&qh, ());
     let _role = lock.get_lock_surface(&surface, &output, &qh, ());
     loop {
