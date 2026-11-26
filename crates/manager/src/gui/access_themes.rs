@@ -1,8 +1,8 @@
 //! Offline native login/lock theme draft editor. Never connects to a greeter
 //! or collects real credentials. The drawing uses the shared layout contract.
-use atelier_config::access_theme::{self,Theme,Rect,Typography,PRESETS};
+use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,PRESETS};
 use gtk::prelude::*;
-use std::{cell::RefCell,path::PathBuf,rc::Rc};
+use std::{cell::{Cell,RefCell},path::PathBuf,rc::Rc};
 use super::label;
 
 fn color(cr:&gtk::cairo::Context,value:&str){
@@ -60,63 +60,141 @@ fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,compact:bool,login:bool
     color(cr,&theme.palette.accent);text(cr,auth,if login{"Sign in · session"}else{"Unlock"},0.83,11.0*scale);
     let _=cr.restore();
 }
+// One form owns the editable draft; all paths share Theme::validate.
+// The preview holds only the last validated value, never partial input.
+struct Fields{
+    name:gtk::Entry,layout:gtk::ComboBoxText,typography:gtk::ComboBoxText,
+    colors:[gtk::ColorButton;5],radius:gtk::SpinButton,motion:gtk::SpinButton,
+    clock:gtk::CheckButton,date:gtk::CheckButton,
+}
+fn row(parent:&gtk::Box,title:&str,control:&impl IsA<gtk::Widget>){
+    let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
+    let title=label(title,"body");title.set_hexpand(true);title.set_xalign(0.0);
+    row.append(&title);row.append(control);parent.append(&row);
+}
+fn choice(parent:&gtk::Box,title:&str,options:&[(&str,&str)])->gtk::ComboBoxText{
+    let control=gtk::ComboBoxText::new();for (id,name) in options{control.append(Some(id),name);}
+    row(parent,title,&control);control
+}
+fn spin(parent:&gtk::Box,title:&str,max:f64,step:f64)->gtk::SpinButton{
+    let control=gtk::SpinButton::with_range(0.0,max,step);row(parent,title,&control);control
+}
+fn hex(value:gtk::gdk::RGBA)->String{
+    let channel=|c:f32|(c.clamp(0.0,1.0)*255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}",channel(value.red()),channel(value.green()),channel(value.blue()))
+}
+impl Fields{
+    fn build(parent:&gtk::Box)->Self{
+        let name=gtk::Entry::new();name.set_max_length(80);row(parent,"Theme name",&name);
+        let layout=choice(parent,"Layout",&[("centered","Centered"),("split","Split screen"),("editorial","Editorial"),("bento","Bento")]);
+        let typography=choice(parent,"Typography",&[("sans","Sans serif"),("monospace","Monospace"),("display","Display")]);
+        parent.append(&label("Palette","title-3"));
+        let colors=["Background","Authentication panel","Primary text","Secondary text","Accent"].map(|title|{
+            let button=gtk::ColorButton::new();button.set_use_alpha(false);button.set_title(title);row(parent,title,&button);button
+        });
+        parent.append(&label("Geometry and widgets","title-3"));
+        let radius=spin(parent,"Corner radius",48.0,1.0);let motion=spin(parent,"Motion duration (ms)",400.0,10.0);
+        let clock=gtk::CheckButton::with_label("Show clock");let date=gtk::CheckButton::with_label("Show date");
+        parent.append(&clock);parent.append(&date);
+        Self{name,layout,typography,colors,radius,motion,clock,date}
+    }
+    fn populate(&self,theme:&Theme){
+        self.name.set_text(&theme.name);
+        self.layout.set_active_id(Some(match theme.layout{Layout::Centered=>"centered",Layout::Split=>"split",Layout::Editorial=>"editorial",Layout::Bento=>"bento"}));
+        self.typography.set_active_id(Some(match theme.typography{Typography::Sans=>"sans",Typography::Monospace=>"monospace",Typography::Display=>"display"}));
+        for (button,value) in self.colors.iter().zip([&theme.palette.background,&theme.palette.panel,&theme.palette.text,&theme.palette.muted,&theme.palette.accent]){
+            button.set_rgba(&gtk::gdk::RGBA::parse(value).expect("validated palette"));
+        }
+        self.radius.set_value(f64::from(theme.corner_radius));self.motion.set_value(f64::from(theme.motion_ms));
+        self.clock.set_active(theme.clock);self.date.set_active(theme.date);
+    }
+    fn read(&self)->anyhow::Result<Theme>{
+        let layout=match self.layout.active_id().as_deref(){
+            Some("centered")=>Layout::Centered,Some("split")=>Layout::Split,Some("editorial")=>Layout::Editorial,Some("bento")=>Layout::Bento,
+            _=>anyhow::bail!("select a layout"),
+        };
+        let typography=match self.typography.active_id().as_deref(){
+            Some("sans")=>Typography::Sans,Some("monospace")=>Typography::Monospace,Some("display")=>Typography::Display,
+            _=>anyhow::bail!("select typography"),
+        };
+        let [background,panel,text,muted,accent]=self.colors.each_ref().map(|button|hex(button.rgba()));
+        let theme=Theme{format:"atelier-access-theme".into(),version:1,name:self.name.text().to_string(),layout,typography,
+            palette:Palette{background,panel,text,muted,accent},corner_radius:self.radius.value_as_int() as u32,
+            motion_ms:self.motion.value_as_int() as u32,clock:self.clock.is_active(),date:self.date.is_active()};
+        theme.validate()?;Ok(theme)
+    }
+    fn connect_changes(&self,refresh:Rc<dyn Fn()>){
+        {let refresh=refresh.clone();self.name.connect_changed(move |_|refresh());}
+        for combo in [&self.layout,&self.typography]{let refresh=refresh.clone();combo.connect_changed(move |_|refresh());}
+        for color in &self.colors{let refresh=refresh.clone();color.connect_rgba_notify(move |_|refresh());}
+        for spin in [&self.radius,&self.motion]{let refresh=refresh.clone();spin.connect_value_changed(move |_|refresh());}
+        for check in [&self.clock,&self.date]{let refresh=refresh.clone();check.connect_toggled(move |_|refresh());}
+    }
+}
 pub(super) fn build()->gtk::Box{
     let outer=gtk::Box::new(gtk::Orientation::Vertical,12);
     outer.set_margin_top(24);outer.set_margin_bottom(24);outer.set_margin_start(24);outer.set_margin_end(24);
     outer.append(&label("Native access theme Studio","title-1"));
     outer.append(&label("Offline login and lock appearance drafts. No live session, authentication, wallpaper assets or external QML are loaded.","dim-label"));
-    let form=gtk::Box::new(gtk::Orientation::Vertical,8);
-    let preset=gtk::ComboBoxText::new();for (id,name) in PRESETS{preset.append(Some(id),name);}preset.set_active_id(Some("classic"));form.append(&preset);
-    let load=gtk::Button::with_label("Load preset into draft");form.append(&load);
+    let form=gtk::Box::new(gtk::Orientation::Vertical,12);
+    let preset=gtk::ComboBoxText::new();for (id,name) in PRESETS{preset.append(Some(id),name);}preset.set_active_id(Some("classic"));
+    row(&form,"Built-in preset",&preset);
+    let load=gtk::Button::with_label("Load preset / reset draft");form.append(&load);
     let initial=access_theme::preset("classic").expect("built-in theme");
-    let buffer=gtk::TextBuffer::new(None::<&gtk::TextTagTable>);buffer.set_text(&initial.json().unwrap());
-    let draft=gtk::TextView::with_buffer(&buffer);draft.set_monospace(true);draft.set_wrap_mode(gtk::WrapMode::WordChar);
-    form.append(&gtk::ScrolledWindow::builder().min_content_height(200).child(&draft).build());
+    let compact=gtk::CheckButton::with_label("Compact display");let login=gtk::CheckButton::with_label("Greeter preview");
+    let mode=gtk::Box::new(gtk::Orientation::Horizontal,8);mode.append(&compact);mode.append(&login);form.append(&mode);
+    let preview=gtk::DrawingArea::new();preview.set_content_height(300);preview.set_hexpand(true);form.append(&preview);
+    let status=label("Valid Classic draft. No settings changed.","dim-label");status.set_selectable(true);form.append(&status);
+    let fields=Rc::new(Fields::build(&form));fields.populate(&initial);
     let path=gtk::Entry::new();path.set_placeholder_text(Some("Absolute .json file path"));form.append(&path);
     let actions=gtk::Box::new(gtk::Orientation::Horizontal,8);
-    let import=gtk::Button::with_label("Import draft");let validate=gtk::Button::with_label("Validate and preview");let export=gtk::Button::with_label("Export new file");
-    actions.append(&import);actions.append(&validate);actions.append(&export);form.append(&actions);
-    let compact=gtk::CheckButton::with_label("Compact display");let login=gtk::CheckButton::with_label("Greeter preview");
-    form.append(&compact);form.append(&login);
-    let preview=gtk::DrawingArea::new();preview.set_content_height(300);preview.set_hexpand(true);form.append(&preview);
-    let status=label("Built-in Classic preview. Editing the draft requires validation to update the preview.","dim-label");status.set_selectable(true);form.append(&status);
+    let import=gtk::Button::with_label("Import draft");let export=gtk::Button::with_label("Export new file");
+    actions.append(&import);actions.append(&export);form.append(&actions);
     let current=Rc::new(RefCell::new(initial));
     {
         let (current,compact,login)=(current.clone(),compact.downgrade(),login.downgrade());
         preview.set_draw_func(move|_,cr,w,h|draw(cr,w,h,&current.borrow(),compact.upgrade().is_some_and(|c|c.is_active()),login.upgrade().is_some_and(|c|c.is_active())));
     }
     for button in [&compact,&login]{let preview=preview.downgrade();button.connect_toggled(move|_|{if let Some(p)=preview.upgrade(){p.queue_draw();}});}
+    let populating=Rc::new(Cell::new(false));
+    let refresh:Rc<dyn Fn()>={
+        let (fields,preview,status,export)=(Rc::downgrade(&fields),preview.downgrade(),status.downgrade(),export.downgrade());
+        let populating=populating.clone();
+        Rc::new(move||{
+            if populating.get(){return;}
+            let (Some(fields),Some(preview),Some(status),Some(export))=(fields.upgrade(),preview.upgrade(),status.upgrade(),export.upgrade())else{return;};
+            match fields.read(){
+                Ok(theme)=>{*current.borrow_mut()=theme;preview.queue_draw();status.set_text("Valid draft. No settings changed.");export.set_sensitive(true);}
+                Err(e)=>{status.set_text(&format!("Invalid draft: {e:#}. Last valid preview retained."));export.set_sensitive(false);}
+            }
+        })
+    };
+    fields.connect_changes(refresh.clone());
+    let populate:Rc<dyn Fn(Theme)>={
+        let fields=fields.clone();let refresh=refresh.clone();
+        Rc::new(move|theme|{populating.set(true);fields.populate(&theme);populating.set(false);refresh();})
+    };
     {
-        let (preset,buffer,status)=(preset.downgrade(),buffer.downgrade(),status.downgrade());
+        let (preset,status)=(preset.downgrade(),status.downgrade());let populate=populate.clone();
         load.connect_clicked(move|_|{
-            let (Some(id),Some(buffer),Some(status))=(preset.upgrade().and_then(|p|p.active_id()),buffer.upgrade(),status.upgrade())else{return;};
-            match access_theme::preset(&id).and_then(|t|t.json()){Ok(json)=>{buffer.set_text(&json);status.set_text("Preset loaded. Validate to update the preview.");},Err(e)=>status.set_text(&format!("{e:#}"))}
+            let (Some(id),Some(status))=(preset.upgrade().and_then(|p|p.active_id()),status.upgrade())else{return;};
+            match access_theme::preset(&id){Ok(theme)=>populate(theme),Err(e)=>status.set_text(&format!("{e:#}"))}
         });
     }
     {
-        let (path,buffer,status)=(path.downgrade(),buffer.downgrade(),status.downgrade());
+        let (path,status)=(path.downgrade(),status.downgrade());
         import.connect_clicked(move|_|{
-            let (Some(path),Some(buffer),Some(status))=(path.upgrade(),buffer.upgrade(),status.upgrade())else{return;};
-            match Theme::import(&PathBuf::from(path.text().as_str())).and_then(|t|t.json()){
-                Ok(json)=>{buffer.set_text(&json);status.set_text("Imported draft. Validate to update the preview.");}
-                Err(e)=>status.set_text(&format!("Import failed: {e:#}")),
+            let (Some(path),Some(status))=(path.upgrade(),status.upgrade())else{return;};
+            match Theme::import(&PathBuf::from(path.text().as_str())){
+                Ok(theme)=>populate(theme),Err(e)=>status.set_text(&format!("Import failed: {e:#}")),
             }
         });
     }
     {
-        let (buffer,status,preview)=(buffer.downgrade(),status.downgrade(),preview.downgrade());
-        validate.connect_clicked(move|_|{
-            let (Some(buffer),Some(status),Some(preview))=(buffer.upgrade(),status.upgrade(),preview.upgrade())else{return;};
-            let text=buffer.text(&buffer.start_iter(),&buffer.end_iter(),false);
-            match Theme::parse(&text){Ok(theme)=>{*current.borrow_mut()=theme;preview.queue_draw();status.set_text("Validated preview. No settings changed.");},Err(e)=>status.set_text(&format!("Invalid draft: {e:#}. Previous preview retained."))}
-        });
-    }
-    {
-        let (path,buffer,status)=(path.downgrade(),buffer.downgrade(),status.downgrade());
+        let (path,status)=(path.downgrade(),status.downgrade());
         export.connect_clicked(move|_|{
-            let (Some(path),Some(buffer),Some(status))=(path.upgrade(),buffer.upgrade(),status.upgrade())else{return;};
-            let text=buffer.text(&buffer.start_iter(),&buffer.end_iter(),false);
-            match Theme::parse(&text).and_then(|t|t.export(&PathBuf::from(path.text().as_str()))){
+            let (Some(path),Some(status))=(path.upgrade(),status.upgrade())else{return;};
+            match fields.read().and_then(|t|t.export(&PathBuf::from(path.text().as_str()))){
                 Ok(())=>status.set_text("Exported validated theme to a new file. No settings changed."),
                 Err(e)=>status.set_text(&format!("Export failed: {e:#}")),
             }
