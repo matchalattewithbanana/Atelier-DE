@@ -1,6 +1,6 @@
 //! Original Cairo resource meters, informed by Caelestia's expressive
 //! shape-and-fill composition. The Studio supplies sample values only.
-use atelier_config::access_theme::Palette;
+use atelier_config::{access_theme::Palette,design::{Roles,Color,AccentRoles,TypeRole}};
 use gtk::cairo::{Context,LineCap,LineJoin};
 
 #[derive(Clone,Copy)]
@@ -26,36 +26,13 @@ fn shape(cr:&Context,kind:Kind){
     }
     cr.close_path();
 }
-fn rgb(s:&str)->[f64;3]{
-    let v=u32::from_str_radix(&s[1..],16).expect("validated palette");
-    [f64::from((v>>16)&255)/255.0,f64::from((v>>8)&255)/255.0,f64::from(v&255)/255.0]
+fn roles(palette:&Palette)->Roles{
+    Roles::from_palette(&palette.background,&palette.panel,&palette.text,&palette.muted,&palette.accent).expect("validated palette")
 }
-fn mix(a:[f64;3],b:[f64;3],t:f64)->[f64;3]{std::array::from_fn(|i|a[i]+(b[i]-a[i])*t)}
-fn contrast(a:[f64;3],b:[f64;3])->f64{
-    let l=|c:[f64;3]|{
-        let c=c.map(|v|if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)});
-        c[0]*0.2126+c[1]*0.7152+c[2]*0.0722
-    };
-    let (a,b)=(l(a),l(b));(a.max(b)+0.05)/(a.min(b)+0.05)
+fn tones(roles:&Roles,kind:Kind)->AccentRoles{
+    match kind{Kind::Cpu=>roles.primary,Kind::Memory=>roles.tertiary,Kind::Storage=>roles.secondary}
 }
-fn readable_tint(base:[f64;3],tint:[f64;3],fg:[f64;3],mut strength:f64)->[f64;3]{
-    for _ in 0..16{
-        let candidate=mix(base,tint,strength);
-        if contrast(candidate,fg)>=4.5{return candidate;}
-        strength*=0.5;
-    }
-    base
-}
-fn tones(palette:&Palette,kind:Kind)->([f64;3],[f64;3],[f64;3]){
-    let bg=rgb(&palette.background);let text=rgb(&palette.text);let accent=rgb(&palette.accent);
-    let tint=match kind{
-        Kind::Cpu=>accent,
-        Kind::Memory=>mix(accent,[0.84,0.64,0.88],0.45),
-        Kind::Storage=>mix(accent,[0.48,0.82,0.73],0.45),
-    };
-    (readable_tint(bg,tint,text,0.23),readable_tint(bg,tint,text,0.46),text)
-}
-fn source(cr:&Context,c:[f64;3]){cr.set_source_rgb(c[0],c[1],c[2]);}
+fn source(cr:&Context,c:Color){let [r,g,b]=c.rgb().map(|v|f64::from(v)/255.0);cr.set_source_rgb(r,g,b);}
 fn wave(cr:&Context,value:f64){
     let level=1.0-value.clamp(0.0,1.0);
     let amp=0.025_f64.min(level.min(1.0-level));
@@ -107,22 +84,23 @@ fn centered(cr:&Context,text:&str,x:f64,y:f64,size:f64){
         let _=cr.show_text(text);
     }
 }
-fn meter(cr:&Context,kind:Kind,percent:u32,palette:&Palette,x:f64,y:f64,size:f64){
+fn meter(cr:&Context,kind:Kind,percent:u32,roles:&Roles,x:f64,y:f64,size:f64){
     let _=cr.save();cr.translate(x,y);cr.scale(size,size);
-    let (base,fill,fg)=tones(palette,kind);
-    shape(cr,kind);source(cr,base);let _=cr.fill_preserve();
-    let _=cr.save();cr.clip();wave(cr,f64::from(percent)/100.0);source(cr,fill);let _=cr.fill();let _=cr.restore();
-    source(cr,fg);icon(cr,kind);
-    centered(cr,&format!("{percent}%"),0.50,0.64,0.235);
+    let t=tones(roles,kind);
+    shape(cr,kind);source(cr,t.container.fill);let _=cr.fill_preserve();
+    let _=cr.save();cr.clip();wave(cr,f64::from(percent)/100.0);source(cr,t.strong_container.fill);let _=cr.fill();let _=cr.restore();
+    source(cr,t.container.on);icon(cr,kind);
+    centered(cr,&format!("{percent}%"),0.50,0.64,TypeRole::HeadlineLarge.style(true).size/136.0);
     if matches!(kind,Kind::Cpu){
-        source(cr,rgb(&palette.background));cr.arc(0.85,0.15,0.19,0.0,std::f64::consts::TAU);let _=cr.fill();
-        source(cr,rgb(&palette.accent));centered(cr,"54°",0.85,0.15,0.17);
+        source(cr,roles.primary.primary.fill);cr.arc(0.85,0.15,0.19,0.0,std::f64::consts::TAU);let _=cr.fill();
+        source(cr,roles.primary.primary.on);centered(cr,"54°",0.85,0.15,0.17);
     }
     let _=cr.restore();
 }
 /// Compact three-meter row: keep square shapes even when the card has
 /// extra vertical room. The caller owns the outer surface and clipping.
 pub(super) fn draw(cr:&Context,area:(f64,f64,f64,f64),palette:&Palette){
+    let roles=roles(palette);
     let (x,y,w,h)=area;
     let padding=(w*0.06).min(h*0.12);let gap=padding*0.55;
     let size=((w-2.0*padding-2.0*gap)/3.0).min(h-2.0*padding);
@@ -131,7 +109,7 @@ pub(super) fn draw(cr:&Context,area:(f64,f64,f64,f64),palette:&Palette){
     let top=y+(h-size)/2.0;
     let _=cr.save();cr.rectangle(x,y,w,h);cr.clip();
     for (i,(kind,value)) in [(Kind::Cpu,42),(Kind::Memory,58),(Kind::Storage,73)].into_iter().enumerate(){
-        meter(cr,kind,value,palette,left+i as f64*(size+gap),top,size);
+        meter(cr,kind,value,&roles,left+i as f64*(size+gap),top,size);
     }
     let _=cr.restore();
 }
@@ -144,8 +122,8 @@ mod tests{
         for (id,_) in PRESETS{
             let theme=preset(id).unwrap();
             for kind in [Kind::Cpu,Kind::Memory,Kind::Storage]{
-                let (base,fill,fg)=tones(&theme.palette,kind);
-                assert!(contrast(base,fg)>=4.5&&contrast(fill,fg)>=4.5);
+                let t=tones(&roles(&theme.palette),kind);
+                assert!(t.container.fill.contrast(t.container.on)>=4.5&&t.strong_container.fill.contrast(t.container.on)>=4.5);
             }
         }
     }
