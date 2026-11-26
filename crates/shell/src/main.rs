@@ -4,6 +4,7 @@ use atelier_config::{appearance_path, component, config_path, Appearance, Config
 use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 mod media_controls;
+mod mpris;
 mod quick_controls;
 mod notification_centre;
 mod notification_bus;

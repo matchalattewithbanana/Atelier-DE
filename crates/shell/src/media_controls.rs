@@ -1,115 +1,201 @@
-//! On-demand media controller; blocking MPRIS bridge calls run off the GTK thread.
-use atelier_services::media::{media_action, media_snapshot, MediaAction, MediaSnapshot, Player};
-use gtk::{glib, prelude::*};
-use std::{cell::RefCell, rc::Rc, sync::mpsc, time::Duration};
+//! Capability-aware interactive media window. A single worker owns the
+//! session bus, and generation-tagged replies cannot overwrite newer choices.
+use crate::mpris::{Action,Bus,Details,Identity,Track};
+use gtk::{glib,prelude::*};
+use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::Duration};
 
-enum Request { Action(String, MediaAction) }
-enum Event { Snapshot(Result<MediaSnapshot, String>), ActionError(String) }
-
-pub fn show(app: &gtk::Application) {
-    if let Some(window) = app.windows().into_iter().find(|window| window.widget_name() == "atelier-media") {
-        window.present(); return;
-    }
-    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Media").default_width(440).default_height(360).build();
-    window.set_widget_name("atelier-media");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    content.add_css_class("atelier-control-window");
-    content.set_margin_top(24); content.set_margin_bottom(24); content.set_margin_start(24); content.set_margin_end(24);
-    let title = gtk::Label::new(Some("Now playing"));
-    title.set_xalign(0.0); title.add_css_class("atelier-control-heading"); content.append(&title);
-    let choice = gtk::ComboBoxText::new(); content.append(&choice);
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 8); card.add_css_class("atelier-control-card"); content.append(&card);
-    let track = gtk::Label::new(Some("Looking for media players…"));
-    track.set_xalign(0.0); track.set_wrap(true); track.add_css_class("atelier-control-title"); card.append(&track);
-    let artist = gtk::Label::new(None); artist.set_xalign(0.0); artist.set_wrap(true); card.append(&artist);
-    let playback = gtk::Label::new(None); playback.set_xalign(0.0); playback.add_css_class("dim-label"); card.append(&playback);
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let previous = gtk::Button::with_label("Previous");
-    let toggle = gtk::Button::with_label("Play");
-    toggle.add_css_class("atelier-control-active");
-    previous.add_css_class("atelier-control-tonal");
-    let next = gtk::Button::with_label("Next");
-    next.add_css_class("atelier-control-tonal");
-    for button in [&previous, &toggle, &next] { button.set_size_request(-1,48); button.set_sensitive(false); controls.append(button); }
-    toggle.set_hexpand(true);
-    card.append(&controls);
-    let status = gtk::Label::new(None); status.set_xalign(0.0); status.set_wrap(true); status.add_css_class("dim-label"); content.append(&status);
-
-    let (requests, receiver) = mpsc::sync_channel::<Request>(1);
-    let (events, updates) = mpsc::sync_channel::<Event>(4);
-    std::thread::spawn(move || loop {
-        let snapshot = media_snapshot().map_err(|error| error.to_string());
-        if events.send(Event::Snapshot(snapshot)).is_err() { break; }
-        match receiver.recv_timeout(Duration::from_secs(3)) {
-            Ok(Request::Action(id, action)) => {
-                if let Err(error) = media_action(&id, action) {
-                    if events.send(Event::ActionError(error.to_string())).is_err() { break; }
-                }
+enum Request{Select(String),Act(Identity,Action)}
+struct Reply{
+    revision:u64,names:Vec<String>,selected:Option<String>,
+    details:Option<Details>,error:Option<String>,
+}
+fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
+    let mut bus=None;
+    let mut revision=0;
+    let mut selected:Option<String>=None;
+    let mut action_error=None;
+    loop{
+        let result=(||->anyhow::Result<_>{
+            if bus.is_none(){bus=Some(Bus::connect()?);}
+            let bus=bus.as_ref().expect("connected");
+            let names=bus.players()?;
+            if selected.as_ref().is_none_or(|name|!names.contains(name)){selected=names.first().cloned();}
+            let details=selected.as_ref().map(|name|bus.selected(name));
+            Ok((names,details))
+        })();
+        let reply=match result{
+            Ok((names,details))=>{
+                let (details,error)=match details{
+                    Some(Ok(d))=>(Some(d),None),
+                    Some(Err(e))=>(None,Some(e.to_string())),
+                    None=>(None,None),
+                };
+                Reply{revision,names,selected:selected.clone(),details,error:action_error.take().or(error)}
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    });
-
-    let players: Rc<RefCell<Vec<Player>>> = Rc::new(RefCell::new(Vec::new()));
-    let display = {
-        let players = Rc::clone(&players);
-        let track = track.clone(); let artist = artist.clone(); let playback = playback.clone();
-        let previous = previous.clone(); let toggle = toggle.clone(); let next = next.clone();
-        move |choice: &gtk::ComboBoxText| {
-            let players = players.borrow();
-            let selected = choice.active_id();
-            let selected = selected.as_ref().and_then(|id| players.iter().find(|player| player.id == id.as_str()));
-            let available = selected.is_some_and(|player| player.status.is_some() && !players.iter().any(|other| other.id.starts_with(&format!("{}.", player.id))));
-            for button in [&previous, &toggle, &next] { button.set_sensitive(available); }
-            toggle.set_label(if selected.is_some_and(|p|p.status.as_deref()==Some("Playing")){"Pause"}else{"Play"});
-            track.set_text(selected.and_then(|p| p.title.as_deref()).unwrap_or("No track information"));
-            artist.set_text(selected.and_then(|p| p.artist.as_deref()).unwrap_or(""));
-            playback.set_text(selected.and_then(|p| p.status.as_deref()).unwrap_or("Playback status unavailable"));
-        }
-    };
-    let update_display = display.clone();
-    choice.connect_changed(move |combo| update_display(combo));
-
-    for (button, action) in [(&previous, MediaAction::Previous), (&toggle, MediaAction::Toggle), (&next, MediaAction::Next)] {
-        let choice = choice.clone(); let sender = requests.clone(); let status = status.clone();
-        button.connect_clicked(move |_| {
-            if let Some(id) = choice.active_id() {
-                status.set_text(if sender.try_send(Request::Action(id.to_string(), action)).is_ok() { "Playback request sent." } else { "Media service busy or unavailable." });
-            }
-        });
-    }
-    let weak = window.downgrade();
-    glib::timeout_add_local(Duration::from_millis(150), move || {
-        if weak.upgrade().is_none() { return glib::ControlFlow::Break; }
-        // Keep the receiver and request sender alive only while this window exists.
-        let _ = &requests;
-        while let Ok(event) = updates.try_recv() {
-            match event {
-                Event::ActionError(error) => status.set_text(&error),
-                Event::Snapshot(result) => {
-                    let new_players = match result {
-                        Ok(snapshot) => {
-                            if snapshot.players.is_empty() { status.set_text("No MPRIS media players detected."); }
-                            else if status.text().as_str() == "No MPRIS media players detected." || status.text().starts_with("Media unavailable:") { status.set_text(""); }
-                            snapshot.players
-                        }
-                        Err(error) => { status.set_text(&format!("Media unavailable: {error}")); Vec::new() }
-                    };
-                    let changed = !players.borrow().iter().map(|p| &p.id).eq(new_players.iter().map(|p| &p.id));
-                    let old_id = choice.active_id();
-                    *players.borrow_mut() = new_players;
-                    if changed {
-                        choice.remove_all();
-                        let ids: Vec<_> = players.borrow().iter().map(|player| player.id.clone()).collect();
-                        for id in ids { choice.append(Some(&id), &id); }
-                        if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) { choice.set_active(Some(0)); }
+            Err(e)=>{bus=None;Reply{revision,names:vec![],selected:None,details:None,error:action_error.take().or(Some(e.to_string()))}}
+        };
+        if tx.send(reply).is_err(){break;}
+        match rx.recv_timeout(Duration::from_secs(2)){
+            Ok((next,request))=>{
+                revision=next;
+                match request{
+                    Request::Select(name)=>selected=Some(name),
+                    Request::Act(identity,action)=>{
+                        action_error=match &bus{
+                            Some(bus)=>bus.action(&identity,action).err().map(|e|e.to_string()),
+                            None=>Some("Session bus unavailable".into()),
+                        };
                     }
-                    display(&choice);
                 }
             }
+            Err(mpsc::RecvTimeoutError::Timeout)=>{}
+            Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+        }
+    }
+}
+fn time(us:i64)->String{
+    let seconds=us.max(0)/1_000_000;
+    if seconds>=3600{format!("{}:{:02}:{:02}",seconds/3600,(seconds/60)%60,seconds%60)}
+    else{format!("{}:{:02}",seconds/60,seconds%60)}
+}
+fn label(text:&str,class:&str)->gtk::Label{
+    let l=gtk::Label::new(Some(text));l.set_xalign(0.0);l.set_wrap(true);l.add_css_class(class);l
+}
+struct Ui{
+    choice:gtk::ComboBoxText,track:gtk::Label,artist:gtk::Label,album:gtk::Label,playback:gtk::Label,
+    scale:gtk::Scale,position:gtk::Label,seek:gtk::Button,previous:gtk::Button,toggle:gtk::Button,next:gtk::Button,
+    status:gtk::Label,names:RefCell<Vec<String>>,details:RefCell<Option<Details>>,
+    revision:Cell<u64>,busy:Cell<bool>,updating:Cell<bool>,draft:Cell<bool>,
+    requests:mpsc::SyncSender<(u64,Request)>,
+}
+impl Ui{
+    fn request(&self,request:Request){
+        if self.busy.get(){return;}
+        let Some(revision)=self.revision.get().checked_add(1)else{return;};
+        if self.requests.try_send((revision,request)).is_ok(){
+            self.revision.set(revision);self.busy.set(true);self.draft.set(false);
+            self.choice.set_sensitive(false);
+            self.disable_actions();self.status.set_text("Updating player…");
+        }else{self.status.set_text("Media worker busy or unavailable.");}
+    }
+    fn disable_actions(&self){
+        for button in [&self.previous,&self.toggle,&self.next,&self.seek]{button.set_sensitive(false);}
+        self.scale.set_sensitive(false);
+    }
+    fn apply(&self,reply:Reply){
+        if reply.revision!=self.revision.get(){return;}
+        self.updating.set(true);self.busy.set(false);
+        let keep_draft=self.draft.get()&&{
+            let old=self.details.borrow();
+            old.as_ref().and_then(|d|d.track.as_ref()).zip(reply.details.as_ref().and_then(|d|d.track.as_ref()))
+                .is_some_and(|(a,b)|a==b)&&reply.details.as_ref().is_some_and(|d|d.capabilities.seek)
+        };
+        self.draft.set(keep_draft);
+        if *self.names.borrow()!=reply.names{
+            self.choice.remove_all();
+            for name in &reply.names{self.choice.append(Some(name),name.strip_prefix("org.mpris.MediaPlayer2.").unwrap_or(name));}
+            *self.names.borrow_mut()=reply.names;
+        }
+        if let Some(id)=reply.selected{self.choice.set_active_id(Some(&id));}else{self.choice.set_active(None);}
+        self.choice.set_sensitive(!self.names.borrow().is_empty());
+        *self.details.borrow_mut()=reply.details;
+        self.render();
+        self.updating.set(false);
+        if let Some(error)=reply.error{self.status.set_text(&format!("Media: {error}"));}
+        else if self.names.borrow().is_empty(){self.status.set_text("No MPRIS players detected.");}
+        else{self.status.set_text("Position and controls follow the selected player.");}
+    }
+    fn render(&self){
+        self.disable_actions();
+        let state=self.details.borrow();
+        let Some(d)=state.as_ref()else{
+            self.track.set_text("No track information");self.artist.set_text("");self.album.set_text("");self.playback.set_text("Unavailable");
+            self.position.set_text("— / —");self.scale.set_value(0.0);self.toggle.set_label("Play");return;
+        };
+        self.track.set_text(if d.title.is_empty(){"Unknown title"}else{&d.title});
+        self.artist.set_text(&d.artist);self.album.set_text(&d.album);self.playback.set_text(&d.status);
+        let playing=d.status=="Playing";
+        self.toggle.set_label(if playing{"Pause"}else{"Play"});
+        self.toggle.set_sensitive(if playing{d.capabilities.pause}else{d.capabilities.play});
+        self.previous.set_sensitive(d.capabilities.previous);self.next.set_sensitive(d.capabilities.next);
+        if let (Some(track),Some(position))=(&d.track,d.position_us){
+            if !self.draft.get(){self.scale.set_value(position as f64/track.length_us as f64*1000.0);}
+            self.scale.set_sensitive(d.capabilities.seek);
+            self.seek.set_sensitive(d.capabilities.seek&&self.draft.get());
+            self.position.set_text(&format!("{}{} / {}",if self.draft.get(){"Seek to "}else{""},
+                time(if self.draft.get(){target(track,self.scale.value())}else{position}),time(track.length_us)));
+        }else{
+            self.scale.set_value(0.0);
+            self.position.set_text(&format!("{} / —",d.position_us.map(time).unwrap_or_else(||"—".into())));
+        }
+    }
+    fn action(&self,action:impl FnOnce(&Details)->Option<Action>){
+        let selected=self.details.borrow().as_ref().and_then(|d|action(d).map(|action|(d.identity.clone(),action)));
+        if let Some((identity,action))=selected{self.request(Request::Act(identity,action));}
+    }
+}
+fn target(track:&Track,value:f64)->i64{((value.clamp(0.0,1000.0)/1000.0)*track.length_us as f64).round() as i64}
+
+pub fn show(app:&gtk::Application){
+    if let Some(window)=app.windows().into_iter().find(|w|w.widget_name()=="atelier-media"){window.present();return;}
+    let window=gtk::ApplicationWindow::builder().application(app).title("Atelier · Media").default_width(440).default_height(420).build();
+    window.set_widget_name("atelier-media");
+    let content=gtk::Box::new(gtk::Orientation::Vertical,12);content.add_css_class("atelier-control-window");
+    content.set_margin_top(24);content.set_margin_bottom(24);content.set_margin_start(24);content.set_margin_end(24);
+    content.append(&label("Now playing","atelier-control-heading"));
+    let choice=gtk::ComboBoxText::new();choice.set_sensitive(false);content.append(&choice);
+    let card=gtk::Box::new(gtk::Orientation::Vertical,8);card.add_css_class("atelier-control-card");content.append(&card);
+    let track=label("Looking for media players…","atelier-control-title");card.append(&track);
+    let artist=label("","body");card.append(&artist);
+    let album=label("","dim-label");card.append(&album);
+    let playback=label("","dim-label");card.append(&playback);
+    let position=label("— / —","body");card.append(&position);
+    let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,1000.0,1.0);
+    scale.set_draw_value(false);scale.set_size_request(-1,48);scale.add_css_class("atelier-expressive-slider");scale.set_tooltip_text(Some("Playback position draft; press Seek to apply"));card.append(&scale);
+    let seek=gtk::Button::with_label("Seek");seek.set_size_request(-1,48);card.append(&seek);
+    let controls=gtk::Box::new(gtk::Orientation::Horizontal,8);
+    let previous=gtk::Button::with_label("Previous");let toggle=gtk::Button::with_label("Play");let next=gtk::Button::with_label("Next");
+    previous.add_css_class("atelier-control-tonal");next.add_css_class("atelier-control-tonal");toggle.add_css_class("atelier-control-active");toggle.set_hexpand(true);
+    for button in [&previous,&toggle,&next]{button.set_size_request(-1,48);controls.append(button);}
+    card.append(&controls);
+    let status=label("Connecting to session media service…","dim-label");content.append(&status);
+    let (requests,rx)=mpsc::sync_channel(1);let (tx,updates)=mpsc::sync_channel(1);
+    std::thread::spawn(move||worker(rx,tx));
+    let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,status,
+        names:RefCell::new(vec![]),details:RefCell::new(None),revision:Cell::new(0),busy:Cell::new(false),
+        updating:Cell::new(false),draft:Cell::new(false),requests});
+    ui.disable_actions();
+    {let weak=Rc::downgrade(&ui);ui.choice.connect_changed(move|choice|{
+        if let Some(ui)=weak.upgrade(){if !ui.updating.get(){if let Some(name)=choice.active_id(){ui.request(Request::Select(name.to_string()));}}}
+    });}
+    {let weak=Rc::downgrade(&ui);ui.scale.connect_value_changed(move|_|{
+        if let Some(ui)=weak.upgrade(){
+            if !ui.updating.get()&&!ui.busy.get()&&ui.details.borrow().as_ref().is_some_and(|d|d.capabilities.seek){
+                ui.draft.set(true);ui.updating.set(true);ui.render();ui.updating.set(false);
+            }
+        }
+    });}
+    {let weak=Rc::downgrade(&ui);ui.seek.connect_clicked(move |_|{
+        if let Some(ui)=weak.upgrade(){if ui.draft.get(){ui.action(|d|d.track.clone().map(|t|{let p=target(&t,ui.scale.value());Action::Seek(t,p)}));}}
+    });}
+    for (button,action) in [(&ui.previous,Action::Previous),(&ui.next,Action::Next)]{
+        let weak=Rc::downgrade(&ui);button.connect_clicked(move |_|{if let Some(ui)=weak.upgrade(){ui.action(|_|Some(action.clone()));}});
+    }
+    {let weak=Rc::downgrade(&ui);ui.toggle.connect_clicked(move |_|{if let Some(ui)=weak.upgrade(){ui.action(|d|Some(if d.status=="Playing"{Action::Pause}else{Action::Play}));}});}
+    let weak=window.downgrade();
+    glib::timeout_add_local(Duration::from_millis(100),move||{
+        if weak.upgrade().is_none(){return glib::ControlFlow::Break;}
+        match updates.try_recv(){
+            Ok(reply)=>ui.apply(reply),
+            Err(mpsc::TryRecvError::Empty)=>{},
+            Err(mpsc::TryRecvError::Disconnected)=>{ui.disable_actions();ui.choice.set_sensitive(false);ui.status.set_text("Media worker stopped.");return glib::ControlFlow::Break;}
         }
         glib::ControlFlow::Continue
     });
-    window.set_child(Some(&content)); window.present();
+    window.set_child(Some(&content));window.present();
+}
+#[cfg(test)]
+mod tests{
+    #[test]
+    fn clock_format(){assert_eq!(super::time(65_000_000),"1:05");assert_eq!(super::time(3661_000_000),"1:01:01");}
 }
