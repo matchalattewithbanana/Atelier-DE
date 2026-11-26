@@ -10,6 +10,7 @@ pub mod tasks;
 pub mod themes;
 pub mod access_theme;
 pub mod design;
+pub mod dynamic_palette;
 #[cfg(feature = "wallpaper")]
 pub mod access_bundle;
 pub mod cursor_images;
