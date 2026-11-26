@@ -23,7 +23,7 @@ fn row()->gtk::Box{gtk::Box::new(gtk::Orientation::Horizontal,8)}
 fn settings_button(page:&'static str)->gtk::Button{
     let b=button("Open settings");
     b.connect_clicked(move |button|{
-        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>(){popover.popdown();}
+        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_then(|w|w.downcast::<gtk::Popover>().ok()){popover.popdown();}
         match component("atelier-settings").args(["--page",page]).spawn(){
             Ok(mut child)=>{std::thread::spawn(move||{let _=child.wait();});}
             Err(e)=>eprintln!("Atelier settings launch failed: {e}"),
@@ -121,7 +121,7 @@ impl AudioWidgets{
         let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,100.0,1.0);
         scale.add_css_class("atelier-expressive-slider");scale.set_size_request(-1,48);scale.set_draw_value(false);
         scale.set_tooltip_text(Some(&format!("{title} volume draft, apply to confirm")));scale.set_sensitive(false);section.append(&scale);
-        let controls=row();let apply=button("Apply volume");apply.add_css_class("suggested-action");let mute=button("Mute");mute.add_css_class("atelier-control-tonal");
+        let controls=row();let apply=button("Apply volume");apply.add_css_class("suggested-action");let mute=button("Mute");mute.add_css_class("atelier-control-tonal");mute.add_css_class("atelier-control-switch");
         apply.set_hexpand(true);mute.set_hexpand(true);apply.set_sensitive(false);mute.set_sensitive(false);
         controls.append(&mute);controls.append(&apply);section.append(&controls);
         Self{section,device,choice,make_default,value,scale,apply,mute}
@@ -231,7 +231,7 @@ fn radio_card<S:Send+'static,A:Send+'static>(
 )->gtk::Box{
     let card=card(title);
     let detail=label("Checking service…","body");card.append(&detail);
-    let actions=row();let toggle=button("Unavailable");toggle.add_css_class("atelier-control-tonal");toggle.set_hexpand(true);toggle.set_sensitive(false);
+    let actions=row();let toggle=button("Unavailable");toggle.add_css_class("atelier-control-tonal");toggle.add_css_class("atelier-control-switch");toggle.set_hexpand(true);toggle.set_sensitive(false);
     let refresh=button("Refresh");actions.append(&toggle);actions.append(&refresh);card.append(&actions);card.append(&settings_button(page));
     let status=label("Checking…","dim-label");card.append(&status);
     let state=Rc::new(Cell::new(None::<bool>));
@@ -255,6 +255,7 @@ pub fn content(app:&gtk::Application)->gtk::Box{
     root.set_margin_top(12);root.set_margin_bottom(12);root.set_margin_start(12);root.set_margin_end(12);
     root.append(&label("Quick controls","atelier-control-heading"));
     let pages=gtk::Stack::new();pages.set_transition_type(gtk::StackTransitionType::Crossfade);
+    pages.set_transition_duration(crate::native_appearance().motion.opening_duration().as_millis() as u32);
     pages.set_hhomogeneous(false);pages.set_vhomogeneous(false);
     let switcher=gtk::StackSwitcher::new();switcher.set_stack(Some(&pages));switcher.set_halign(gtk::Align::Center);
     switcher.add_css_class("atelier-control-tabs");root.append(&switcher);
@@ -267,7 +268,7 @@ pub fn content(app:&gtk::Application)->gtk::Box{
     pages.add_titled(&audio_card(),Some("audio"),"Audio");
     root.append(&pages);
     let media=button("Open media controls");let app=app.downgrade();media.connect_clicked(move |button|{
-        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>(){popover.popdown();}
+        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_then(|w|w.downcast::<gtk::Popover>().ok()){popover.popdown();}
         if let Some(app)=app.upgrade(){crate::media_controls::show(&app);}
     });root.append(&media);
     root
