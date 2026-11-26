@@ -57,10 +57,14 @@ The notification centre now presents graphical notification cards, with text sea
 
 Open `atelier-settings --page notification-rules` to add, update or remove application rules and custom presets. Changes remain in a draft until explicitly saved. The editor and daemon share one validated configuration implementation. Saves reject stale drafts and use atomic file replacement with `notifications.previous.toml` as a previous-version backup. Load previous preferences into a draft and save to restore them. The editor does not start the daemon.
 
+## Direct shell transport
+
+Both the notification centre and the layer-shell presenter use the same GIO session-bus transport rather than spawning the notification CLI and timeout processes for each refresh. D-Bus calls use a three-second method timeout, do not auto-start a daemon and are serialized on a worker outside the GTK thread. The daemon coalesces state changes into payload-free `org.atelier.Notifications1.Changed` signals on its existing 200 ms maintenance loop; notification revisions remain separate from this invalidation counter. The shell subscribes to change and bus-name ownership signals, bounds its pending requests and re-reads the authoritative snapshot. A three-second fallback refresh covers older services, initial subscription races and missed signals. No claim of lossless delivery of every intermediate notification state is made. GTK still checks its local reply queue on a short timer to handle animation and UI state. The CLI remains unchanged for scripts. Actual latency and idle resource consumption require measurement on a running desktop.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add lock-aware suppression and multi-output placement; replace subprocess polling with direct event-driven D-Bus where practical.
+- Add lock-aware suppression and multi-output placement; measure the direct transport's real-world latency and idle resource use.
 - Add a persistent script-friendly client for command tracking, safe action selection. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
