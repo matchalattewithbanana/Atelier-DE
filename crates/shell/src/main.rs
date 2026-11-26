@@ -5,6 +5,8 @@ use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 mod media_controls;
 mod mpris;
+mod media_artwork;
+mod media_wave;
 mod quick_controls;
 mod notification_centre;
 mod notification_bus;
