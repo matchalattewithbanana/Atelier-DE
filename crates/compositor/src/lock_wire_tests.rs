@@ -400,3 +400,48 @@ fn recovery_authority_ends_after_unlock_or_owner_loss(){
         assert_eq!(h.state.desktop_visible(),unlock);
     }
 }
+
+#[test]
+fn actual_recovery_client_binds_keyboard_without_unlocking(){
+    use std::net::Shutdown;
+    // Close the endpoint even if the test panics while the client blocks.
+    struct Stop(UnixStream);
+    impl Drop for Stop{fn drop(&mut self){let _=self.0.shutdown(Shutdown::Both);}}
+    let mut h=Harness::new();
+    let (mut old,m,_,_)=setup(&mut h);
+    let _old=old.lock(m);old.roundtrip(&mut h);
+    h.state.prepare_protected_recovery();
+    let (id,endpoint)=h.state.recovery_connection().unwrap();
+    let stop=Stop(endpoint.try_clone().unwrap());
+    let (tx,rx)=std::sync::mpsc::channel();
+    let worker=std::thread::spawn(move||{let _=tx.send(atelier_recovery_locker::hold_black(endpoint));});
+    let deadline=Instant::now()+Duration::from_secs(5);
+    while h.state.lock_surface().is_none(){
+        h.step();
+        if worker.is_finished(){panic!("recovery client exited before mapping: {:?}",rx.try_recv());}
+        assert!(Instant::now()<deadline,"recovery client did not map");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    h.confirm();h.state.sync_input_boundary(0);
+    assert!(h.state.recovery_confirmed(&id));
+    assert!(!h.state.desktop_visible());
+    let keyboard=h.state.seat.get_keyboard().unwrap();
+    assert!(keyboard.current_focus().is_some());
+    // XKB keycodes for A and Return: the black-only client must not
+    // collect text or turn them into authentication or unlock requests.
+    for key in [38u32,36]{
+        for event in [KeyState::Pressed,KeyState::Released]{
+            keyboard.input(&mut h.state,key.into(),event,SERIAL_COUNTER.next_serial(),0,|_,_,_|FilterResult::<()>::Forward);
+        }
+    }
+    let until=Instant::now()+Duration::from_millis(200);
+    while Instant::now()<until{
+        h.step();if worker.is_finished(){panic!("recovery client exited on keyboard events: {:?}",rx.try_recv());}
+        assert!(h.state.recovery_confirmed(&id));assert!(!h.state.desktop_visible());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(stop);
+    assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
+    worker.join().unwrap();
+    h.step();assert!(!h.state.desktop_visible());
+}
