@@ -317,6 +317,21 @@ mod tests{
         assert_eq!(average(&d),Some(120));d.channels[1].percent=None;assert_eq!(average(&d),None);
     }
     #[test]
+    fn selector_inventory_ignores_volume_and_mute_but_not_default_or_device_changes(){
+        fn sample()->AudioSnapshot{
+            AudioSnapshot{schema:1,outputs:vec![Device{id:"speaker".into(),description:"Speaker".into(),muted:Some(false),monitor:false,channels:vec![Channel{name:"left".into(),percent:Some(50)}]}],inputs:vec![],default_output:Some("speaker".into()),default_input:None}
+        }
+        let old=sample();let mut new=sample();
+        new.outputs[0].channels[0].percent=Some(75);new.outputs[0].muted=Some(true);
+        assert!(!inventory_changed(Some(&old),Some(&new),Direction::Output));
+        assert_ne!(default_device(&old,Direction::Output),default_device(&new,Direction::Output));
+        new.default_output=None;
+        assert!(inventory_changed(Some(&old),Some(&new),Direction::Output));
+        new=sample();new.outputs[0].description="Renamed".into();
+        assert!(inventory_changed(Some(&old),Some(&new),Direction::Output));
+        assert!(inventory_changed(Some(&old),None,Direction::Output));
+    }
+    #[test]
     fn missing_default_never_guesses_device(){
         let s=AudioSnapshot{schema:1,outputs:vec![],inputs:vec![],default_output:Some("missing".into()),default_input:None};
         assert!(default_device(&s,Direction::Output).is_none());assert!(default_device(&s,Direction::Input).is_none());
