@@ -239,6 +239,33 @@ fn active_route(card: &Card<'_>) -> Result<(Route, u64)> {
     bail!("no active, unscaled, single-monitor primary plane with a restorable framebuffer")
 }
 
+// A protected frame is meaningful only if our primary plane covers the
+// entire active display topology. The experimental backend supports one
+// unscaled output, and cannot protect unrelated planes or active CRTCs.
+#[cfg(feature = "native-session")]
+fn same_route(a:&Route,b:&Route)->bool{
+    a.connector==b.connector&&a.crtc==b.crtc&&a.plane==b.plane&&a.mode==b.mode
+}
+#[cfg(feature = "native-session")]
+fn protected_route(card:&Card<'_>,route:&Route,expected:u64)->Result<()>{
+    let (actual,current)=active_route(card)?;
+    if !same_route(&actual,route)||current!=expected{
+        bail!("protected display route or framebuffer ownership changed");
+    }
+    let resources=card.resource_handles()?;
+    for &crtc in resources.crtcs(){
+        if crtc!=route.crtc&&property(card,crtc,"ACTIVE")?.1!=0{
+            bail!("protected session cannot cover another active CRTC");
+        }
+    }
+    for plane in card.plane_handles()?{
+        if plane!=route.plane&&(property(card,plane,"CRTC_ID")?.1!=0||property(card,plane,"FB_ID")?.1!=0){
+            bail!("protected session cannot cover another bound display plane");
+        }
+    }
+    Ok(())
+}
+
 // Hardware cursor feasibility is independent of taking ownership of a plane.
 #[cfg(feature = "native-session")]
 fn cursor_plane_available(kind:u64,compatible:bool,argb:bool,crtc:u64,fb:u64)->bool{
@@ -452,8 +479,7 @@ fn recover_scanout(card:&Card<'_>,route:&Route,original:u64,owned:&[u64],seat_ac
     // Revalidate the same route including primary-plane geometry, connector,
     // mode and mirroring before writing any display property.
     let (current_route,current)=active_route(card).context("revalidate native route before cleanup")?;
-    let matches=current_route.connector==route.connector&&current_route.crtc==route.crtc
-        &&current_route.plane==route.plane&&current_route.mode==route.mode;
+    let matches=same_route(&current_route,route);
     match recovery_decision(seat_active,pending,matches,current,owned){
         Recovery::Defer=>bail!("native route changed; deferring framebuffer cleanup"),
         Recovery::Restore=>{
@@ -483,6 +509,7 @@ pub fn run_native(
     event_loop: &mut smithay::reexports::calloop::EventLoop<'_, ()>,
     socket: &str,
     config: &atelier_config::Config,
+    continuity:std::rc::Rc<crate::seat::SeatContinuity>,
 ) -> Result<()> {
     use crate::{state::{Atelier, ClientState}, input_router::handle_input, frame_queue::{FrameQueue,InputDamage}};
     use drm::{Device as _, ClientCapability};
@@ -503,6 +530,7 @@ pub fn run_native(
     let card = Card(fd);
     card.set_client_capability(ClientCapability::UniversalPlanes, true)?;
     card.set_client_capability(ClientCapability::Atomic, true)?;
+    continuity.ensure(session.is_active())?;
     let (route, original) = active_route(&card)?;
     if std::env::var("ATELIER_CURSOR_PROBE").as_deref()==Ok("1"){
         if let Err(error)=probe_cursor_plane(&card,fd,&route){
@@ -565,9 +593,10 @@ pub fn run_native(
         let input_dirty = Rc::new(Cell::new(InputDamage::None));
         let event_dirty = Rc::clone(&input_dirty);
         let input_session = session.clone();
+        let input_continuity=Rc::clone(&continuity);
         let mut intercepted = HashSet::new();
         let input_token = event_loop.handle().insert_source(crate::native_input::backend(session)?, move |event, _, _| {
-            if input_session.is_active() {
+            if input_continuity.usable(input_session.is_active()) {
                 let mut state=input_state.borrow_mut();
                 use smithay::backend::input::InputEvent;
                 let motion=matches!(&event,InputEvent::PointerMotion{..}|InputEvent::PointerMotionAbsolute{..});
@@ -591,16 +620,25 @@ pub fn run_native(
                 metrics.report_due();
                 event_loop.dispatch(Duration::from_millis(8), &mut ())
                     .map_err(|error| anyhow::anyhow!("dispatch native events: {error}"))?;
-                if !session.is_active() { bail!("native seat deactivated; exiting instead of resuming an unverified route"); }
+                continuity.ensure(session.is_active())?;
 
                 // A completed flip, not submission, releases the old buffer and timestamps clients.
-                if queue.pending().is_some() && flip_completed(&card, route.crtc)? {
+                if let Some(slot)=queue.pending(){
+                    if flip_completed(&card, route.crtc)? {
+                    continuity.ensure(session.is_active())?;
+                    // Never acknowledge a protected flip merely because an
+                    // event for this CRTC arrived. Verify the presented FB
+                    // and every active plane before notifying the lock owner.
+                    if !state.borrow().desktop_visible(){
+                        protected_route(&card,&route,u64::from(u32::from(slots[slot].1)))?;
+                    }
                     queue.completed();
                     metrics.flip_completed(pending_since.take());
                     let mut state = state.borrow_mut();
                     if let Some(frame)=pending_protected_frame.take(){state.protected_frame_presented(frame);}
                     state.send_frames(started.elapsed());
                     state.send_cursor_frames(started.elapsed());
+                    }
                 }
                 if pending_since.is_some_and(|since| since.elapsed() > Duration::from_secs(1)) {
                     bail!("timed out waiting for native page flip");
@@ -683,9 +721,13 @@ pub fn run_native(
                     frame.finish()?.wait().map_err(|error| anyhow::anyhow!("native frame fence: {error:?}"))?;
                 }
                 timing.render_ready();
-                if !session.is_active() { bail!("seat deactivated before submission"); }
+                continuity.ensure(session.is_active())?;
                 let expected = queue.displayed().map(|slot| u64::from(u32::from(slots[slot].1))).unwrap_or(original);
-                if property(&card, route.plane, "FB_ID")?.1 != expected { bail!("native framebuffer changed outside Atelier"); }
+                if !state.borrow().desktop_visible(){
+                    protected_route(&card,&route,expected)?;
+                }else if property(&card, route.plane, "FB_ID")?.1 != expected {
+                    bail!("native framebuffer changed outside Atelier");
+                }
                 let request = framebuffer_request(&card, route.plane, u64::from(u32::from(slots[next].1)))?;
                 card.atomic_commit(control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT, request)
                     .context("queue native page flip")?;
@@ -708,15 +750,22 @@ pub fn run_native(
         if let Err(cause)=&outcome{eprintln!("Native protected session error: {cause:#}");}
         bail!("protected session ended; refusing original framebuffer restoration; secure seat recovery not implemented");
     }
+    // Even if the seat is currently active again, an observed pause
+    // invalidates all old route/FB assumptions. Never restore or explicitly
+    // destroy buffers using the previous ownership epoch.
+    if !continuity.usable(session.is_active()){
+        if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
+        bail!("seat continuity lost; refusing stale scanout cleanup; seat release follows");
+    }
     let owned:Vec<u64>=slots.iter().map(|(_,fb,_)|u64::from(u32::from(*fb))).collect();
     if !owned.is_empty(){
-        if let Err(error)=recover_scanout(&card,&route,original,&owned,session.is_active(),queue.pending().is_some()){
+        if let Err(error)=recover_scanout(&card,&route,original,&owned,continuity.usable(session.is_active()),queue.pending().is_some()){
             if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
             return Err(error.context("native recovery incomplete; seat release follows"));
         }
-        if !session.is_active(){
+        if !continuity.usable(session.is_active()){
             if let Err(cause)=&outcome{eprintln!("Native session error: {cause:#}");}
-            bail!("native seat deactivated before framebuffer cleanup; seat release follows");
+            bail!("native seat continuity lost before framebuffer cleanup; seat release follows");
         }
     }
     let mut cleanup = Ok(());

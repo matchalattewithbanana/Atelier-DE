@@ -394,3 +394,5 @@ Native lock input groundwork now isolates lock-only keyboard/pointer focus, bloc
 The native session-lock adapter now tracks exact lock/role/root resources, validates configure acknowledgments and committed dimensions, and permits replacement after exact role destruction. Protected exit refuses explicit restoration of the pre-session framebuffer. This does not guarantee seat-release safety; the protocol is still unadvertised pending adversarial protocol tests and physical recovery.
 
 Native-session tests now exercise the actual lock protocol dispatcher through private Wayland socket pairs, including unauthorized requests, role replacement and disconnection. Test-only global registration is absent from normal sessions. Physical security acceptance remains outstanding.
+
+Native seat continuity now latches pause events across reactivation; stale flip acknowledgments and framebuffer restoration are refused. Protected scanout also checks exact framebuffer ownership and refuses other active CRTCs or bound planes. Automatic seat/VT resume is still not supported; native locking remains disabled pending physical recovery and multi-output coverage.
