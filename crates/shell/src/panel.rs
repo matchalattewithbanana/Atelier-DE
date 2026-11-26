@@ -69,10 +69,7 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     let app_ref = app.downgrade();
     notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::notification_centre::show(&app); } });
     bar.append(&notifications); notifications.set_visible(appearance.show_notifications);
-    let audio = gtk::Button::with_label("Quick controls");
-    audio.set_tooltip_text(Some("Wi-Fi, Bluetooth, audio and media"));
-    let app_ref = app.downgrade();
-    audio.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::quick_controls::show(&app); } });
+    let audio = quick_button(app,&window);
     bar.append(&audio); audio.set_visible(appearance.show_audio);
     let terminal = gtk::Button::with_label("Terminal");
     let terminal_path = config.terminal.clone();
@@ -124,6 +121,47 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     window.set_child(Some(&bar)); window.present();
     crate::desktop_layers::start(app,&window,layers_live);
     if popups { crate::notification_toast::start(app, &window, island, notification_live); }
+}
+
+/// Use the layer surface's own native popup relationship, not absolute
+/// screen coordinates. Older layer-shell versions lack on-demand focus.
+fn quick_button(app:&gtk::Application,panel:&gtk::ApplicationWindow)->gtk::Widget{
+    if gtk4_layer_shell::protocol_version()<4{
+        let button=gtk::Button::with_label("Quick controls");
+        button.set_tooltip_text(Some("Wi-Fi, Bluetooth, audio and media"));
+        let app=app.downgrade();
+        button.connect_clicked(move |_|{if let Some(app)=app.upgrade(){crate::quick_controls::show(&app);}});
+        return button.upcast();
+    }
+    let button=gtk::MenuButton::new();button.set_label("Quick controls");
+    button.set_tooltip_text(Some("Wi-Fi, Bluetooth, audio and media"));
+    let (app,panel)=(app.downgrade(),panel.downgrade());
+    button.set_create_popup_func(move|button|{
+        let (Some(app),Some(panel))=(app.upgrade(),panel.upgrade())else{return;};
+        let popup=gtk::Popover::new();popup.set_autohide(true);
+        popup.set_has_arrow(false);popup.set_position(gtk::PositionType::Bottom);
+        popup.add_css_class("atelier-quick-popover");
+        let scroll=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_width(320).max_content_height(520).propagate_natural_height(true)
+            .child(&crate::quick_controls::content(&app)).build();
+        popup.set_child(Some(&scroll));
+        let weak_panel=panel.downgrade();let weak_scroll=scroll.downgrade();
+        popup.connect_map(move |_|{
+            if let Some(panel)=weak_panel.upgrade(){
+                // A popup never takes exclusive keyboard focus.
+                panel.set_keyboard_mode(KeyboardMode::OnDemand);
+                if let (Some(surface),Some(scroll))=(panel.surface(),weak_scroll.upgrade()){
+                    if let Some(monitor)=surface.display().monitor_at_surface(&surface){
+                        scroll.set_max_content_height((monitor.geometry().height()-120).clamp(100,520));
+                    }
+                }
+            }
+        });
+        let weak_panel=panel.downgrade();
+        popup.connect_unmap(move |_|{if let Some(panel)=weak_panel.upgrade(){panel.set_keyboard_mode(KeyboardMode::None);}});
+        button.set_popover(Some(&popup));
+    });
+    button.upcast()
 }
 
 fn spawn(mut command: Command) {
