@@ -1,7 +1,7 @@
 //! Search and classification of installed desktop entries. No process scan,
 //! command evaluation, network lookup or persisted usage history.
 use gtk::{gio,prelude::*};
-use std::collections::HashSet;
+use std::{cell::Cell,collections::HashSet};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Category{All,Pinned,Internet,Office,Development,Graphics,Media,Games,System,Utilities,Education,Other}
@@ -69,12 +69,12 @@ impl SearchFields{
     }
 }
 pub struct Entry{
-    pub app:gio::AppInfo,pub name:String,pub description:String,pub pinned:bool,
+    pub app:gio::AppInfo,pub name:String,pub description:String,pub pinned:Cell<bool>,
     categories:Vec<Category>,search:SearchFields,
 }
 impl Entry{
     pub fn rank(&self,category:Category,query:&str)->Option<u32>{
-        if category!=Category::All&&!(category==Category::Pinned&&self.pinned)&&!self.categories.contains(&category){return None;}
+        if category!=Category::All&&!(category==Category::Pinned&&self.pinned.get())&&!self.categories.contains(&category){return None;}
         self.search.score(query)
     }
 }
@@ -93,7 +93,7 @@ pub fn catalog(pins:&[String])->Vec<Entry>{
         let pinned=id.as_ref().is_some_and(|id|pins.contains(id));
         let metadata=format!("{description} {generic} {keywords} {categories}");
         let search=SearchFields::new(&name,id.as_deref().unwrap_or(""),&metadata);
-        Some(Entry{app,name,description,pinned,categories:Category::classify(&categories),search})
+        Some(Entry{app,name,description,pinned:Cell::new(pinned),categories:Category::classify(&categories),search})
     }).collect()
 }
 #[cfg(test)]
