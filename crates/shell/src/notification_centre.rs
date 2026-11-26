@@ -147,7 +147,7 @@ fn refill_apps(picker:&gtk::ComboBoxText,snapshot:&Snapshot){
     for app in apps{picker.append(Some(&format!("app:{app}")),if app.is_empty(){"Unknown application"}else{app});}
     if !old.as_ref().is_some_and(|id|picker.set_active_id(Some(id.as_str()))){picker.set_active_id(Some("all"));}
 }
-fn read_filter(search:&gtk::SearchEntry,picker:&gtk::ComboBoxText,missed:&gtk::CheckButton,grouped:&gtk::CheckButton)->Filter{
+fn read_filter(search:&gtk::Entry,picker:&gtk::ComboBoxText,missed:&gtk::CheckButton,grouped:&gtk::CheckButton)->Filter{
     Filter{query:search.text().trim().to_lowercase(),app:picker.active_id().and_then(|id|id.strip_prefix("app:").map(str::to_owned)),missed:missed.is_active(),grouped:grouped.is_active()}
 }
 
@@ -172,7 +172,7 @@ pub fn show(app:&gtk::Application){
     let resume=gtk::Button::with_label("End pause");resume.set_sensitive(false);
     pause_row.append(&pause_choice);pause_row.append(&pause);pause_row.append(&resume);root.append(&pause_row);
     let pause_status=text("","dim-label");root.append(&pause_status);
-    let search=gtk::SearchEntry::new();search.set_placeholder_text(Some("Search applications, titles and messages"));root.append(&search);
+    let search=gtk::Entry::new();search.set_placeholder_text(Some("Search applications, titles and messages"));root.append(&search);
     let picker=gtk::ComboBoxText::new();picker.append(Some("all"),"All applications");picker.set_active_id(Some("all"));root.append(&picker);
     let filters=gtk::Box::new(gtk::Orientation::Horizontal,8);
     let missed=gtk::CheckButton::with_label("Missed only");
