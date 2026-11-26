@@ -140,7 +140,8 @@ pub fn show(app: &gtk::Application) {
         while let Ok(reply) = replies.try_recv() {
             match reply.snapshot {
                 Ok(snapshot) => {
-                    if state.borrow().as_ref() != Some(&snapshot) {
+                    let content_changed=state.borrow().as_ref().is_none_or(|old|old.instance!=snapshot.instance || old.active!=snapshot.active || old.history!=snapshot.history);
+                    if content_changed {
                         let old_id = if state.borrow().as_ref().is_some_and(|old| old.instance == snapshot.instance) { choice.active_id() } else { None };
                         choice.remove_all();
                         for notice in &snapshot.active {
@@ -150,6 +151,8 @@ pub fn show(app: &gtk::Application) {
                         if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) && !snapshot.active.is_empty() { choice.set_active(Some(0)); }
                         show_history(&text,&snapshot,filter);
                         dismiss.set_sensitive(!snapshot.active.is_empty()); clear.set_sensitive(!snapshot.history.is_empty());
+                    }
+                    if state.borrow().as_ref()!=Some(&snapshot){
                         dnd.set_sensitive(true); dnd.set_label(if snapshot.manual_dnd.unwrap_or(snapshot.dnd) { "Do Not Disturb: On" } else { "Do Not Disturb: Off" });
                         pause.set_sensitive(snapshot.pause_remaining_seconds.is_some());
                         let remaining=snapshot.pause_remaining_seconds.unwrap_or(0);
