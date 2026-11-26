@@ -6,6 +6,9 @@
 mod entry;
 mod keyboard;
 mod seat;
+// Rendering is not connected to the black-only client yet.
+#[allow(dead_code)]
+mod prompt;
 
 use anyhow::{bail, Context, Result};
 use std::{fs::File, os::{fd::{AsFd, FromRawFd}, unix::net::UnixStream}};
@@ -78,19 +81,27 @@ fn layout(width: u32, height: u32) -> Option<(i32, i32, i32, i32)> {
     Some((width as i32, height as i32, stride as i32, bytes as i32))
 }
 
-// Fresh anonymous memory is zero-filled. XRGB8888 ignores the unused alpha
-// byte, so the complete buffer is opaque black without drawing or mapping it.
-fn black_file(bytes: i32) -> Result<File> {
-    let fd = unsafe { libc::memfd_create(b"atelier-recovery-black\0".as_ptr().cast(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
-    if fd < 0 { return Err(std::io::Error::last_os_error()).context("allocate lock buffer"); }
-    let file = unsafe { File::from_raw_fd(fd) };
+// Allocate and seal fresh anonymous backing. No writable mapping survives
+// the seal, and the compositor receives only immutable pixel storage.
+fn allocate_file(bytes:i32)->Result<File>{
+    if bytes<=0||bytes as u32>MAX_BYTES{bail!("invalid lock buffer size");}
+    let fd=unsafe{libc::memfd_create(b"atelier-recovery-frame\0".as_ptr().cast(),libc::MFD_CLOEXEC|libc::MFD_ALLOW_SEALING)};
+    if fd<0{return Err(std::io::Error::last_os_error()).context("allocate lock buffer");}
+    let file=unsafe{File::from_raw_fd(fd)};
     file.set_len(bytes as u64)?;
+    Ok(file)
+}
+fn seal_file(file:&File)->Result<()>{
     use std::os::fd::AsRawFd;
-    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+    let seals=libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_WRITE|libc::F_SEAL_SEAL;
+    if unsafe{libc::fcntl(file.as_raw_fd(),libc::F_ADD_SEALS,seals)}!=0{
         return Err(std::io::Error::last_os_error()).context("seal lock buffer");
     }
-    Ok(file)
+    Ok(())
+}
+// Fresh anonymous memory is zero-filled. XRGB8888 ignores the unused alpha.
+fn black_file(bytes:i32)->Result<File>{
+    let file=allocate_file(bytes)?;seal_file(&file)?;Ok(file)
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
