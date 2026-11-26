@@ -124,7 +124,7 @@ impl AudioWidgets{
                     scale.set_value(f64::from(percent.min(100)));scale.set_sensitive(true);
                     value.set_text(&format!("Current: {percent}%"));
                 }else{scale.set_sensitive(false);value.set_text("Volume unavailable");}
-                apply.set_sensitive(false);
+                apply.set_sensitive(v.volume.is_some_and(|p|p>100));
                 mute.set_sensitive(v.muted.is_some());mute.set_label(if v.muted==Some(true){"Unmute"}else{"Mute"});
                 if v.muted==Some(true){mute.add_css_class("atelier-control-active");}else{mute.remove_css_class("atelier-control-active");}
             }else{
@@ -142,7 +142,7 @@ impl AudioWidgets{
             if let Some(v)=state_for_scale.borrow().as_ref(){
                 if let Some(current)=v.volume{
                     value.set_text(&format!("Current: {current}% · Draft: {percent}%"));
-                    apply.set_sensitive(percent!=current.min(100));
+                    apply.set_sensitive(percent!=current);
                 }
             }
         });
