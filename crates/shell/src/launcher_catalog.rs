@@ -27,11 +27,26 @@ impl Category{
         categories
     }
 }
+/// At most one insertion, deletion, substitution or adjacent swap.
+fn near(a:&str,b:&str)->bool{
+    let a:Vec<_>=a.chars().take(65).collect();let b:Vec<_>=b.chars().take(65).collect();
+    if a.len()<4||a.len()>64||b.len()>64||a.len().abs_diff(b.len())>1{return false;}
+    let i=a.iter().zip(&b).position(|(x,y)|x!=y).unwrap_or(a.len().min(b.len()));
+    if a.len()==b.len(){
+        if i==a.len(){return true;}
+        return a[i+1..]==b[i+1..]||
+            (i+1<a.len()&&a[i]==b[i+1]&&a[i+1]==b[i]&&a[i+2..]==b[i+2..]);
+    }
+    let (short,long)=if a.len()<b.len(){(&a,&b)}else{(&b,&a)};
+    short[i..]==long[i+1..]
+}
 #[derive(Debug)]
-struct SearchFields{name:String,id:String,metadata:String}
+struct SearchFields{name:String,id:String,metadata:String,name_words:Vec<String>}
 impl SearchFields{
     fn new(name:&str,id:&str,metadata:&str)->Self{
-        Self{name:name.to_lowercase(),id:id.to_lowercase(),metadata:metadata.to_lowercase()}
+        let name=name.to_lowercase();
+        let name_words=name.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty()).map(str::to_owned).collect();
+        Self{name,id:id.to_lowercase(),metadata:metadata.to_lowercase(),name_words}
     }
     /// All query terms must match; title matches outrank identifier and
     /// metadata matches. The caller resolves equal ranks by catalog order.
@@ -39,15 +54,18 @@ impl SearchFields{
         let query=query.trim().chars().take(512).collect::<String>().to_lowercase();
         if query.is_empty(){return Some(0);}
         let mut rank=if self.name==query{1000}else if self.name.starts_with(&query){500}else{0};
+        let mut fuzzy=false;
         for word in query.split_whitespace(){
             rank+=if self.name==word{100}
-                else if self.name.split(|c:char|!c.is_alphanumeric()).any(|w|w.starts_with(word)){80}
+                else if self.name_words.iter().any(|w|w.starts_with(word)){80}
                 else if self.name.contains(word){60}
                 else if self.id.contains(word){30}
                 else if self.metadata.contains(word){10}
+                else if self.name_words.iter().any(|w|near(word,w)){fuzzy=true;5}
                 else{return None;};
         }
-        Some(rank)
+        // Every literal match outranks every typo-assisted match.
+        Some(if fuzzy{rank}else{rank+100_000})
     }
 }
 pub struct Entry{
@@ -90,6 +108,18 @@ mod tests{
         assert!(browser.score("firefox internet").is_some());
         assert_eq!(browser.score("firefox missing"),None);
         assert_eq!(browser.score("   "),Some(0));
+    }
+    #[test]
+    fn one_edit_name_fallback_is_bounded_and_lower_priority(){
+        let browser=SearchFields::new("Firefox","org.mozilla.firefox.desktop","Web Browser");
+        for typo in ["fireofx","firefx","firrefox","firefoc"]{assert!(browser.score(typo).is_some(),"{typo}");}
+        assert!(browser.score("firxx").is_none());
+        assert!(!near("fir","fox"));
+        assert!(browser.score("fireofx browser").is_some());
+        assert!(browser.score("fireofx missing").is_none());
+        let literal=SearchFields::new("Other","other.desktop","fireofx");
+        assert!(literal.score("fireofx").unwrap()>browser.score("fireofx").unwrap());
+        assert!(near("café","cafe"));
     }
     #[test]
     fn category_membership_is_exact_and_multi_valued(){
