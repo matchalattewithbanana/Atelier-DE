@@ -120,9 +120,10 @@ fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requ
         let close = gtk::Button::from_icon_name("window-close-symbolic"); close.add_css_class("flat");
         close.set_tooltip_text(Some("Dismiss notification"));
         let sender = requests.clone(); let instance = instance.to_owned(); let id = notice.id;
-        let dismiss_instance = instance.clone();
+        let dismiss_instance = instance.clone();let dismiss_revision=notice.revision;
+        close.set_sensitive(dismiss_revision!=0);
         close.connect_clicked(move |button| {
-            if sender.try_send(Request::Dismiss(dismiss_instance.clone(),id)).is_ok() { button.set_sensitive(false); }
+            if sender.try_send(Request::Dismiss(dismiss_instance.clone(),id,dismiss_revision)).is_ok() { button.set_sensitive(false); }
         });
         header.append(&close); card.append(&header);
         card.append(&label(&notice.summary, "heading", 120));
@@ -175,7 +176,7 @@ fn expansion_state(root:&gtk::Box)->HashMap<u32,bool>{
 fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
     if previous.len()!=next.len() || next.is_empty(){return false;}
     if !previous.iter().zip(next).all(|(a,b)|a==b ||
-        (a.id==b.id && a.app==b.app && a.summary==b.summary && a.body==b.body && a.icon==b.icon && a.urgency==b.urgency &&
+        (a.id==b.id && a.revision==b.revision && a.app==b.app && a.summary==b.summary && a.body==b.body && a.icon==b.icon && a.urgency==b.urgency &&
         a.actions.is_empty() && b.actions.is_empty() && a.progress.is_some() && b.progress.is_some())){return false;}
     let mut bars=Vec::new();
     for (a,b) in previous.iter().zip(next){
