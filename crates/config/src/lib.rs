@@ -8,7 +8,7 @@ pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
 pub mod cursor_images;
-pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS};
+pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS, NotificationAppearance, NotificationStyle, NotificationPosition};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

@@ -6,6 +6,7 @@ mod widgets_page;
 mod windows_page;
 mod window_rules_page;
 mod motion_page;
+mod notifications_page;
 mod themes_page;
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
@@ -17,9 +18,9 @@ fn main() -> glib::ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let initial_page = match args.as_slice() {
         [] => "appearance".to_owned(),
-        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "wallpaper", "widgets", "windows", "window-rules", "motion", "themes", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
+        [flag, id] if flag == "--page" && ["appearance", "shell-appearance", "wallpaper", "widgets", "windows", "window-rules", "motion", "notifications", "themes", "applications", "session", "network", "power", "audio", "bluetooth", "about"].contains(&id.as_str()) => id.clone(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("atelier-settings [--page appearance|shell-appearance|wallpaper|widgets|windows|window-rules|motion|themes|applications|session|network|power|audio|bluetooth|about]");
+            println!("atelier-settings [--page appearance|shell-appearance|wallpaper|widgets|windows|window-rules|motion|notifications|themes|applications|session|network|power|audio|bluetooth|about]");
             return glib::ExitCode::SUCCESS;
         }
         _ => { eprintln!("Invalid settings page; use --help."); return glib::ExitCode::FAILURE; }
@@ -133,6 +134,8 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
     window_rules_page::build(&rules);
     let motion=page(&stack,"motion","Motion & accessibility","Control native compositor animations and reduce motion independently of visual themes.");
     motion_page::build(&motion);
+    let notifications=page(&stack,"notifications","Notifications","Customize Atelier notification cards. This page saves local presentation preferences separately.");
+    notifications_page::build(&notifications);
     let themes=page(&stack,"themes","Native themes","Generate, preview, import and export portable native visual preferences.");
     themes_page::build(&themes);
 

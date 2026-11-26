@@ -42,4 +42,14 @@ call Notify 'Atelier smoke' 0 '' 'Silent title' 'Body' '[]' '{}' 0
 "$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["dnd"] and s["notice"] is None'
 call Notify 'Atelier smoke' 0 '' 'Visible title' 'Body' '[]' '{}' 0
 "$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["notice"]["summary"]=="Visible title"'
+progress_id="$("$binary" progress 0 25 'Building Atelier' 'Compiling')"
+"$binary" progress "$progress_id" 72 'Building Atelier' 'Testing' | grep -Fx "$progress_id"
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["cards"][0]["progress"]==72 and s["cards"][0]["summary"]=="Building Atelier"; assert len(s["cards"])<=3'
+if "$binary" progress 0 101 'Invalid' ''; then echo 'Invalid progress accepted' >&2; exit 1; fi
+call Notify 'Atelier smoke' 0 '' 'Action title' 'Body' "['view', 'View']" '{}' 0
+read -r action_id revision < <("$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["actions"]==[{"key":"view","label":"View"}]; print(n["id"],n["revision"])')
+if "$binary" invoke "$instance" "$action_id" "$((revision+1))" view; then echo 'Stale revision accepted' >&2; exit 1; fi
+if "$binary" invoke "$instance" "$action_id" "$revision" wrong; then echo 'Unknown action accepted' >&2; exit 1; fi
+# gdbus Notify is a short-lived sender, so this tests rejection and
+# metadata only; delivery to a live application requires a separate test.
 echo 'Notification D-Bus smoke passed'

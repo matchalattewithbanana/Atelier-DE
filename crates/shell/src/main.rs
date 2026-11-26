@@ -28,16 +28,17 @@ mod applications;
 fn main() -> glib::ExitCode {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     if arguments.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("atelier-shell [--panel [--notification-popups] | --launcher]\nThe panel is optional; external desktops use launcher mode by default.");
+        println!("atelier-shell [--panel [--notification-popups | --notification-island] | --launcher]\nThe panel is optional; external desktops use launcher mode by default.");
         return glib::ExitCode::SUCCESS;
     }
     let requested_panel = arguments.iter().any(|arg| arg == "--panel");
     let requested_launcher = arguments.iter().any(|arg| arg == "--launcher");
     let requested_popups = arguments.iter().any(|arg| arg == "--notification-popups");
-    if arguments.iter().any(|arg| !matches!(arg.as_str(), "--panel" | "--launcher" | "--notification-popups"))
-        || arguments.len() != usize::from(requested_panel) + usize::from(requested_launcher) + usize::from(requested_popups)
-        || (requested_panel && requested_launcher) || (requested_popups && !requested_panel) {
-        eprintln!("Use --panel [--notification-popups] or --launcher.");
+    let requested_island = arguments.iter().any(|arg| arg == "--notification-island");
+    if arguments.iter().any(|arg| !matches!(arg.as_str(), "--panel" | "--launcher" | "--notification-popups" | "--notification-island"))
+        || arguments.len() != usize::from(requested_panel) + usize::from(requested_launcher) + usize::from(requested_popups) + usize::from(requested_island)
+        || (requested_panel && requested_launcher) || ((requested_popups || requested_island) && !requested_panel) || (requested_popups && requested_island) {
+        eprintln!("Use --panel [--notification-popups | --notification-island] or --launcher.");
         return glib::ExitCode::FAILURE;
     }
     #[cfg(not(feature = "layer-panel"))]
@@ -55,7 +56,7 @@ fn main() -> glib::ExitCode {
     app.connect_activate(move |app| {
         let appearance=watch_appearance(app);
         #[cfg(feature = "layer-panel")]
-        if use_panel && gtk4_layer_shell::is_supported() { panel::build(app, requested_popups, appearance.clone()); return; }
+        if use_panel && gtk4_layer_shell::is_supported() { panel::build(app, requested_popups || requested_island, requested_island, appearance.clone()); return; }
         let _ = (use_panel, appearance);
         build_shell(app);
     });
