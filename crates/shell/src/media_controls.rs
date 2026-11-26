@@ -2,18 +2,21 @@
 //! session bus, and generation-tagged replies cannot overwrite newer choices.
 use crate::mpris::{Action,Bus,Details,Identity,Track};
 use gtk::{glib,prelude::*};
+use crate::{media_artwork::{Artwork,Cache,Colors},media_wave::Wave};
+use std::sync::Arc;
 use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::Duration};
 
-enum Request{Select(String),Act(Identity,Action)}
+enum Request{Select(String),Act(Identity,Action),Artwork(bool)}
 struct Reply{
     revision:u64,names:Vec<String>,selected:Option<String>,
-    details:Option<Details>,error:Option<String>,
+    details:Option<Details>,error:Option<String>,art:Option<Arc<Artwork>>,
 }
 fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
     let mut bus=None;
     let mut revision=0;
     let mut selected:Option<String>=None;
     let mut action_error=None;
+    let mut artwork=Cache::default();let mut artwork_enabled=false;
     loop{
         let result=(||->anyhow::Result<_>{
             if bus.is_none(){bus=Some(Bus::connect()?);}
@@ -30,9 +33,10 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
                     Some(Err(e))=>(None,Some(e.to_string())),
                     None=>(None,None),
                 };
-                Reply{revision,names,selected:selected.clone(),details,error:action_error.take().or(error)}
+                let art=artwork.update(artwork_enabled,details.as_ref());
+                Reply{revision,names,selected:selected.clone(),details,error:action_error.take().or(error),art}
             }
-            Err(e)=>{bus=None;Reply{revision,names:vec![],selected:None,details:None,error:action_error.take().or(Some(e.to_string()))}}
+            Err(e)=>{bus=None;artwork.update(false,None);Reply{revision,names:vec![],selected:None,details:None,error:action_error.take().or(Some(e.to_string())),art:None}}
         };
         if tx.send(reply).is_err(){break;}
         match rx.recv_timeout(Duration::from_secs(2)){
@@ -40,6 +44,7 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
                 revision=next;
                 match request{
                     Request::Select(name)=>selected=Some(name),
+                    Request::Artwork(enabled)=>artwork_enabled=enabled,
                     Request::Act(identity,action)=>{
                         action_error=match &bus{
                             Some(bus)=>bus.action(&identity,action).err().map(|e|e.to_string()),
@@ -64,6 +69,7 @@ fn label(text:&str,class:&str)->gtk::Label{
 struct Ui{
     choice:gtk::ComboBoxText,track:gtk::Label,artist:gtk::Label,album:gtk::Label,playback:gtk::Label,
     scale:gtk::Scale,position:gtk::Label,seek:gtk::Button,previous:gtk::Button,toggle:gtk::Button,next:gtk::Button,
+    artwork_enabled:gtk::CheckButton,cover:gtk::Picture,wave:Wave,art:RefCell<Option<Arc<Artwork>>>,
     status:gtk::Label,names:RefCell<Vec<String>>,details:RefCell<Option<Details>>,
     revision:Cell<u64>,busy:Cell<bool>,updating:Cell<bool>,draft:Cell<bool>,
     requests:mpsc::SyncSender<(u64,Request)>,
@@ -74,7 +80,8 @@ impl Ui{
         let Some(revision)=self.revision.get().checked_add(1)else{return;};
         if self.requests.try_send((revision,request)).is_ok(){
             self.revision.set(revision);self.busy.set(true);self.draft.set(false);
-            self.choice.set_sensitive(false);
+            self.choice.set_sensitive(false);self.artwork_enabled.set_sensitive(false);
+            self.wave.update(None,false,None);
             self.disable_actions();self.status.set_text("Updating player…");
         }else{self.status.set_text("Media worker busy or unavailable.");}
     }
@@ -97,7 +104,8 @@ impl Ui{
             *self.names.borrow_mut()=reply.names;
         }
         if let Some(id)=reply.selected{self.choice.set_active_id(Some(&id));}else{self.choice.set_active(None);}
-        self.choice.set_sensitive(!self.names.borrow().is_empty());
+        self.choice.set_sensitive(!self.names.borrow().is_empty());self.artwork_enabled.set_sensitive(true);
+        self.set_art(if self.artwork_enabled.is_active(){reply.art}else{None});
         *self.details.borrow_mut()=reply.details;
         self.render();
         self.updating.set(false);
@@ -105,12 +113,27 @@ impl Ui{
         else if self.names.borrow().is_empty(){self.status.set_text("No MPRIS players detected.");}
         else{self.status.set_text("Position and controls follow the selected player.");}
     }
+    fn set_art(&self,art:Option<Arc<Artwork>>){
+        let mut old=self.art.borrow_mut();
+        if old.as_ref().zip(art.as_ref()).is_some_and(|(a,b)|Arc::ptr_eq(a,b)){return;}
+        if let Some(image)=art.as_ref(){
+            let r=&image.raster;
+            let texture=gtk::gdk::MemoryTexture::new(r.width as i32,r.height as i32,gtk::gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(r.rgba.clone()),r.width as usize*4);
+            self.cover.set_paintable(Some(&texture));self.cover.set_visible(true);
+        }else{self.cover.set_paintable(None::<&gtk::gdk::Paintable>);self.cover.set_visible(false);}
+        *old=art;
+    }
+    fn colors(&self)->Option<Colors>{
+        let art=self.art.borrow();let image=art.as_ref()?;
+        let dark=gtk::Settings::default().is_some_and(|s|s.property::<bool>("gtk-application-prefer-dark-theme"));
+        if dark{image.dark}else{image.light}
+    }
     fn render(&self){
         self.disable_actions();
         let state=self.details.borrow();
         let Some(d)=state.as_ref()else{
             self.track.set_text("No track information");self.artist.set_text("");self.album.set_text("");self.playback.set_text("Unavailable");
-            self.position.set_text("— / —");self.scale.set_value(0.0);self.toggle.set_label("Play");return;
+            self.wave.update(None,false,None);self.position.set_text("— / —");self.scale.set_value(0.0);self.toggle.set_label("Play");return;
         };
         self.track.set_text(if d.title.is_empty(){"Unknown title"}else{&d.title});
         self.artist.set_text(&d.artist);self.album.set_text(&d.album);self.playback.set_text(&d.status);
@@ -120,11 +143,13 @@ impl Ui{
         self.previous.set_sensitive(d.capabilities.previous);self.next.set_sensitive(d.capabilities.next);
         if let (Some(track),Some(position))=(&d.track,d.position_us){
             if !self.draft.get(){self.scale.set_value(position as f64/track.length_us as f64*1000.0);}
+            self.wave.update(Some(self.scale.value()/1000.0),playing&&!self.draft.get(),self.colors());
             self.scale.set_sensitive(d.capabilities.seek);
             self.seek.set_sensitive(d.capabilities.seek&&self.draft.get());
             self.position.set_text(&format!("{}{} / {}",if self.draft.get(){"Seek to "}else{""},
                 time(if self.draft.get(){target(track,self.scale.value())}else{position}),time(track.length_us)));
         }else{
+            self.wave.update(None,false,None);
             self.scale.set_value(0.0);
             self.position.set_text(&format!("{} / —",d.position_us.map(time).unwrap_or_else(||"—".into())));
         }
@@ -145,11 +170,14 @@ pub fn show(app:&gtk::Application){
     content.append(&label("Now playing","atelier-control-heading"));
     let choice=gtk::ComboBoxText::new();choice.set_sensitive(false);content.append(&choice);
     let card=gtk::Box::new(gtk::Orientation::Vertical,8);card.add_css_class("atelier-control-card");content.append(&card);
+    let artwork_enabled=gtk::CheckButton::with_label("Show local cover art (read player-provided image files)");content.append(&artwork_enabled);
+    let cover=gtk::Picture::new();cover.set_size_request(-1,160);cover.set_can_shrink(true);cover.set_content_fit(gtk::ContentFit::Contain);cover.set_visible(false);card.append(&cover);
     let track=label("Looking for media players…","atelier-control-title");card.append(&track);
     let artist=label("","body");card.append(&artist);
     let album=label("","dim-label");card.append(&album);
     let playback=label("","dim-label");card.append(&playback);
     let position=label("— / —","body");card.append(&position);
+    let wave=Wave::new();card.append(&wave.widget);
     let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,1000.0,1.0);
     scale.set_draw_value(false);scale.set_size_request(-1,48);scale.add_css_class("atelier-expressive-slider");scale.set_tooltip_text(Some("Playback position draft; press Seek to apply"));card.append(&scale);
     let seek=gtk::Button::with_label("Seek");seek.set_size_request(-1,48);card.append(&seek);
@@ -162,9 +190,16 @@ pub fn show(app:&gtk::Application){
     let (requests,rx)=mpsc::sync_channel(1);let (tx,updates)=mpsc::sync_channel(1);
     std::thread::spawn(move||worker(rx,tx));
     let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,status,
+        artwork_enabled,cover,wave,art:RefCell::new(None),
         names:RefCell::new(vec![]),details:RefCell::new(None),revision:Cell::new(0),busy:Cell::new(false),
         updating:Cell::new(false),draft:Cell::new(false),requests});
-    ui.disable_actions();
+    ui.disable_actions();ui.artwork_enabled.set_sensitive(false);
+    {let weak=Rc::downgrade(&ui);ui.artwork_enabled.connect_toggled(move|button|{
+        if let Some(ui)=weak.upgrade(){
+            if !button.is_active(){ui.set_art(None);ui.wave.update(None,false,None);}
+            ui.request(Request::Artwork(button.is_active()));
+        }
+    });}
     {let weak=Rc::downgrade(&ui);ui.choice.connect_changed(move|choice|{
         if let Some(ui)=weak.upgrade(){if !ui.updating.get(){if let Some(name)=choice.active_id(){ui.request(Request::Select(name.to_string()));}}}
     });}
@@ -188,7 +223,7 @@ pub fn show(app:&gtk::Application){
         match updates.try_recv(){
             Ok(reply)=>ui.apply(reply),
             Err(mpsc::TryRecvError::Empty)=>{},
-            Err(mpsc::TryRecvError::Disconnected)=>{ui.disable_actions();ui.choice.set_sensitive(false);ui.status.set_text("Media worker stopped.");return glib::ControlFlow::Break;}
+            Err(mpsc::TryRecvError::Disconnected)=>{ui.disable_actions();ui.choice.set_sensitive(false);ui.artwork_enabled.set_sensitive(false);ui.set_art(None);ui.wave.update(None,false,None);ui.status.set_text("Media worker stopped.");return glib::ControlFlow::Break;}
         }
         glib::ControlFlow::Continue
     });
