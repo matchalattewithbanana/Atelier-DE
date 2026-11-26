@@ -1,4 +1,5 @@
 use serde::Serialize;
+use crate::preferences::Preferences;
 use std::{collections::VecDeque, time::{Duration, Instant}};
 
 const MAX_ACTIVE: usize = 128;
@@ -51,6 +52,8 @@ pub struct Notice {
     pub transient: bool,
     pub popup_allowed: bool,
     pub missed: bool,
+    #[serde(skip)]
+    history_allowed: bool,
     pub closed_reason: Option<u32>,
     #[serde(skip)]
     deadline: Option<Instant>,
@@ -60,6 +63,7 @@ pub struct Store {
     instance: String,
     dnd: bool,
     paused_until: Option<Instant>,
+    preferences: Preferences,
     next_id: u32,
     revision: u64,
     active: Vec<Notice>,
@@ -94,7 +98,7 @@ pub struct PopupSnapshot<'a> {
 impl Default for Store {
     fn default() -> Self {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, paused_until: None, next_id: 0, revision: 0, active: Vec::new(), history: VecDeque::new() }
+        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, paused_until: None, preferences:Preferences::default(), next_id: 0, revision: 0, active: Vec::new(), history: VecDeque::new() }
     }
 }
 
@@ -105,7 +109,9 @@ impl Store {
         self.notify_with(replaces, app, summary, body, transient, timeout, now, Details::default())
     }
     pub fn notify_with(&mut self, replaces: u32, app: String, summary: String, body: String, transient: bool, timeout: i32, now: Instant, details: Details) -> Result<u32, &'static str> {
-        let suppressed = self.suppressed(now);
+        let app=bounded(app,256);
+        let rule=self.preferences.app(&app);
+        let suppressed = self.suppressed(now) || !rule.popups;
         let index = self.active.iter().position(|n| n.id == replaces && ((n.actions.is_empty() && details.actions.is_empty()) || (n.owner.is_some() && n.owner == details.owner)));
         let revision = self.revision.checked_add(1).ok_or("Notification revision space exhausted")?;
         let id = if index.is_some() { replaces } else {
@@ -119,7 +125,7 @@ impl Store {
             _ => Some(now + Duration::from_secs(5)),
         };
         self.revision = revision;
-        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, closed_reason: None, deadline };
+        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app, summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, history_allowed:rule.history, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
     }
@@ -129,7 +135,7 @@ impl Store {
         notice.closed_reason = Some(reason);
         notice.actions.clear();
         notice.owner = None;
-        if !notice.transient {
+        if !notice.transient && notice.history_allowed {
             self.history.push_front(notice);
             self.history.truncate(MAX_HISTORY);
         }
@@ -152,6 +158,15 @@ impl Store {
         let expired: Vec<_> = self.active.iter().filter(|notice| notice.deadline.is_some_and(|deadline| deadline <= now)).map(|notice| notice.id).collect();
         for id in &expired { self.close(*id, 1); }
         expired
+    }
+    pub fn apply_preferences(&mut self, next: Preferences) {
+        for notice in &mut self.active {
+            let rule=next.app(&notice.app);
+            if !rule.popups {notice.popup_allowed=false;}
+            // Do not resurrect a previously excluded notice or its history.
+            if !rule.history {notice.history_allowed=false;}
+        }
+        self.preferences=next;
     }
     fn suppressed(&self, now: Instant) -> bool {
         self.dnd || self.paused_until.is_some_and(|until| now < until)
@@ -301,6 +316,24 @@ mod tests {
         assert!(store.pause(86401,later).is_err());
         assert!(store.close(missed,2));
         assert!(store.history[0].missed);
+    }
+    #[test]
+    fn application_policy_suppresses_and_excludes_history_without_replay(){
+        let mut store=Store::default();let now=Instant::now();
+        let old=add(&mut store,0,false,0,now);
+        let muted=Preferences::decode(b"[applications.app]\npopups=false\nhistory=false\n").unwrap();
+        store.apply_preferences(muted);
+        assert!(store.popup_at(now).cards.is_empty());
+        let id=add(&mut store,0,false,0,now);
+        assert!(store.active.iter().find(|n|n.id==id).unwrap().missed);
+        let other=store.notify(0,"other".into(),"other".into(),"".into(),false,0,now).unwrap();
+        assert_eq!(store.popup_at(now).cards[0].id,other);
+        store.apply_preferences(Preferences::default());
+        assert_eq!(store.popup_at(now).cards.len(),1);
+        assert!(store.close(old,2));assert!(store.close(id,2));assert!(store.history.is_empty());
+        let fresh=add(&mut store,0,false,0,now);
+        assert!(store.popup_at(now).cards.iter().any(|n|n.id==fresh));
+        assert!(store.close(fresh,2));assert_eq!(store.history.len(),1);
     }
     #[test]
     fn rejects_over_capacity_and_unknown_close() {
