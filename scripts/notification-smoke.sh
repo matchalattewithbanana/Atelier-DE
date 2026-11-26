@@ -82,4 +82,24 @@ muted_id="$("$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)
 "$binary" dismiss "$instance" "$muted_id"
 "$binary" list | python3 -c 'import json,sys; assert all(n["app"]!="Muted smoke" for n in json.load(sys.stdin)["history"])'
 "$binary" dismiss "$instance" "$custom_id"
+# Subscribe before the mutation and require a payload-free invalidation.
+monitor_log="$XDG_CONFIG_HOME/notification-signals.log"
+timeout 10s stdbuf -oL gdbus monitor --session --dest org.freedesktop.Notifications --object-path /org/atelier/Notifications > "$monitor_log" &
+monitor_pid=$!
+for _ in {1..40}; do
+    if grep -q 'is owned by' "$monitor_log"; then break; fi
+    kill -0 "$monitor_pid"
+    sleep 0.1
+done
+grep -q 'is owned by' "$monitor_log"
+"$binary" send info 'Signal smoke' 'Payload stays in snapshots'
+for _ in {1..40}; do
+    if grep -q 'org.atelier.Notifications1.Changed ()' "$monitor_log"; then break; fi
+    kill -0 "$monitor_pid"
+    sleep 0.1
+done
+grep -q 'org.atelier.Notifications1.Changed ()' "$monitor_log"
+if grep -q 'Payload stays in snapshots' "$monitor_log"; then echo 'Unexpected signal payload' >&2; exit 1; fi
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
 echo 'Notification D-Bus smoke passed'
