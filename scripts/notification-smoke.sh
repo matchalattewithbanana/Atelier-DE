@@ -102,4 +102,20 @@ grep -q 'org.atelier.Notifications1.Changed ()' "$monitor_log"
 if grep -q 'Payload stays in snapshots' "$monitor_log"; then echo 'Unexpected signal payload' >&2; exit 1; fi
 kill "$monitor_pid" 2>/dev/null || true
 wait "$monitor_pid" 2>/dev/null || true
+# Tracking preserves output and the child's status, and never publishes argv.
+output="$("$binary" run 'Tracked success' -- printf '%s' 'private-argument-smoke')"
+[[ "$output" == 'private-argument-smoke' ]]
+"$binary" list | python3 -c 'import json,sys; s=json.load(sys.stdin); n=next(n for n in s["active"] if n["summary"]=="Tracked success"); assert "exit 0" in n["body"]; assert "private-argument-smoke" not in json.dumps(s)'
+status=0
+"$binary" run 'Tracked failure' -- sh -c 'exit 7' || status=$?
+[[ "$status" == 7 ]]
+"$binary" list | python3 -c 'import json,sys; n=next(n for n in json.load(sys.stdin)["active"] if n["summary"]=="Tracked failure"); assert "exit 7" in n["body"] and n["urgency"]==2'
+status=0
+"$binary" run 'Missing executable' -- /nonexistent-atelier-smoke-command || status=$?
+[[ "$status" == 127 ]]
+if "$binary" run 'Invalid syntax' printf 'must not run'; then echo 'Missing separator accepted' >&2; exit 1; fi
+# The wrapper still runs commands when no notification service exists.
+status=0
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_CONFIG_HOME/nonexistent-bus" "$binary" run 'Offline command' -- sh -c 'exit 23' || status=$?
+[[ "$status" == 23 ]]
 echo 'Notification D-Bus smoke passed'
