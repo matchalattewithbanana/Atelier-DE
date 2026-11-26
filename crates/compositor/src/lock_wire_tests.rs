@@ -418,7 +418,7 @@ fn actual_recovery_client_binds_keyboard_without_unlocking(){
     let deadline=Instant::now()+Duration::from_secs(5);
     while h.state.lock_surface().is_none(){
         h.step();
-        assert!(!worker.is_finished(),"recovery client exited before mapping");
+        if worker.is_finished(){panic!("recovery client exited before mapping: {:?}",rx.try_recv());}
         assert!(Instant::now()<deadline,"recovery client did not map");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -436,7 +436,7 @@ fn actual_recovery_client_binds_keyboard_without_unlocking(){
     }
     let until=Instant::now()+Duration::from_millis(200);
     while Instant::now()<until{
-        h.step();assert!(!worker.is_finished(),"recovery client exited on keyboard events");
+        h.step();if worker.is_finished(){panic!("recovery client exited on keyboard events: {:?}",rx.try_recv());}
         assert!(h.state.recovery_confirmed(&id));assert!(!h.state.desktop_visible());
         std::thread::sleep(Duration::from_millis(1));
     }
