@@ -2,6 +2,10 @@
 //! Material 3 token values are separated from Atelier's custom RGB role
 //! derivation; this module does not claim to implement Material HCT.
 use anyhow::Result;
+mod motion;
+mod shapes;
+pub use motion::SpringValue;
+pub use shapes::{Shape,Outline};
 use crate::themes::{rgb,contrast};
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]

@@ -76,19 +76,19 @@ fn backdrop(cr:&gtk::cairo::Context,w:f64,h:f64,theme:&Theme,image:Option<&Wallp
 }
 /// Offline-only samples. Never read notifications, weather, media metadata
 /// or account details while previewing a theme.
-fn widget_preview(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),widget:Widget,theme:&Theme,scale:f64){
+fn widget_preview(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),widget:Widget,theme:&Theme,scale:f64,demo:&resources::Demo){
     let (heading,main,detail)=match widget{
         Widget::Weather=>("WEATHER","24°","Sample forecast"),
         Widget::System=>("SYSTEM","Atelier Desktop","Battery 82% · Sample"),
         Widget::Media=>("NOW PLAYING","Sample track","Previous · Play · Next"),
-        Widget::Resources=>{resources::draw(cr,area,&theme.palette);return;},
+        Widget::Resources=>{resources::draw(cr,area,&theme.palette,demo);return;},
         Widget::Notifications=>("NOTIFICATIONS","Private","Contents hidden"),
     };
     color(cr,&theme.palette.muted);text(cr,area,heading,0.20,9.0*scale);
     color(cr,&theme.palette.accent);text(cr,area,main,0.48,if widget==Widget::Weather{28.0*scale}else{14.0*scale});
     color(cr,&theme.palette.text);text(cr,area,detail,0.73,10.0*scale);
 }
-fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper>,compact:bool,login:bool){
+fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper>,compact:bool,login:bool,demo:&resources::Demo){
     let (available_w,available_h)=(f64::from(w.max(1)),f64::from(h.max(1)));
     // Fit the selected display aspect ratio into the preview allocation;
     // a narrow settings window should not silently switch the display mode.
@@ -110,7 +110,7 @@ fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper
     for tile in theme.dashboard_tiles(compact,login){
         color(cr,&theme.palette.panel);
         let area=card(cr,tile.rect,w,h,theme.corner_radius);
-        widget_preview(cr,area,tile.widget,theme,scale);
+        widget_preview(cr,area,tile.widget,theme,scale,demo);
     }
     if theme.clock||theme.date{
         color(cr,&theme.palette.panel);
@@ -278,6 +278,7 @@ pub(super) fn build()->gtk::Box{
     let compact=gtk::CheckButton::with_label("Compact display");let login=gtk::CheckButton::with_label("Greeter preview");
     let mode=gtk::Box::new(gtk::Orientation::Horizontal,8);mode.append(&compact);mode.append(&login);form.append(&mode);
     let preview=gtk::DrawingArea::new();preview.set_content_height(300);preview.set_hexpand(true);form.append(&preview);
+    let stress=gtk::CheckButton::with_label("Simulate high resource load (offline)");form.append(&stress);
     let status=label("Valid Classic draft. No settings changed.","dim-label");status.set_selectable(true);form.append(&status);
     let fields=Rc::new(Fields::build(&form));fields.populate(&initial);
     form.append(&label("Material You palette generator","title-3"));
@@ -298,11 +299,37 @@ pub(super) fn build()->gtk::Box{
     actions.append(&import);actions.append(&export);form.append(&actions);
     let selected_image=Rc::new(RefCell::new(None::<Wallpaper>));
     let current=Rc::new(RefCell::new((initial,None::<Wallpaper>)));
+    let demo=Rc::new(RefCell::new(resources::Demo::default()));
     {
-        let (current,compact,login)=(current.clone(),compact.downgrade(),login.downgrade());
-        preview.set_draw_func(move|_,cr,w,h|{let current=current.borrow();draw(cr,w,h,&current.0,current.1.as_ref(),compact.upgrade().is_some_and(|c|c.is_active()),login.upgrade().is_some_and(|c|c.is_active()));});
+        let (current,compact,login,demo)=(current.clone(),compact.downgrade(),login.downgrade(),demo.clone());
+        preview.set_draw_func(move|_,cr,w,h|{let current=current.borrow();draw(cr,w,h,&current.0,current.1.as_ref(),compact.upgrade().is_some_and(|c|c.is_active()),login.upgrade().is_some_and(|c|c.is_active()),&demo.borrow());});
     }
     for button in [&compact,&login]{let preview=preview.downgrade();button.connect_toggled(move|_|{if let Some(p)=preview.upgrade(){p.queue_draw();}});}
+    // Schedule redraws only while a demo transition is active. Rapid
+    // toggles retarget the same state and never install duplicate callbacks.
+    {
+        let preview=preview.downgrade();let current=current.clone();
+        let running=Rc::new(Cell::new(false));
+        stress.connect_toggled(move|toggle|{
+            let Some(preview)=preview.upgrade()else{return;};
+            demo.borrow_mut().set_high(toggle.is_active());
+            let reduced=current.borrow().0.motion_ms==0||
+                gtk::Settings::default().is_some_and(|s|!s.property::<bool>("gtk-enable-animations"));
+            if reduced{demo.borrow_mut().advance(0.0,true);preview.queue_draw();return;}
+            if running.replace(true){return;}
+            let (demo,current,running)=(demo.clone(),current.clone(),running.clone());
+            let last=Cell::new(None::<i64>);
+            preview.add_tick_callback(move|widget,clock|{
+                let now=clock.frame_time();
+                let elapsed=last.replace(Some(now)).map_or(0.0,|before|now.saturating_sub(before) as f64/1_000_000.0);
+                let reduced=current.borrow().0.motion_ms==0||
+                    gtk::Settings::default().is_some_and(|s|!s.property::<bool>("gtk-enable-animations"));
+                let active=demo.borrow_mut().advance(elapsed,reduced);
+                widget.queue_draw();
+                if active{gtk::glib::ControlFlow::Continue}else{running.set(false);gtk::glib::ControlFlow::Break}
+            });
+        });
+    }
     let populating=Rc::new(Cell::new(false));
     let refresh:Rc<dyn Fn()>={
         let (fields,preview,status,export)=(Rc::downgrade(&fields),preview.downgrade(),status.downgrade(),export.downgrade());
