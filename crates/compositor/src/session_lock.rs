@@ -65,27 +65,66 @@ impl<Owner:Eq> Lifecycle<Owner>{
     }
 }
 
-/// Physical keys/buttons are tracked independently from client focus.
-/// A boundary quarantines all input until every held control is released.
-/// The release which clears the barrier still belongs to the old boundary.
+/// Aggregate physical devices into one logical Wayland seat without
+/// releasing a key/button while another device still holds it.
+struct Controls<K>{
+    holders:std::collections::HashMap<K,std::collections::HashSet<String>>,
+}
+impl<K> Default for Controls<K>{
+    fn default()->Self{Self{holders:Default::default()}}
+}
+impl<K:Eq+std::hash::Hash+Copy> Controls<K>{
+    /// True only for the first press or final release of this control.
+    fn change(&mut self,device:&str,code:K,pressed:bool)->bool{
+        if pressed{
+            let holders=self.holders.entry(code).or_default();
+            let first=holders.is_empty();
+            holders.insert(device.to_owned());
+            first
+        }else{
+            let Some(holders)=self.holders.get_mut(&code)else{return false;};
+            if !holders.remove(device)||!holders.is_empty(){return false;}
+            self.holders.remove(&code);true
+        }
+    }
+    fn remove(&mut self,device:&str)->Vec<K>{
+        let mut released=Vec::new();
+        self.holders.retain(|code,holders|{
+            if holders.remove(device)&&holders.is_empty(){released.push(*code);false}else{true}
+        });
+        released
+    }
+    fn is_empty(&self)->bool{self.holders.is_empty()}
+}
+
+/// Physical controls are tracked independently of client focus. A boundary
+/// quarantines input until every device's held controls are released. A
+/// caller samples waiting() before updating, so the final release is still
+/// dispatched without focus before restoration.
 pub(crate) struct InputGate<K>{
-    keys:std::collections::HashSet<K>,
-    buttons:std::collections::HashSet<u32>,
+    keys:Controls<K>,
+    buttons:Controls<u32>,
     waiting:bool,
 }
 impl<K> Default for InputGate<K>{
     fn default()->Self{Self{keys:Default::default(),buttons:Default::default(),waiting:false}}
 }
-impl<K:Eq+std::hash::Hash> InputGate<K>{
+impl<K:Eq+std::hash::Hash+Copy> InputGate<K>{
     pub(crate) fn waiting(&self)->bool{self.waiting}
     pub(crate) fn boundary(&mut self){self.waiting=!self.keys.is_empty()||!self.buttons.is_empty();}
-    pub(crate) fn key(&mut self,key:K,pressed:bool){
-        if pressed{self.keys.insert(key);}else{self.keys.remove(&key);}
-        self.recheck();
+    pub(crate) fn key(&mut self,device:&str,key:K,pressed:bool)->bool{
+        let changed=self.keys.change(device,key,pressed);
+        self.recheck();changed
     }
-    pub(crate) fn button(&mut self,button:u32,pressed:bool){
-        if pressed{self.buttons.insert(button);}else{self.buttons.remove(&button);}
-        self.recheck();
+    pub(crate) fn button(&mut self,device:&str,button:u32,pressed:bool)->bool{
+        let changed=self.buttons.change(device,button,pressed);
+        self.recheck();changed
+    }
+    /// A removed device no longer holds any controls. Return only releases
+    /// that the seat must observe; other devices retain shared controls.
+    pub(crate) fn remove_device(&mut self,device:&str)->(Vec<K>,Vec<u32>){
+        let keys=self.keys.remove(device);let buttons=self.buttons.remove(device);
+        self.recheck();(keys,buttons)
     }
     fn recheck(&mut self){
         if self.keys.is_empty()&&self.buttons.is_empty(){self.waiting=false;}
@@ -136,12 +175,36 @@ mod tests{
     #[test]
     fn input_boundary_waits_for_every_control_including_new_presses(){
         let mut gate=InputGate::default();
-        gate.key(1,true);gate.button(272,true);
+        gate.key("a",1,true);gate.button("b",272,true);
         gate.boundary();assert!(gate.waiting());
-        gate.key(1,false);assert!(gate.waiting());
-        gate.key(2,true);gate.button(272,false);assert!(gate.waiting());
-        gate.key(2,false);assert!(!gate.waiting());
+        gate.key("a",1,false);assert!(gate.waiting());
+        gate.key("a",2,true);gate.button("b",272,false);assert!(gate.waiting());
+        gate.key("a",2,false);assert!(!gate.waiting());
         gate.boundary();assert!(!gate.waiting());
+    }
+    #[test]
+    fn aggregate_controls_across_devices_and_ignore_duplicates(){
+        let mut gate=InputGate::default();
+        assert!(gate.key("a",1,true));assert!(!gate.key("a",1,true));
+        assert!(!gate.key("b",1,true));
+        assert!(gate.button("a",272,true));assert!(!gate.button("b",272,true));
+        gate.boundary();assert!(gate.waiting());
+        assert!(!gate.key("a",1,false));assert!(!gate.button("a",272,false));
+        assert!(gate.waiting());
+        assert!(!gate.key("unknown",1,false));assert!(!gate.button("unknown",272,false));
+        assert!(gate.key("b",1,false));assert!(gate.waiting());
+        assert!(gate.button("b",272,false));assert!(!gate.waiting());
+    }
+    #[test]
+    fn removing_one_device_releases_only_its_last_held_controls(){
+        let mut gate=InputGate::default();
+        gate.key("a",1,true);gate.key("b",1,true);
+        gate.key("a",2,true);gate.button("a",272,true);gate.button("b",272,true);
+        gate.boundary();
+        assert_eq!(gate.remove_device("a"),(vec![2],vec![]));assert!(gate.waiting());
+        assert_eq!(gate.remove_device("a"),(vec![],vec![]));assert!(gate.waiting());
+        assert_eq!(gate.remove_device("b"),(vec![1],vec![272]));assert!(!gate.waiting());
+        assert!(gate.key("a",1,true)); // backend IDs may be reused after removal
     }
     #[test]
     fn generation_exhaustion_cannot_wrap(){

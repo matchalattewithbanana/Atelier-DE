@@ -44,3 +44,7 @@ The native-session unit-test build registers the lock global only inside an in-p
 ## Actual shared-memory buffer tests
 
 Private wire tests now create wl_shm pools using real file descriptors passed through SCM_RIGHTS, attach ARGB8888 buffers, and verify that a configured output-sized lock root maps and receives only its own keyboard/pointer focus. Invalid dimensions, null-buffer commits, preexisting attached buffers and role replacement are checked against actual Smithay buffer processing. The tests still simulate protected-frame completion rather than drive a GPU or physical seat. No production global is exposed.
+
+## Physical input aggregation
+
+The shared input router tracks control holders per backend device ID and forwards only the first press and final release of a logical key/button. Repeated same-device presses and unknown releases do not change the seat state. Device removal synthesizes only final releases for controls no other device holds. The release quarantine is sampled before applying the transition; the final release is dispatched in the previous focus domain before restoring focus. Tests cover two keyboards/pointers holding the same codes, duplicate/unknown events, device removal and ID reuse. This addresses the ordinary multi-device accounting limitation, not suspend/resume or unreported device loss. Backend device IDs must be unique while connected; nested Winit is a single virtual device. No hardware validation or global registration is introduced.
