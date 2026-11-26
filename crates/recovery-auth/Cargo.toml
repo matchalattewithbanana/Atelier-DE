@@ -1,0 +1,12 @@
+[package]
+name = "atelier-recovery-auth"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+pam = ["dep:libc"]
+
+[dependencies]
+libc = { version = "0.2", optional = true }
