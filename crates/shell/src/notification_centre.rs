@@ -262,7 +262,7 @@ pub fn show(app:&gtk::Application){
                     resume.set_sensitive(remaining>0);
                     pause_status.set_text(&if remaining>0{format!("Temporary pause: {}m {:02}s remaining",remaining/60,remaining%60)}else{"No temporary pause".into()});
                     *state.borrow_mut()=Some(s);
-                    status.set_text(reply.action_error.as_deref().unwrap_or("Atelier inbox · content stays in session memory"));
+                    status.set_text(reply.action_error.as_deref().unwrap_or(if reviewed.borrow().is_some(){"Confirm removal of all closed history, including filtered-out entries. Active notifications are unaffected."}else{"Atelier inbox · content stays in session memory"}));
                 }
                 Err(error)=>{
                     state.borrow_mut().take();reviewed.borrow_mut().take();clear.set_label("Clear history");cancel_clear.set_visible(false);overview.set_text("");inbox.clear();clear.set_sensitive(false);dnd.set_sensitive(false);pause.set_sensitive(false);resume.set_sensitive(false);pause_status.set_text("");
@@ -291,6 +291,21 @@ mod tests{
         assert_eq!(result.len(),1);assert_eq!(result[0].0,"A");assert_eq!(result[0].1[0].id,2);
         assert_eq!(groups(&notices,&Filter{grouped:true,..Filter::default()},true)[0].1.len(),2);
         assert!(groups(&notices,&Filter{query:"missing".into(),..Filter::default()},true)[0].1.is_empty());
+    }
+    #[test]
+    fn active_groups_follow_latest_revision_and_history_keeps_close_order(){
+        let mut old=notice(1,"A",false);old.revision=10;
+        let mut newer=notice(2,"B",false);newer.revision=12;
+        let mut replacement=notice(3,"A",false);replacement.revision=15;
+        let notices=vec![old,newer,replacement];
+        let filter=Filter{grouped:true,..Filter::default()};
+        let active=groups(&notices,&filter,true);
+        assert_eq!(active[0].0,"A");assert_eq!(active[0].1.iter().map(|n|n.id).collect::<Vec<_>>(),vec![3,1]);
+        let history=groups(&notices,&filter,false);
+        assert_eq!(history[0].1.iter().map(|n|n.id).collect::<Vec<_>>(),vec![1,3]);
+        assert!(Section::Active.includes(true)&&!Section::Active.includes(false));
+        assert!(Section::History.includes(false)&&!Section::History.includes(true));
+        assert!(Section::All.includes(true)&&Section::All.includes(false));
     }
     #[test]
     fn icons_are_theme_names_not_paths(){
