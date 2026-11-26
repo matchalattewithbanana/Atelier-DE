@@ -45,7 +45,7 @@ impl Canvas{
         }
     }
 }
-/// Render a fixed-size status card into a fresh sealed SHM file. The caller
+/// Render a fixed-size status card into a fresh size-sealed SHM file. The caller
 /// must not accept password input until this prompt is presented by the
 /// compositor. Only the enum crosses the rendering boundary.
 pub(super) fn render(width:u32,height:u32,status:Status)->Result<std::fs::File>{
@@ -71,20 +71,20 @@ pub(super) fn render(width:u32,height:u32,status:Status)->Result<std::fs::File>{
     }
     let mut file=crate::allocate_file(canvas.pixels.len() as i32)?;
     file.write_all(&canvas.pixels)?;
-    crate::seal_file(&file)?;
+    crate::seal_size(&file)?;
     Ok(file)
 }
 #[cfg(test)]
 mod tests{
     use super::*;
-    use std::{os::unix::fs::FileExt,io::Write};
+    use std::os::unix::fs::FileExt;
     #[test]
     fn prompt_has_opaque_background_and_sealed_backing(){
         let file=render(320,240,Status::Ready).unwrap();
         let mut pixel=[0;4];file.read_exact_at(&mut pixel,0).unwrap();
         assert_eq!(u32::from_ne_bytes(pixel),BACKGROUND);
         assert_eq!(file.metadata().unwrap().len(),320*240*4);
-        assert!(file.set_len(0).is_err());assert!((&file).write_all(b"x").is_err());
+        assert!(file.set_len(0).is_err());assert!(file.set_len(320*240*4+4).is_err());
     }
     #[test]
     fn invalid_geometry_is_rejected(){
