@@ -89,6 +89,7 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
         glib::ControlFlow::Continue
     });
     let layers_live=live.clone();
+    let notification_live=live.clone();
     let mut last_panel=appearance.clone();
     let bar_weak=bar.downgrade();
     let mut tick = move || {
@@ -120,7 +121,7 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
     crate::desktop_layers::start(app,&window,layers_live);
-    if popups { crate::notification_toast::start(app, &window, island); }
+    if popups { crate::notification_toast::start(app, &window, island, notification_live); }
 }
 
 fn spawn(mut command: Command) {
