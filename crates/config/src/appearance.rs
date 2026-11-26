@@ -202,11 +202,13 @@ pub enum NotificationStyle { #[default] LaunchDefault, Island, Floating, Compact
 #[serde(rename_all="kebab-case")]
 pub enum NotificationPosition { #[default] Automatic, TopLeft, TopCenter, TopRight }
 
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct NotificationAppearance {
     pub style: NotificationStyle,
     pub position: NotificationPosition,
+    /// Empty follows the panel; otherwise an exact connector name.
+    pub output: String,
     pub width: u32,
     pub max_cards: u32,
     pub timeout_seconds: u32,
@@ -215,7 +217,7 @@ pub struct NotificationAppearance {
     pub opacity: u32,
 }
 impl Default for NotificationAppearance {
-    fn default()->Self{Self{style:NotificationStyle::LaunchDefault,position:NotificationPosition::Automatic,width:340,max_cards:3,timeout_seconds:5,animation_ms:160,radius:16,opacity:100}}
+    fn default()->Self{Self{style:NotificationStyle::LaunchDefault,position:NotificationPosition::Automatic,output:String::new(),width:340,max_cards:3,timeout_seconds:5,animation_ms:160,radius:16,opacity:100}}
 }
 impl NotificationAppearance {
     pub fn is_default(&self)->bool{*self==Self::default()}
@@ -223,6 +225,7 @@ impl NotificationAppearance {
         for (name,value,min,max) in [("Notification width",self.width,260,480),("Notification stack",self.max_cards,1,3),("Notification timeout",self.timeout_seconds,2,15),("Notification radius",self.radius,0,32),("Notification opacity",self.opacity,85,100)]{
             if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
         }
+        if self.output.len()>128 || !self.output.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.')){bail!("notification output must be empty or a connector name");}
         if self.animation_ms!=0 && !(80..=400).contains(&self.animation_ms){bail!("notification animation must be off (0) or 80–400 ms");}
         Ok(())
     }
@@ -641,7 +644,7 @@ mod notification_tests{
         let old=decode(Some(b"version=1\n")).unwrap();
         assert_eq!(old.notifications,NotificationAppearance::default());
         let mut next=old;
-        next.notifications=NotificationAppearance{style:NotificationStyle::Compact,position:NotificationPosition::TopLeft,width:420,max_cards:2,timeout_seconds:8,animation_ms:200,radius:24,opacity:90};
+        next.notifications=NotificationAppearance{style:NotificationStyle::Compact,position:NotificationPosition::TopLeft,output:"DP-2".into(),width:420,max_cards:2,timeout_seconds:8,animation_ms:200,radius:24,opacity:90};
         assert_eq!(decode(Some(&encoded(&next).unwrap())).unwrap(),next);
         assert!(next.css().unwrap().contains("border-radius: 24px"));
         assert_eq!(next.notifications.transition_ms(Motion{opening_fade_ms:0,reduced_motion:true}),0);
@@ -652,6 +655,8 @@ mod notification_tests{
         n=NotificationAppearance::default();n.max_cards=0;assert!(n.validate().is_err());
         n=NotificationAppearance::default();n.opacity=10;assert!(n.validate().is_err());
         n=NotificationAppearance::default();n.animation_ms=20;assert!(n.validate().is_err());
+        n=NotificationAppearance::default();n.output="../DP-1".into();assert!(n.validate().is_err());
+        n.output="eDP-1".into();assert!(n.validate().is_ok());
         let n=NotificationAppearance::default();
         assert_eq!(n.style_for_launch(true),NotificationStyle::Island);
         assert_eq!(n.style_for_launch(false),NotificationStyle::Floating);
