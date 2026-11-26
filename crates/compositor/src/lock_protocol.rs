@@ -110,15 +110,24 @@ impl Atelier{
     /// a filename, PID/UID matching or an untrusted client request.
     /// No production caller exists until hardware recovery and locker launch
     /// are validated. Authentication remains the replacement locker's job.
-    #[allow(dead_code)]
-    pub(crate) fn recovery_connection(&mut self)->anyhow::Result<std::os::unix::net::UnixStream>{
+    pub(crate) fn recovery_connection(&mut self)->anyhow::Result<(ClientId,std::os::unix::net::UnixStream)>{
         if !self.session_lock.orphaned()||self.lock_protocol.recovery_client.is_some(){
             anyhow::bail!("recovery requires an orphaned lock without an outstanding grant");
         }
         let (server,endpoint)=std::os::unix::net::UnixStream::pair()?;
         let client=self.display.insert_client(server,std::sync::Arc::new(super::ClientState::default()))?;
-        self.lock_protocol.recovery_client=Some(client.id());
-        Ok(endpoint)
+        let id=client.id();
+        self.lock_protocol.recovery_client=Some(id.clone());
+        Ok((id,endpoint))
+    }
+    /// Scoped cancellation: do not revoke a later grant or unrelated owner.
+    pub(crate) fn revoke_recovery(&mut self,id:&ClientId){
+        if self.lock_protocol.recovery_client.as_ref()==Some(id){self.lock_protocol.recovery_client=None;}
+        let owns=self.lock_protocol.owner.as_ref().and_then(|owner|owner.client()).is_some_and(|client|&client.id()==id);
+        if owns{self.prepare_protected_recovery();}
+    }
+    pub(crate) fn recovery_confirmed(&self,id:&ClientId)->bool{
+        self.lock_protocol.owner.as_ref().is_some_and(|owner|owner.client().is_some_and(|client|&client.id()==id)&&self.session_lock.can_unlock(&owner.id()))
     }
     pub(super) fn recovery_input_ready(&self)->bool{!self.lock_protocol.recovering}
     pub(super) fn sync_lock_input(&mut self,time:u32){

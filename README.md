@@ -402,3 +402,5 @@ Protected native failures now enter an experimental seat-only quarantine and att
 Protected recovery can reconstruct a fresh EGL/GLES graphics generation and initialized black scanout slots after verified CPU black presentation. The normal backend shares the same initialized-slot path. Quarantine retains partial generations safely and rechecks ownership periodically; automatic input/client resume remains disabled pending hardware acceptance.
 
 Protected quarantine now revokes stale lock authority and resets logical input without focus. The disabled protocol includes a compositor-private, single-use orphan recovery connection that requires a new protected presentation before focus or unlock. Production locker supervision, physical input reconstruction and authentication are still pending.
+
+The internal recovery supervisor now supports a fixed administrator-installed locker path, private socket handoff, bounded admission and scoped revocation on process failure. The dedicated PAM locker and runtime handoff are not yet implemented; native locking remains disabled.

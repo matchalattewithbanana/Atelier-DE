@@ -27,7 +27,7 @@ impl Harness{
         self.wire(client)
     }
     fn recovery_client(&mut self)->Wire{
-        let endpoint=self.state.recovery_connection().unwrap();
+        let (_,endpoint)=self.state.recovery_connection().unwrap();
         endpoint.set_nonblocking(true).unwrap();
         self.wire(endpoint)
     }
@@ -336,4 +336,32 @@ fn private_recovery_rejects_public_clients_and_stale_presentation(){
     assert!(h.state.seat.get_keyboard().unwrap().current_focus().is_some());
     assert!(h.state.input_pointer_focus().is_some());
     recovery.words(lock,2,&[]);recovery.roundtrip(&mut h);assert!(h.state.desktop_visible());
+}
+
+#[test]
+fn cancelled_recovery_grant_cannot_claim_a_later_generation(){
+    let mut h=Harness::new();let (mut old,m,_,_)=setup(&mut h);
+    let _old=old.lock(m);old.roundtrip(&mut h);
+    h.state.prepare_protected_recovery();
+    let (first,endpoint)=h.state.recovery_connection().unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let mut abandoned=h.wire(endpoint);
+    h.state.revoke_recovery(&first);
+    let (second,endpoint)=h.state.recovery_connection().unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let mut replacement=h.wire(endpoint);
+    h.state.revoke_recovery(&first); // stale cleanup must not cancel second grant
+    let m=abandoned.bind("ext_session_lock_manager_v1",1);
+    let rejected=abandoned.lock(m);abandoned.roundtrip(&mut h);assert!(abandoned.saw(rejected,1));
+    let m=replacement.bind("ext_session_lock_manager_v1",1);
+    let owner=replacement.lock(m);replacement.roundtrip(&mut h);
+    assert!(!h.state.recovery_confirmed(&second));
+    h.confirm();replacement.roundtrip(&mut h);
+    assert!(h.state.recovery_confirmed(&second));
+    h.state.revoke_recovery(&first);
+    assert!(h.state.recovery_confirmed(&second));
+    h.state.revoke_recovery(&second);
+    assert!(!h.state.desktop_visible());assert!(h.state.session_lock.orphaned());
+    replacement.words(owner,2,&[]);replacement.error(&mut h,owner,1);
+    assert!(!h.state.desktop_visible());
 }
