@@ -36,14 +36,24 @@ fn format_notices<'a>(notices: impl IntoIterator<Item=&'a Notice>) -> String {
     if rendered.is_empty(){"None".into()}else{rendered}
 }
 
-fn show_history(text:&gtk::TextView,snapshot:&Snapshot,missed_only:bool){
-    if missed_only{
-        let active:Vec<_>=snapshot.active.iter().filter(|n|n.missed).collect();
-        let history:Vec<_>=snapshot.history.iter().filter(|n|n.missed).collect();
-        text.buffer().set_text(&format!("MISSED ACTIVE ({})\n{}\n\nMISSED HISTORY ({})\n{}",active.len(),format_notices(active),history.len(),format_notices(history)));
-    }else{
-        text.buffer().set_text(&format!("ACTIVE ({})\n{}\n\nCLOSED HISTORY ({})\n{}",snapshot.active.len(),format_notices(&snapshot.active),snapshot.history.len(),format_notices(&snapshot.history)));
-    }
+fn format_section(notices:&[Notice],missed_only:bool,grouped:bool)->(usize,String){
+    let filtered:Vec<_>=notices.iter().filter(|notice|!missed_only||notice.missed).collect();
+    let count=filtered.len();
+    if !grouped || count==0{return (count,format_notices(filtered));}
+    let mut apps=std::collections::BTreeMap::<&str,Vec<&Notice>>::new();
+    for notice in filtered{apps.entry(&notice.app).or_default().push(notice);}
+    let text=apps.into_iter().map(|(app,notices)|{
+        let name=if app.is_empty(){"Unknown application"}else{app};
+        format!("{name} ({})\n{}",notices.len(),format_notices(notices))
+    }).collect::<Vec<_>>().join("\n\n");
+    (count,text)
+}
+
+fn show_history(text:&gtk::TextView,snapshot:&Snapshot,missed_only:bool,grouped:bool){
+    let (active,active_text)=format_section(&snapshot.active,missed_only,grouped);
+    let (history,history_text)=format_section(&snapshot.history,missed_only,grouped);
+    let prefix=if missed_only{"MISSED "}else{""};
+    text.buffer().set_text(&format!("{prefix}ACTIVE ({active})\n{active_text}\n\n{prefix}CLOSED HISTORY ({history})\n{history_text}"));
 }
 
 pub fn show(app: &gtk::Application) {
@@ -74,6 +84,7 @@ pub fn show(app: &gtk::Application) {
     let pause_status=gtk::Label::new(None);pause_status.set_xalign(0.0);
     pause_row.append(&pause_choice);pause_row.append(&pause);pause_row.append(&resume);root.append(&pause_row);root.append(&pause_status);
     let missed_only=gtk::CheckButton::with_label("Show missed notifications only");root.append(&missed_only);
+    let grouped=gtk::CheckButton::with_label("Group notifications by application");root.append(&grouped);
     let text = gtk::TextView::new(); text.set_editable(false); text.set_cursor_visible(false); text.set_wrap_mode(gtk::WrapMode::WordChar);
     text.buffer().set_text("Active notifications and closed history appear here.");
     let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&text).build(); root.append(&scroll);
@@ -128,13 +139,13 @@ pub fn show(app: &gtk::Application) {
     refresh.connect_clicked(move |_| { let _ = sender.try_send(Request::Refresh); });
 
     let weak = window.downgrade();
-    let mut last_filter=false;
+    let mut last_filter=(false,false);
     glib::timeout_add_local(Duration::from_millis(150), move || {
         if weak.upgrade().is_none() { return glib::ControlFlow::Break; }
         let _ = &requests;
-        let filter=missed_only.is_active();
+        let filter=(missed_only.is_active(),grouped.is_active());
         if filter!=last_filter{
-            if let Some(snapshot)=state.borrow().as_ref(){show_history(&text,snapshot,filter);}
+            if let Some(snapshot)=state.borrow().as_ref(){show_history(&text,snapshot,filter.0,filter.1);}
             last_filter=filter;
         }
         while let Ok(reply) = replies.try_recv() {
@@ -149,7 +160,7 @@ pub fn show(app: &gtk::Application) {
                             choice.append(Some(&notice.id.to_string()), &format!("{} · {label}", notice.id));
                         }
                         if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) && !snapshot.active.is_empty() { choice.set_active(Some(0)); }
-                        show_history(&text,&snapshot,filter);
+                        show_history(&text,&snapshot,filter.0,filter.1);
                         dismiss.set_sensitive(!snapshot.active.is_empty()); clear.set_sensitive(!snapshot.history.is_empty());
                     }
                     if state.borrow().as_ref()!=Some(&snapshot){
@@ -178,6 +189,15 @@ pub fn show(app: &gtk::Application) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouping_retains_individual_entries_and_missed_filter(){
+        let notice=|id,app:&str,missed|Notice{id,app:app.into(),summary:format!("Notice {id}"),body:String::new(),progress:None,missed};
+        let notices=vec![notice(1,"B",false),notice(2,"A",true),notice(3,"A",false)];
+        let (count,text)=format_section(&notices,false,true);
+        assert_eq!(count,3);assert!(text.contains("A (2)"));assert!(text.contains("B (1)"));
+        let (count,text)=format_section(&notices,true,true);
+        assert_eq!(count,1);assert!(text.contains("Notice 2"));assert!(!text.contains("Notice 3"));
+    }
     #[test]
     fn body_is_plain_text_and_history_empty_is_explicit() {
         let notice = Notice { id: 1, app: "Test".into(), summary: "<b>title</b>".into(), body: "text".into(), progress: Some(72), missed:true };
