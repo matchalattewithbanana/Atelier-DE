@@ -202,15 +202,23 @@ fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
 // available monitor; the original preference is retained for hotplug.
 #[derive(Clone,PartialEq,Eq)]
 struct Output { monitor:gdk::Monitor,width:i32,height:i32 }
+fn select_index<'a>(connectors:impl IntoIterator<Item=Option<&'a str>>,preferred:&str,panel:Option<usize>)->Option<usize>{
+    let names:Vec<_>=connectors.into_iter().collect();
+    if names.is_empty(){return None;}
+    if !preferred.is_empty(){
+        if let Some(index)=names.iter().position(|name|*name==Some(preferred)){return Some(index);}
+    }
+    Some(panel.filter(|index|*index<names.len()).unwrap_or(0))
+}
 fn select_output(panel:&gtk::ApplicationWindow,connector:&str)->Option<Output>{
     let display=gdk::Display::default()?;
     let monitors=display.monitors();
     let available:Vec<_>=(0..monitors.n_items()).filter_map(|i|monitors.item(i).and_downcast::<gdk::Monitor>()).collect();
-    let selected=if connector.is_empty(){None}else{
-        available.iter().find(|m|m.connector().is_some_and(|name|name.as_str()==connector)).cloned()
-    };
-    let monitor=selected.or_else(||panel.surface().and_then(|surface|display.monitor_at_surface(&surface))
-        .filter(|m|available.contains(m))).or_else(||available.first().cloned())?;
+    let panel_index=panel.surface().and_then(|surface|display.monitor_at_surface(&surface))
+        .and_then(|monitor|available.iter().position(|m|m==&monitor));
+    let connectors:Vec<_>=available.iter().map(|monitor|monitor.connector()).collect();
+    let index=select_index(connectors.iter().map(|name|name.as_deref()),connector,panel_index)?;
+    let monitor=available[index].clone();
     let geometry=monitor.geometry();
     Some(Output{monitor,width:geometry.width(),height:geometry.height()})
 }
@@ -317,6 +325,16 @@ mod tests {
     }
     fn state(instance:&str,revision:u64,dnd:bool,cards:Vec<Notice>) -> Popup {
         Popup {schema:1,instance:instance.into(),last_id:10,dnd,notice:None,latest_revision:revision,cards,queued:0}
+    }
+    #[test]
+    fn connector_selection_falls_back_and_recovers_after_hotplug(){
+        let connected=[Some("eDP-1"),Some("DP-2")];
+        assert_eq!(select_index(connected,"DP-2",Some(0)),Some(1));
+        assert_eq!(select_index(connected,"",Some(1)),Some(1));
+        assert_eq!(select_index([Some("eDP-1")],"DP-2",Some(0)),Some(0));
+        assert_eq!(select_index(connected,"DP-2",Some(0)),Some(1));
+        assert_eq!(select_index([None],"DP-2",Some(4)),Some(0));
+        assert_eq!(select_index([],"DP-2",None),None);
     }
     #[test]
     fn geometry_respects_logical_output_bounds(){
