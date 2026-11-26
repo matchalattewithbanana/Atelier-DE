@@ -1,7 +1,7 @@
 //! Optional pinned launcher and native window tasks. External sessions stay launch-only.
 use atelier_config::{Appearance,component};
 use gtk::{glib,prelude::*};
-use std::{cell::RefCell,rc::Rc,time::Duration};
+use std::{cell::{Cell,RefCell},rc::Rc,time::Duration};
 use atelier_config::tasks::{TaskSnapshot,TaskWindow};
 use std::collections::{HashMap,HashSet};
 use crate::task_backend::{self,TaskBackend};
@@ -37,6 +37,8 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
     let backend=TaskBackend::detect().map(Rc::new);
     let snapshot:Rc<RefCell<Option<TaskSnapshot>>>=Rc::new(RefCell::new(None));
     let mut pins=Vec::new();
+    let open_menus=Rc::new(Cell::new(0usize));
+    let grouping=backend.is_some()&&gtk4_layer_shell::protocol_version()>=4;
     let apps=applications::installed();
     for id in &appearance.dock_pins{
         let Some(info)=apps.iter().find(|info|info.id().as_deref()==Some(id.as_str())).cloned()else{
@@ -54,24 +56,29 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
         button.add_css_class("atelier-dock-tile");
         button.update_property(&[gtk::accessible::Property::Label(&name)]);
         let native_tasks=backend.is_some();
-        let (backend,snapshot,pin)=(backend.clone(),snapshot.clone(),id.clone());
+        let (click_backend,click_snapshot,pin,launch_info)=(backend.clone(),snapshot.clone(),id.clone(),info.clone());
         button.connect_clicked(move |button|{
-            if let Some(backend)=&backend{
-                if let Some(state)=snapshot.borrow().as_ref(){
+            if let Some(backend)=&click_backend{
+                if let Some(state)=click_snapshot.borrow().as_ref(){
                     if let Some(target)=task_backend::next_window(state,&pin){
                         if let Err(error)=backend.activate(state,target.id){button.set_tooltip_text(Some(&format!("Focus request failed: {error}")));}
                         return;
                     }
                 }
             }
-            match applications::launch(&info){
-                Ok(())=>button.set_tooltip_text(Some(&info.display_name())),
+            match applications::launch(&launch_info){
+                Ok(())=>button.set_tooltip_text(Some(&launch_info.display_name())),
                 Err(error)=>{eprintln!("Dock launch failed: {error}");button.set_tooltip_text(Some(&format!("Launch failed: {error}")));}
             }
         });
         if native_tasks{button.set_tooltip_text(Some(&format!("{name} · task state not yet available")));}
         pins.push(Pin{id:id.clone(),name:name.to_string(),button:button.downgrade(),indicator:indicator.downgrade()});
-        row.append(&button);
+        if grouping{
+            let group=gtk::Box::new(gtk::Orientation::Horizontal,2);group.add_css_class("atelier-dock-split");
+            group.append(&button);
+            group.append(&window_menu(&window,backend.as_ref().expect("native grouping").clone(),id.clone(),info,open_menus.clone()));
+            row.append(&group);
+        }else{row.append(&button);}
     }
     let tasks=gtk::Box::new(gtk::Orientation::Horizontal,4);row.append(&tasks);
     let settings=gtk::Button::with_label("Settings");settings.set_tooltip_text(Some("Configure dock appearance"));
@@ -92,11 +99,86 @@ pub fn build(app:&gtk::Application,appearance:&Appearance)->Dock{
         }
     });
     window.set_child(Some(&scroll));window.present();
-    let tasks=backend.map(|backend|watch_tasks(&window,&tasks,backend,snapshot.clone(),pins));
-    let visibility=crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen);
+    let tasks=backend.map(|backend|watch_tasks(&window,&tasks,backend,snapshot.clone(),pins,grouping));
+    let visibility=crate::dock_visibility::start(app,&window,snapshot,appearance.dock_auto_hide,appearance.dock_hide_fullscreen,open_menus);
     Dock{window,tasks,visibility}
 }
 
+
+/// Only hide an individual tile if exactly one installed pin offers a menu
+/// through which that window can still be reached. Ambiguous IDs stay visible.
+fn grouped(window:&TaskWindow,pins:impl Iterator<Item=impl AsRef<str>>)->bool{
+    pins.filter(|id|task_backend::matches_pin(id.as_ref(),&window.app_id)).take(2).count()==1
+}
+fn window_title(task:&TaskWindow)->&str{
+    if task.title.is_empty(){if task.app_id.is_empty(){"Window"}else{&task.app_id}}else{&task.title}
+}
+fn window_menu(window:&gtk::ApplicationWindow,backend:Rc<TaskBackend>,pin:String,info:gtk::gio::AppInfo,open:Rc<Cell<usize>>)->gtk::MenuButton{
+    let button=gtk::MenuButton::new();button.set_icon_name("pan-up-symbolic");button.set_direction(gtk::ArrowType::Up);
+    let name=info.display_name();
+    let description=format!("Windows and launch options for {name}");
+    button.set_tooltip_text(Some(&description));button.update_property(&[gtk::accessible::Property::Label(&description)]);
+    button.add_css_class("atelier-dock-menu");
+    let popup=gtk::Popover::new();popup.set_position(gtk::PositionType::Top);popup.set_autohide(true);
+    popup.set_has_arrow(false);popup.add_css_class("atelier-dock-popup");
+    let content=gtk::Box::new(gtk::Orientation::Vertical,6);
+    content.set_margin_top(8);content.set_margin_bottom(8);content.set_margin_start(8);content.set_margin_end(8);
+    let scroll=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_width(240).max_content_height(320).propagate_natural_height(true).child(&content).build();
+    popup.set_child(Some(&scroll));
+    let weak_content=content.downgrade();
+    popup.connect_show(move|popup|{
+        let Some(content)=weak_content.upgrade()else{return;};
+        while let Some(child)=content.first_child(){content.remove(&child);}
+        let title=gtk::Label::new(Some(&info.display_name()));title.add_css_class("heading");title.set_wrap(true);content.append(&title);
+        let status=gtk::Label::new(None);status.set_wrap(true);status.set_xalign(0.0);
+        match backend.snapshot(){
+            Ok(state)=>{
+                let state=Rc::new(state);
+                let mut count=0;
+                for task in state.windows.iter().filter(|w|task_backend::matches_pin(&pin,&w.app_id)){
+                    count+=1;
+                    let text=format!("{} · Workspace {}{}",window_title(task),task.workspace,if task.focused{" · Focused"}else{""});
+                    let label=gtk::Label::new(Some(&text));label.set_xalign(0.0);label.set_max_width_chars(34);label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    let action=gtk::Button::new();action.set_child(Some(&label));action.set_tooltip_text(Some(&text));
+                    action.update_property(&[gtk::accessible::Property::Label(&text)]);
+                    if task.focused{action.add_css_class("suggested-action");}
+                    let (backend,state,id,popup,status)=(backend.clone(),state.clone(),task.id,popup.downgrade(),status.downgrade());
+                    action.connect_clicked(move |_|{
+                        match backend.activate(&state,id){
+                            Ok(())=>{if let Some(p)=popup.upgrade(){p.popdown();}}
+                            Err(e)=>{if let Some(s)=status.upgrade(){s.set_text(&format!("{e}. Reopen the menu to refresh."));}}
+                        }
+                    });
+                    content.append(&action);
+                }
+                if state.truncated{status.set_text("Partial inventory; additional windows may exist.");}
+                else if count==0{status.set_text("No running windows.");}
+            }
+            Err(_)=>status.set_text("Window inventory unavailable."),
+        }
+        let launch=gtk::Button::with_label("Launch application");
+        let (info,popup,status_weak)=(info.clone(),popup.downgrade(),status.downgrade());
+        launch.connect_clicked(move |_|match applications::launch(&info){
+            Ok(())=>{if let Some(p)=popup.upgrade(){p.popdown();}}
+            Err(e)=>{if let Some(s)=status_weak.upgrade(){s.set_text(&format!("Launch failed: {e}"));}}
+        });
+        content.append(&launch);content.append(&status);
+    });
+    // Keep auto-hide suspended while any menu is mapped, and restore the
+    // non-focusable dock when the last popup closes (including unmap).
+    let (weak_window,opened)=(window.downgrade(),open.clone());
+    popup.connect_map(move |_|{
+        opened.set(opened.get().saturating_add(1));
+        if let Some(w)=weak_window.upgrade(){w.set_keyboard_mode(KeyboardMode::OnDemand);}
+    });
+    let weak_window=window.downgrade();
+    popup.connect_unmap(move |_|{
+        open.set(open.get().saturating_sub(1));
+        if open.get()==0{if let Some(w)=weak_window.upgrade(){w.set_keyboard_mode(KeyboardMode::None);}}
+    });
+    button.set_popover(Some(&popup));button
+}
 
 /// Fixed indicator slot: the mark changes shape without shifting the icon.
 struct Indicator{root:gtk::Box,mark:gtk::Box,count:gtk::Label}
@@ -177,7 +259,7 @@ impl TaskTile{
     }
     fn update(&mut self,task:&TaskWindow){
         if self.last.as_ref()==Some(task){return;}
-        let title=if task.title.is_empty(){if task.app_id.is_empty(){"Window"}else{&task.app_id}}else{&task.title};
+        let title=window_title(task);
         let description=format!("{title} · workspace {}{}",task.workspace,if task.focused{" · focused"}else{""});
         self.label.set_text(title);self.button.set_tooltip_text(Some(&description));
         self.button.update_property(&[gtk::accessible::Property::Label(&description)]);
@@ -186,7 +268,7 @@ impl TaskTile{
     }
 }
 fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<TaskBackend>,
-    snapshot:Rc<RefCell<Option<TaskSnapshot>>>,pins:Vec<Pin>)->glib::SourceId{
+    snapshot:Rc<RefCell<Option<TaskSnapshot>>>,pins:Vec<Pin>,grouping:bool)->glib::SourceId{
     let window=window.downgrade();let container=container.downgrade();
     let mut tiles:HashMap<Key,TaskTile>=HashMap::new();
     let mut initialized=false;
@@ -199,13 +281,14 @@ fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<Tas
         initialized=true;*snapshot.borrow_mut()=next;
         let state=snapshot.borrow();
         for pin in &pins{pin.update(state.as_ref());}
-        let wanted:HashSet<_>=state.as_ref().into_iter().flat_map(|s|s.windows.iter().map(move|w|Key::of(s,w))).collect();
+        let individual=|w:&TaskWindow|!grouping||!grouped(w,pins.iter().map(|p|p.id.as_str()));
+        let wanted:HashSet<_>=state.as_ref().into_iter().flat_map(|s|s.windows.iter().filter(|w|individual(w)).map(move|w|Key::of(s,w))).collect();
         tiles.retain(|key,tile|{
             if wanted.contains(key){true}else{container.remove(&tile.button);false}
         });
         let mut previous:Option<gtk::Widget>=None;
         if let Some(state)=state.as_ref(){
-            for task in &state.windows{
+            for task in state.windows.iter().filter(|w|individual(w)){
                 let key=Key::of(state,task);
                 let tile=tiles.entry(key).or_insert_with(||{
                     let tile=TaskTile::new(key,backend.clone(),snapshot.clone());
@@ -240,6 +323,15 @@ mod tests{
         let state=sample();
         assert_eq!(pin_state(&state,"org.example.App.desktop"),PinState{count:2,active:true,partial:true});
         assert_eq!(pin_state(&state,"org.example.app.desktop"),PinState{count:0,active:false,partial:true});
+    }
+    #[test]
+    fn grouping_requires_one_reachable_installed_pin(){
+        let state=sample();let w=&state.windows[1];
+        assert!(grouped(w,["org.example.App.desktop"].into_iter()));
+        assert!(!grouped(w,["org.example.Other.desktop"].into_iter()));
+        assert!(!grouped(w,["org.example.App.desktop","org.example.App.desktop.desktop"].into_iter()));
+        let mut unknown=w.clone();unknown.app_id.clear();
+        assert!(!grouped(&unknown,["org.example.App.desktop"].into_iter()));
     }
     #[test]
     fn tile_identity_survives_title_focus_and_workspace_changes_but_not_restart(){
