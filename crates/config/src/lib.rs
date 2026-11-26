@@ -1,6 +1,7 @@
 //! Shared, versioned user preferences. No compositor, GUI or service dependency.
 
 mod appearance;
+pub mod notification_preferences;
 mod window_rules;
 pub use window_rules::{WindowRule,WindowRules};
 #[cfg(feature = "wallpaper")]

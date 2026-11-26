@@ -20,11 +20,65 @@ Use a replacement ID only within the same daemon lifetime. Legacy non-action not
 
 Run `atelier-shell --panel --notification-island` for the centred, three-card layer-shell stack, or `atelier-shell --panel --notification-popups` for a single floating card. Both remain opt-in and mutually exclusive; neither starts a notification daemon. Cards display plain text, expandable details, progress and bounded action buttons. The revision watermark prevents startup replay, and DND clears the visible stack. Incomplete progress and active actions can remain visible while eligible; other cards use a five-second local lifetime. The existing shell palette and button radius supply card styling. The slide-in transition respects reduced motion. The presentation can be customized live from Atelier Settings → Notifications (`atelier-settings --page notifications`); saving uses the existing appearance transaction and previous-version backup. Layouts are follow-launch, island, floating and compact. Placement is automatic or top left/center/right. Width (260–480 logical pixels), stacked cards (1–3), ordinary timeout (2–15 seconds), slide-in duration (off or 80–400 ms), corner radius (0–32) and background opacity (85–100%) are validated. The shell reuses its appearance watcher; settings do not enable an otherwise disabled presenter. Progress-only updates with stable card order and no actions patch the progress widget in place, while replacements requiring a rebuild preserve expansion state for the same daemon instance. The timeout applies to subsequent card updates, not the original daemon expiry. Geometry is a preferred size rather than a hard maximum on narrow displays. Graphical behavior still requires CI and desktop testing.
 
+## Pause and built-in presets
+
+The inbox offers timed pauses of 15 minutes, 30 minutes, 1 hour, 2 hours and 8 hours, plus an end-pause button. The CLI supports 1 second through 24 hours. A pause expires automatically against a monotonic clock. Manual DND is independent; ending a pause cannot disable manual DND. Existing popups disappear and do not replay. Notifications published during suppression remain in the active inbox or bounded history, marked missed; transient notices still do not enter history. The missed-only view filters both active and closed notices. State is in memory and resets on daemon restart.
+
+```sh
+instance=$(atelier-notifications list | jq -r .instance)
+atelier-notifications pause "$instance" 30m
+atelier-notifications pause "$instance" off
+atelier-notifications send success "Download complete" "Ready to use"
+atelier-notifications send error "Update failed" "Check the package manager"
+```
+
+Built-in presets: info, success, warning, error, download and update. They supply theme icon names, urgency and an expiry hint. Error cards use critical urgency and remain active until dismissed. Only simple theme icon names are rendered, not notification-supplied file paths. Custom presets and application-specific rules are supported through the local preferences file. Critical notifications obey DND and pause; neither mode is a lock-screen privacy boundary.
+
+## Application preferences and custom presets
+
+Edit `~/.config/atelier-de/notifications.toml` (or the equivalent under an absolute XDG_CONFIG_HOME):
+
+```toml
+[applications."Example App"]
+popups = false
+history = true
+
+[presets.backup]
+icon = "document-save-symbolic"
+urgency = 1
+timeout_ms = 8000
+```
+
+Publish with `atelier-notifications send backup "Backup complete" "Files saved"`. Custom names are lowercase ASCII letters, digits and hyphens, up to 48 bytes; built-in names cannot be overridden. Presets accept a simple theme icon name, urgency 0–2 and timeout 0 (persistent) or 1000–60000 milliseconds. No executable hooks or commands are accepted.
+
+App rules match the exact case-sensitive reported application label, not a trusted identity. Disabling popups keeps notices in the active inbox and marks new suppressed deliveries as missed. Disabling history prevents active notices from entering closed history; it does not remove existing history or prevent active inbox visibility. Existing active notices are suppressed on a valid rule change, and reenabling a rule does not replay them. Replacements are new deliveries. Rules never override global DND or pause. The daemon checks for changes about once per second and retains the last valid settings on malformed live edits; deleting the file restores defaults. Invalid preferences at startup prevent the optional daemon from starting. Built-in CLI presets remain usable even when the custom preferences file is malformed. Custom presets are loaded on each CLI invocation.
+
+The notification centre now presents graphical notification cards, with text search, application filtering, missed-only filtering, expandable application groups, progress indicators, per-card dismissal and active application actions. Individual records remain independent. Group expansion is preserved on updates within the same daemon instance; pause countdown changes do not rebuild card content.
+
+Open `atelier-settings --page notification-rules` to add, update or remove application rules and custom presets. Changes remain in a draft until explicitly saved. The editor and daemon share one validated configuration implementation. Saves reject stale drafts and use atomic file replacement with `notifications.previous.toml` as a previous-version backup. Load previous preferences into a draft and save to restore them. The editor does not start the daemon.
+
+## Direct shell transport
+
+Both the notification centre and the layer-shell presenter use the same GIO session-bus transport rather than spawning the notification CLI and timeout processes for each refresh. D-Bus calls use a three-second method timeout, do not auto-start a daemon and are serialized on a worker outside the GTK thread. The daemon coalesces state changes into payload-free `org.atelier.Notifications1.Changed` signals on its existing 200 ms maintenance loop; notification revisions remain separate from this invalidation counter. The shell subscribes to change and bus-name ownership signals, bounds its pending requests and re-reads the authoritative snapshot. A three-second fallback refresh covers older services, initial subscription races and missed signals. No claim of lossless delivery of every intermediate notification state is made. GTK still checks its local reply queue on a short timer to handle animation and UI state. The CLI remains unchanged for scripts. Actual latency and idle resource consumption require measurement on a running desktop.
+
+## Command execution tracking
+
+Use an explicit task label and separate the executable from notification options with `--`:
+
+```sh
+atelier-notifications run "Build Atelier" -- cargo build --release
+atelier-notifications run "Create backup" -- tar -cf backup.tar documents/
+```
+
+The wrapper runs the executable directly with original argument bytes, working directory, environment and inherited standard streams. It does not insert a shell, capture output, escalate privileges or publish arguments. Notifications contain the supplied label, elapsed whole seconds and outcome/exit code. Avoid secrets in labels. The child runs even if notification delivery fails. Normal exit codes are preserved; a child terminated by a signal maps to 128 plus signal, missing executables to 127 and other execution errors to 126. Both notification calls target the same unique bus owner. After completion the wrapper waits at most two seconds for best-effort notification delivery. The running card expires after 60 seconds to avoid persistent orphans; long jobs can still receive a completion card. No percentage is invented.
+
+The wrapper is not a process supervisor and does not install custom signal handlers. If the wrapper itself is killed, a completion notice is not guaranteed. Existing suppression and history rules apply. No automatic command hooks or AI integrations.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add explicit pause, missed-card handling, lock-aware suppression and output placement.
-- Add a persistent script-friendly client for command tracking, safe action selection and presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
-- Expose layout, position, animation and color options in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
+- Add lock-aware suppression and multi-output placement; measure the direct transport's real-world latency and idle resource use.
+- Consider a persistent script-friendly client for safe action selection only if needed; validate command tracking in actual use. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
+- Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.

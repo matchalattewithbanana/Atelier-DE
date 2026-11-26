@@ -5,9 +5,20 @@ binary=target/debug/atelier-notifications
 test -x "$binary"
 test -n "${DBUS_SESSION_BUS_ADDRESS:-}"
 # Must be invoked under dbus-run-session (CI uses an isolated bus).
+export XDG_CONFIG_HOME="$(mktemp -d)"
+mkdir -p "$XDG_CONFIG_HOME/atelier-de"
+cat > "$XDG_CONFIG_HOME/atelier-de/notifications.toml" <<'TOML'
+[applications."Muted smoke"]
+popups=false
+history=false
+[presets.backup]
+icon="document-save-symbolic"
+urgency=1
+timeout_ms=8000
+TOML
 "$binary" daemon &
 daemon_pid=$!
-trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; rm -rf -- "$XDG_CONFIG_HOME"' EXIT
 for _ in {1..60}; do
     if "$binary" list >/dev/null 2>&1; then break; fi
     kill -0 "$daemon_pid"
@@ -52,4 +63,59 @@ if "$binary" invoke "$instance" "$action_id" "$((revision+1))" view; then echo '
 if "$binary" invoke "$instance" "$action_id" "$revision" wrong; then echo 'Unknown action accepted' >&2; exit 1; fi
 # gdbus Notify is a short-lived sender, so this tests rejection and
 # metadata only; delivery to a live application requires a separate test.
+"$binary" pause "$instance" 30m
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["dnd"] and not s["manual_dnd"] and s["pause_remaining_seconds"]>0 and not s["cards"]'
+"$binary" send success 'Preset success' 'Finished'
+"$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["missed"] and n["icon"]=="emblem-ok-symbolic" and n["urgency"]==1'
+"$binary" dnd "$instance" on
+"$binary" pause "$instance" off
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["dnd"] and s["manual_dnd"] and s["pause_remaining_seconds"]==0'
+"$binary" dnd "$instance" off
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["dnd"] and not s["cards"]'
+if "$binary" pause "$instance" 25h; then echo 'Invalid pause accepted' >&2; exit 1; fi
+if "$binary" pause wrong-instance 1m; then echo 'Stale pause accepted' >&2; exit 1; fi
+if "$binary" send unknown 'Invalid' ''; then echo 'Unknown preset accepted' >&2; exit 1; fi
+custom_id="$("$binary" send backup 'Backup complete' 'Saved')"
+"$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["icon"]=="document-save-symbolic" and n["summary"]=="Backup complete"'
+call Notify 'Muted smoke' 0 '' 'Muted rule title' 'Body' '[]' '{}' 0
+muted_id="$("$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["missed"] and not n["popup_allowed"]; print(n["id"])')"
+"$binary" dismiss "$instance" "$muted_id"
+"$binary" list | python3 -c 'import json,sys; assert all(n["app"]!="Muted smoke" for n in json.load(sys.stdin)["history"])'
+"$binary" dismiss "$instance" "$custom_id"
+# Subscribe before the mutation and require a payload-free invalidation.
+monitor_log="$XDG_CONFIG_HOME/notification-signals.log"
+timeout 10s stdbuf -oL gdbus monitor --session --dest org.freedesktop.Notifications --object-path /org/atelier/Notifications > "$monitor_log" &
+monitor_pid=$!
+for _ in {1..40}; do
+    if grep -q 'is owned by' "$monitor_log"; then break; fi
+    kill -0 "$monitor_pid"
+    sleep 0.1
+done
+grep -q 'is owned by' "$monitor_log"
+"$binary" send info 'Signal smoke' 'Payload stays in snapshots'
+for _ in {1..40}; do
+    if grep -q 'org.atelier.Notifications1.Changed ()' "$monitor_log"; then break; fi
+    kill -0 "$monitor_pid"
+    sleep 0.1
+done
+grep -q 'org.atelier.Notifications1.Changed ()' "$monitor_log"
+if grep -q 'Payload stays in snapshots' "$monitor_log"; then echo 'Unexpected signal payload' >&2; exit 1; fi
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+# Tracking preserves output and the child's status, and never publishes argv.
+output="$("$binary" run 'Tracked success' -- printf '%s' 'private-argument-smoke')"
+[[ "$output" == 'private-argument-smoke' ]]
+"$binary" list | python3 -c 'import json,sys; s=json.load(sys.stdin); n=next(n for n in s["active"] if n["summary"]=="Tracked success"); assert "exit 0" in n["body"]; assert "private-argument-smoke" not in json.dumps(s)'
+status=0
+"$binary" run 'Tracked failure' -- sh -c 'exit 7' || status=$?
+[[ "$status" == 7 ]]
+"$binary" list | python3 -c 'import json,sys; n=next(n for n in json.load(sys.stdin)["active"] if n["summary"]=="Tracked failure"); assert "exit 7" in n["body"] and n["urgency"]==2'
+status=0
+"$binary" run 'Missing executable' -- /nonexistent-atelier-smoke-command || status=$?
+[[ "$status" == 127 ]]
+if "$binary" run 'Invalid syntax' printf 'must not run'; then echo 'Missing separator accepted' >&2; exit 1; fi
+# The wrapper still runs commands when no notification service exists.
+status=0
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_CONFIG_HOME/nonexistent-bus" "$binary" run 'Offline command' -- sh -c 'exit 23' || status=$?
+[[ "$status" == 23 ]]
 echo 'Notification D-Bus smoke passed'
