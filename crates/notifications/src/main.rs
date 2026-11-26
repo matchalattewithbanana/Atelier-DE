@@ -1,6 +1,7 @@
 //! Explicitly started notification service for an isolated or user-selected session.
 mod store;
 mod presets;
+mod command_run;
 use atelier_config::notification_preferences as preferences;
 use anyhow::{bail, Context, Result};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
@@ -149,6 +150,12 @@ fn daemon() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Dispatch before UTF-8 CLI parsing: tracked commands can have arbitrary
+    // Unix argument bytes. Explicit process exit preserves their status.
+    let raw:Vec<_>=std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|mode|mode=="run"){
+        std::process::exit(command_run::run(&raw[1..])?);
+    }
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode] if mode == "daemon" => daemon(),
@@ -222,7 +229,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | progress ID PERCENT SUMMARY BODY | dnd INSTANCE on|off | pause INSTANCE DURATION | send PRESET SUMMARY BODY\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | progress ID PERCENT SUMMARY BODY | dnd INSTANCE on|off | pause INSTANCE DURATION | send PRESET SUMMARY BODY | run LABEL -- COMMAND [ARGS...]\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),
