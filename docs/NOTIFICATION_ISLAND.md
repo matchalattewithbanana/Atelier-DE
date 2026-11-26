@@ -32,13 +32,34 @@ atelier-notifications send success "Download complete" "Ready to use"
 atelier-notifications send error "Update failed" "Check the package manager"
 ```
 
-Built-in presets: info, success, warning, error, download and update. They supply theme icon names, urgency and an expiry hint. Error cards use critical urgency and remain active until dismissed. Only simple theme icon names are rendered, not notification-supplied file paths. Custom user presets and application-specific preferences are future work. Critical notifications obey DND and pause; neither mode is a lock-screen privacy boundary.
+Built-in presets: info, success, warning, error, download and update. They supply theme icon names, urgency and an expiry hint. Error cards use critical urgency and remain active until dismissed. Only simple theme icon names are rendered, not notification-supplied file paths. Custom presets and application-specific rules are supported through the local preferences file. Critical notifications obey DND and pause; neither mode is a lock-screen privacy boundary.
+
+## Application preferences and custom presets
+
+Edit `~/.config/atelier-de/notifications.toml` (or the equivalent under an absolute XDG_CONFIG_HOME):
+
+```toml
+[applications."Example App"]
+popups = false
+history = true
+
+[presets.backup]
+icon = "document-save-symbolic"
+urgency = 1
+timeout_ms = 8000
+```
+
+Publish with `atelier-notifications send backup "Backup complete" "Files saved"`. Custom names are lowercase ASCII letters, digits and hyphens, up to 48 bytes; built-in names cannot be overridden. Presets accept a simple theme icon name, urgency 0–2 and timeout 0 (persistent) or 1000–60000 milliseconds. No executable hooks or commands are accepted.
+
+App rules match the exact case-sensitive reported application label, not a trusted identity. Disabling popups keeps notices in the active inbox and marks new suppressed deliveries as missed. Disabling history prevents active notices from entering closed history; it does not remove existing history or prevent active inbox visibility. Existing active notices are suppressed on a valid rule change, and reenabling a rule does not replay them. Replacements are new deliveries. Rules never override global DND or pause. The daemon checks for changes about once per second and retains the last valid settings on malformed live edits; deleting the file restores defaults. Invalid preferences at startup prevent the optional daemon from starting. Built-in CLI presets remain usable even when the custom preferences file is malformed. Custom presets are loaded on each CLI invocation.
+
+The notification centre also offers optional application grouping for active and closed notices, combinable with the missed-only filter. Individual records remain independent. A graphical editor for custom policy and presets is not yet available.
 
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
 - Add lock-aware suppression and multi-output placement.
-- Add a persistent script-friendly client for command tracking, safe action selection and user-defined presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
-- Expose layout, position, animation and color options in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
+- Add a persistent script-friendly client for command tracking, safe action selection. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
+- Expose custom policy and preset editing in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
