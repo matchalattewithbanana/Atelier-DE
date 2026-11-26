@@ -10,3 +10,8 @@ pam = ["dep:libc"]
 
 [dependencies]
 libc = { version = "0.2", optional = true }
+
+[[bin]]
+name = "atelier-recovery-auth-worker"
+path = "src/main.rs"
+required-features = ["pam"]

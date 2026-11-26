@@ -2,6 +2,9 @@
 //! Not a locker, unlock authority, or installation mechanism.
 #![cfg(all(target_os = "linux", feature = "pam"))]
 
+mod worker;
+pub use worker::run_inherited_worker;
+
 use libc::{c_char, c_int, c_void};
 use std::{ffi::{CStr, CString}, fs, os::unix::fs::MetadataExt, path::Path, ptr, sync::atomic::{compiler_fence, Ordering}};
 
