@@ -1,0 +1,113 @@
+//! Notification presentation preferences. Does not start a daemon or shell.
+use atelier_config::{appearance_path, AppearanceReview, NotificationAppearance, NotificationPosition, NotificationStyle};
+use gtk::prelude::*;
+use std::{cell::RefCell,rc::Rc};
+use super::description;
+
+#[derive(Clone)]
+struct Fields {
+    style: gtk::ComboBoxText,
+    position: gtk::ComboBoxText,
+    width: gtk::SpinButton,
+    cards: gtk::SpinButton,
+    timeout: gtk::SpinButton,
+    animation: gtk::SpinButton,
+    radius: gtk::SpinButton,
+    opacity: gtk::SpinButton,
+}
+impl Fields {
+    fn populate(&self, n: NotificationAppearance) {
+        self.style.set_active_id(Some(match n.style {
+            NotificationStyle::LaunchDefault => "launch-default", NotificationStyle::Island => "island",
+            NotificationStyle::Floating => "floating", NotificationStyle::Compact => "compact",
+        }));
+        self.position.set_active_id(Some(match n.position {
+            NotificationPosition::Automatic => "automatic", NotificationPosition::TopLeft => "top-left",
+            NotificationPosition::TopCenter => "top-center", NotificationPosition::TopRight => "top-right",
+        }));
+        for (field,value) in [(&self.width,n.width),(&self.cards,n.max_cards),(&self.timeout,n.timeout_seconds),
+            (&self.animation,n.animation_ms),(&self.radius,n.radius),(&self.opacity,n.opacity)] {
+            field.set_value(f64::from(value));
+        }
+    }
+    fn collect(&self) -> NotificationAppearance {
+        NotificationAppearance {
+            style: match self.style.active_id().as_deref() {
+                Some("island") => NotificationStyle::Island, Some("floating") => NotificationStyle::Floating,
+                Some("compact") => NotificationStyle::Compact, _ => NotificationStyle::LaunchDefault,
+            },
+            position: match self.position.active_id().as_deref() {
+                Some("top-left") => NotificationPosition::TopLeft, Some("top-center") => NotificationPosition::TopCenter,
+                Some("top-right") => NotificationPosition::TopRight, _ => NotificationPosition::Automatic,
+            },
+            width:self.width.value_as_int() as u32, max_cards:self.cards.value_as_int() as u32,
+            timeout_seconds:self.timeout.value_as_int() as u32, animation_ms:self.animation.value_as_int() as u32,
+            radius:self.radius.value_as_int() as u32, opacity:self.opacity.value_as_int() as u32,
+        }
+    }
+}
+fn choice(parent:&gtk::Box,title:&str,values:&[(&str,&str)])->gtk::ComboBoxText{
+    parent.append(&description(title));
+    let field=gtk::ComboBoxText::new();
+    for (id,label) in values {field.append(Some(id),label);}
+    parent.append(&field);field
+}
+fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64,step:f64)->gtk::SpinButton{
+    let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
+    let title=description(title);title.set_hexpand(true);row.append(&title);
+    let field=gtk::SpinButton::with_range(min,max,step);row.append(&field);parent.append(&row);field
+}
+pub fn build(parent:&gtk::Box){
+    let path=match appearance_path(){Ok(p)=>p,Err(e)=>{parent.append(&description(&format!("{e:#}")));return;}};
+    parent.append(&description("These preferences affect an already enabled Atelier popup presenter. Start the shell with --panel --notification-island or --panel --notification-popups to opt in. They do not start or replace a notification daemon."));
+    let fields=Fields{
+        style:choice(parent,"Layout",&[("launch-default","Follow shell launch mode"),("island","Notification island"),("floating","Single floating card"),("compact","Compact stack")]),
+        position:choice(parent,"Placement",&[("automatic","Automatic"),("top-left","Top left"),("top-center","Top center"),("top-right","Top right")]),
+        width:spin(parent,"Preferred width (logical pixels)",260.0,480.0,10.0),
+        cards:spin(parent,"Maximum stacked cards",1.0,3.0,1.0),
+        timeout:spin(parent,"Ordinary card timeout (seconds)",2.0,15.0,1.0),
+        animation:spin(parent,"Slide-in duration (0 disables)",0.0,400.0,20.0),
+        radius:spin(parent,"Card corner radius",0.0,32.0,1.0),
+        opacity:spin(parent,"Background opacity (%)",85.0,100.0,1.0),
+    };
+    parent.append(&description("Animation must be off (0) or 80–400 ms. Reduced motion overrides this setting. Progress and action cards follow their own lifecycle; the timeout affects ordinary cards on their next update."));
+    let reload=gtk::Button::with_label("Reload saved notification appearance");
+    let defaults=gtk::Button::with_label("Reset notification appearance in draft");
+    let previous=gtk::Button::with_label("Load previous notification appearance");
+    let save=gtk::Button::with_label("Save notification appearance");save.add_css_class("suggested-action");
+    let status=description("");status.set_selectable(true);
+    for button in [&reload,&defaults,&previous,&save]{parent.append(button);}parent.append(&status);
+    let state=Rc::new(RefCell::new(None::<AppearanceReview>));
+    save.set_sensitive(false);previous.set_sensitive(false);
+    {
+        let (state,fields,status,save,previous)=(state.clone(),fields.clone(),status.clone(),save.downgrade(),previous.downgrade());
+        reload.connect_clicked(move |_| {
+            let result=AppearanceReview::load(&path);
+            let enabled=result.is_ok();
+            match result {
+                Ok(review)=>{fields.populate(review.value.notifications);*state.borrow_mut()=Some(review);status.set_text("Saved notification preferences loaded.");}
+                Err(error)=>{state.borrow_mut().take();status.set_text(&format!("Load failed: {error:#}"));}
+            }
+            if let Some(button)=save.upgrade(){button.set_sensitive(enabled);}
+            if let Some(button)=previous.upgrade(){button.set_sensitive(enabled);}
+        });
+    }
+    {let (fields,status)=(fields.clone(),status.clone());defaults.connect_clicked(move |_| {
+        fields.populate(NotificationAppearance::default());status.set_text("Defaults in draft only.");
+    });}
+    {let (fields,state,status)=(fields.clone(),state.clone(),status.clone());previous.connect_clicked(move |_| {
+        let state=state.borrow();let Some(review)=state.as_ref() else{return;};
+        match review.previous(){Ok(value)=>{fields.populate(value.notifications);status.set_text("Previous notification preferences loaded into draft.");}
+            Err(error)=>status.set_text(&format!("{error:#}"))}
+    });}
+    save.connect_clicked(move |_| {
+        let mut state=state.borrow_mut();let Some(review)=state.as_mut() else{return;};
+        let mut next=review.value.clone();next.notifications=fields.collect();
+        match review.save(next){
+            Ok(true)=>status.set_text("Saved. The running enabled presenter reloads these settings."),
+            Ok(false)=>status.set_text("No changes."),
+            Err(error)=>status.set_text(&format!("Save failed: {error:#}. Reload if preferences changed elsewhere.")),
+        }
+    });
+    reload.emit_clicked();
+}
