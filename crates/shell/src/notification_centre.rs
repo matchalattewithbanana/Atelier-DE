@@ -248,7 +248,7 @@ pub fn show(app:&gtk::Application){
                     let changed=state.borrow().as_ref().is_none_or(|old|!same_instance||old.active!=s.active||old.history!=s.history);
                     if changed{
                         refill_apps(&picker,&s);
-                        last_filter=read_filter(&search,&picker,&missed,&grouped);
+                        last_filter=read_filter(&search,&picker,&missed,&grouped,&section);
                         inbox.render(&s,&last_filter,&requests,&status,same_instance);
                         clear.set_sensitive(!s.history.is_empty()&&s.history.iter().all(|n|n.revision!=0));
                         let stale=reviewed.borrow().as_ref().is_some_and(|(instance,entries)|instance!=&s.instance||entries.len()!=s.history.len()||!entries.iter().zip(&s.history).all(|((id,r),n)|*id==n.id&&*r==n.revision));
