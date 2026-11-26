@@ -5,7 +5,7 @@ use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::{cell::RefCell,rc::Rc, process::Command, time::Duration};
 
-pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>) {
+pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell<Appearance>>) {
     let appearance = live.borrow().clone();
     let config = config_path().and_then(|p| Config::load(&p)).unwrap_or_default();
     if let Some(settings) = gtk::Settings::default() {
@@ -120,7 +120,7 @@ pub fn build(app: &gtk::Application, popups: bool, live:Rc<RefCell<Appearance>>)
     window.connect_map(|_| println!("Atelier layer panel mapped"));
     window.set_child(Some(&bar)); window.present();
     crate::desktop_layers::start(app,&window,layers_live);
-    if popups { crate::notification_toast::start(app, &window); }
+    if popups { crate::notification_toast::start(app, &window, island); }
 }
 
 fn spawn(mut command: Command) {
