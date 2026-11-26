@@ -21,54 +21,70 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     window.auto_exclusive_zone_enable();
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, appearance.panel_spacing as i32);
     bar.set_size_request(-1, appearance.panel_height as i32);
-    bar.set_margin_start(12); bar.set_margin_end(12); bar.set_margin_top(4); bar.set_margin_bottom(4);
+    // Outer viewport owns margins so they do not scroll with the controls.
     bar.add_css_class("atelier-panel");
 
-    let launcher = gtk::Button::with_label("Atelier");
+    let mut shortcuts=Vec::new();
+    let launcher_control=crate::panel_layout::Shortcut::new("Atelier","view-grid-symbolic");
+    let launcher=launcher_control.button.clone();
     launcher.add_css_class("suggested-action");
     let app_ref = app.downgrade();
     launcher.connect_clicked(move |_| {
         if let Some(app) = app_ref.upgrade() { crate::build_shell(&app); }
     });
-    bar.append(&launcher);
+    bar.append(&launcher);shortcuts.push(launcher_control);
 
     let backend = Rc::new(WorkspaceBackend::detect());
     let backend_label = gtk::Label::new(Some(backend.label()));
     backend_label.add_css_class("dim-label");
     bar.append(&backend_label);
+    launcher.set_tooltip_text(Some(&format!("Open Atelier launcher · {}",backend.label())));
     let workspaces=crate::workspace_strip::Strip::new(backend.clone());
     bar.append(&workspaces.root);
     if backend.is_external() && installed_helper("atelier").is_some() {
-        let rices = gtk::Button::with_label("Rices");
+        let rice_control=crate::panel_layout::Shortcut::new("Rices","applications-graphics-symbolic");
+        let rices=rice_control.button.clone();
         rices.set_tooltip_text(Some("Browse installed and available Atelier rice products"));
         let app_ref = app.downgrade();
         rices.connect_clicked(move |_| {
             if let Some(app) = app_ref.upgrade() { show_rices(&app); }
         });
-        bar.append(&rices);
+        bar.append(&rices);shortcuts.push(rice_control);
     }
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0); spacer.set_hexpand(true); bar.append(&spacer);
     let clock = gtk::Label::new(None);
     let battery = gtk::Label::new(None);
     battery.add_css_class("dim-label");
-    bar.append(&clock); bar.append(&battery);
-    let media = gtk::Button::with_label("Media");
+    let status_group=gtk::Box::new(gtk::Orientation::Horizontal,6);status_group.add_css_class("atelier-panel-group");
+    status_group.set_valign(gtk::Align::Center);status_group.append(&clock);status_group.append(&battery);
+    clock.set_single_line_mode(true);battery.set_single_line_mode(true);battery.set_max_width_chars(16);battery.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    bar.append(&status_group);
+    let controls=gtk::Box::new(gtk::Orientation::Horizontal,4);controls.add_css_class("atelier-panel-group");controls.set_valign(gtk::Align::Center);
+    let media_control=crate::panel_layout::Shortcut::new("Media","multimedia-player-symbolic");
+    let media=media_control.button.clone();
     let app_ref = app.downgrade();
     media.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::media_controls::show(&app); } });
-    bar.append(&media); media.set_visible(appearance.show_media);
-    let notifications = gtk::Button::with_label("Notifications");
+    controls.append(&media);shortcuts.push(media_control); media.set_visible(appearance.show_media);
+    let notifications_control=crate::panel_layout::Shortcut::new("Notifications","preferences-system-notifications-symbolic");
+    let notifications=notifications_control.button.clone();
     let app_ref = app.downgrade();
     notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::notification_centre::show(&app); } });
-    bar.append(&notifications); notifications.set_visible(appearance.show_notifications);
+    controls.append(&notifications);shortcuts.push(notifications_control); notifications.set_visible(appearance.show_notifications);
     let audio = quick_button(app,&window);
-    bar.append(&audio); audio.set_visible(appearance.show_audio);
-    let terminal = gtk::Button::with_label("Terminal");
+    controls.append(&audio); audio.set_visible(appearance.show_audio);
+    audio.update_property(&[gtk::accessible::Property::Label("Quick controls")]);
+    let terminal_control=crate::panel_layout::Shortcut::new("Terminal","utilities-terminal-symbolic");
+    let terminal=terminal_control.button.clone();
     let terminal_path = config.terminal.clone();
     terminal.connect_clicked(move |_| spawn(Command::new(&terminal_path)));
-    bar.append(&terminal); terminal.set_visible(appearance.show_terminal);
-    let settings = gtk::Button::with_label("Settings");
+    controls.append(&terminal);shortcuts.push(terminal_control); terminal.set_visible(appearance.show_terminal);
+    let settings_control=crate::panel_layout::Shortcut::new("Settings","preferences-system-symbolic");
+    let settings=settings_control.button.clone();
     settings.connect_clicked(move |_| spawn(component("atelier-settings")));
-    bar.append(&settings);
+    controls.append(&settings);shortcuts.push(settings_control);
+    bar.append(&controls);
+    let layout=crate::panel_layout::Layout::new(&bar,shortcuts,&backend_label,&audio,backend.count());
+    let panel_weak=window.downgrade();
 
     if appearance.show_battery { update_power(&battery); } else { battery.set_visible(false); }
     let live_power=live.clone();
@@ -90,8 +106,10 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
             if current.show_battery!=last_panel.show_battery{if current.show_battery{update_power(&battery);}else{battery.set_visible(false);}}
             last_panel=current.clone();
         }
+        let compact=panel_weak.upgrade().is_none_or(|panel|layout.update(&panel,current.panel_spacing));
         if let Ok(now) = glib::DateTime::now_local() {
-            if let Ok(text) = now.format(if current.show_date { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
+            if let Ok(text) = now.format(if current.show_date&&!compact { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
+            if let Ok(text)=now.format(if current.show_date{"%a %d %b · %H:%M"}else{"%H:%M"}){clock.set_tooltip_text(Some(&text));}
         }
         let snapshot = backend.snapshot();
         workspaces.update(snapshot.as_ref(),current.motion.reduced_motion);
@@ -105,7 +123,13 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     });
 
     window.connect_map(|_| println!("Atelier layer panel mapped"));
-    window.set_child(Some(&bar)); window.present();
+    // A constrained viewport allows narrow outputs to reach every enabled
+    // item, even with nine workspaces, large fonts or custom spacing.
+    let viewport=gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Never).propagate_natural_width(false)
+        .propagate_natural_height(true).min_content_width(0).child(&bar).build();
+    viewport.set_margin_start(12);viewport.set_margin_end(12);viewport.set_margin_top(4);viewport.set_margin_bottom(4);
+    window.set_child(Some(&viewport)); window.present();
     crate::desktop_layers::start(app,&window,layers_live);
     if popups { crate::notification_toast::start(app, &window, island, notification_live); }
 }
