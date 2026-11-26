@@ -4,7 +4,7 @@
 use anyhow::{bail,Context,Result};
 use gtk::{gio,glib};
 use glib::variant::{ToVariant,ObjectPath};
-use std::collections::HashMap;
+use std::{collections::HashMap,cell::{Cell,RefCell},rc::Rc};
 
 const PREFIX:&str="org.mpris.MediaPlayer2.";
 const PATH:&str="/org/mpris/MediaPlayer2";
@@ -23,10 +23,17 @@ pub struct Capabilities{pub play:bool,pub pause:bool,pub previous:bool,pub next:
 pub struct Details{
     pub identity:Identity,pub title:String,pub artist:String,pub album:String,pub status:String,
     pub track:Option<Track>,pub position_us:Option<i64>,pub capabilities:Capabilities,
-    pub art_uri:Option<String>,
+    pub art_uri:Option<String>,pub shuffle:Option<bool>,pub repeat:Option<Repeat>,
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum Repeat{Off,Track,Playlist}
+impl Repeat{
+    fn parse(s:&str)->Option<Self>{match s{"None"=>Some(Self::Off),"Track"=>Some(Self::Track),"Playlist"=>Some(Self::Playlist),_=>None}}
+    fn wire(self)->&'static str{match self{Self::Off=>"None",Self::Track=>"Track",Self::Playlist=>"Playlist"}}
+    pub fn next(self)->Self{match self{Self::Off=>Self::Track,Self::Track=>Self::Playlist,Self::Playlist=>Self::Off}}
 }
 #[derive(Debug,Clone)]
-pub enum Action{Play,Pause,Previous,Next,Seek(Track,i64)}
+pub enum Action{Play,Pause,Previous,Next,Seek(Track,i64),Shuffle(bool),Repeat(Repeat)}
 
 fn clean(text:&str)->String{text.chars().filter(|c|!c.is_control()&&!matches!(*c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).take(240).collect()}
 fn get<T:glib::variant::FromVariant>(props:&Properties,key:&str)->Option<T>{props.get(key)?.get::<T>()}
@@ -49,11 +56,19 @@ fn details(identity:Identity,props:&Properties)->Details{
         previous:control&&flag(props,"CanGoPrevious"),next:control&&flag(props,"CanGoNext"),
         seek:control&&flag(props,"CanSeek")&&track.is_some()&&position_us.is_some()};
     let art_uri=get::<String>(&metadata,"mpris:artUrl").filter(|s|s.len()<=4096&&!s.chars().any(char::is_control));
-    Details{identity,title,artist,album,status,track,position_us,capabilities,art_uri}
+    let shuffle=if control{get::<bool>(props,"Shuffle")}else{None};
+    let repeat=if control{get::<String>(props,"LoopStatus").and_then(|s|Repeat::parse(&s))}else{None};
+    Details{identity,title,artist,album,status,track,position_us,capabilities,art_uri,shuffle,repeat}
 }
 /// Bind authorization and the wire request to one fresh snapshot.
-fn action_call(state:&Details,action:Action)->Result<(&'static str,Option<glib::Variant>)>{
+fn action_call(state:&Details,action:Action)->Result<(&'static str,&'static str,Option<glib::Variant>)>{
     let (method,args)=match action{
+            Action::Shuffle(expected) if state.shuffle==Some(expected)=>{
+                return Ok(("org.freedesktop.DBus.Properties","Set",Some((PLAYER,"Shuffle",(!expected).to_variant()).to_variant())));
+            }
+            Action::Repeat(expected) if state.repeat==Some(expected)=>{
+                return Ok(("org.freedesktop.DBus.Properties","Set",Some((PLAYER,"LoopStatus",expected.next().wire().to_variant()).to_variant())));
+            }
             Action::Play if state.capabilities.play=>("Play",None),
             Action::Pause if state.capabilities.pause=>("Pause",None),
             Action::Previous if state.capabilities.previous=>("Previous",None),
@@ -66,12 +81,33 @@ fn action_call(state:&Details,action:Action)->Result<(&'static str,Option<glib::
             _=>bail!("player no longer supports this action"),
     };
 
-    Ok((method,args))
+    Ok((PLAYER,method,args))
 }
-pub struct Bus{connection:gio::DBusConnection}
+/// Signals are invalidations, never authoritative state or permission.
+#[derive(Default)]
+struct Changes{dirty:Cell<bool>,owner:RefCell<Option<String>>}
+impl Changes{
+    fn name(&self,name:&str){if name.starts_with(PREFIX)&&name.len()>PREFIX.len(){self.dirty.set(true);}}
+    fn player(&self,sender:&str){if self.owner.borrow().as_deref()==Some(sender){self.dirty.set(true);}}
+}
+pub struct Bus{connection:gio::DBusConnection,changes:Rc<Changes>,subscriptions:Vec<gio::SignalSubscriptionId>}
+impl Drop for Bus{
+    fn drop(&mut self){for id in self.subscriptions.drain(..){self.connection.signal_unsubscribe(id);}}
+}
 impl Bus{
     pub fn connect()->Result<Self>{
-        Ok(Self{connection:gio::bus_get_sync(gio::BusType::Session,None::<&gio::Cancellable>)?})
+        let connection=gio::bus_get_sync(gio::BusType::Session,None::<&gio::Cancellable>)?;
+        let changes=Rc::new(Changes::default());
+        let mut subscriptions=Vec::new();
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(Some(DBUS),Some(DBUS),Some("NameOwnerChanged"),Some("/org/freedesktop/DBus"),Some("org.mpris.MediaPlayer2"),gio::DBusSignalFlags::MATCH_ARG0_NAMESPACE,move|_,_,_,_,_,args|{
+            if let Some((name,_,_))=args.get::<(String,String,String)>(){state.name(&name);}
+        }));
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(None,Some("org.freedesktop.DBus.Properties"),Some("PropertiesChanged"),Some(PATH),Some(PLAYER),gio::DBusSignalFlags::NONE,move|_,sender,_,_,_,_|state.player(sender)));
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(None,Some(PLAYER),Some("Seeked"),Some(PATH),None,gio::DBusSignalFlags::NONE,move|_,sender,_,_,_,_|state.player(sender)));
+        Ok(Self{connection,changes,subscriptions})
     }
     fn call(&self,name:&str,path:&str,interface:&str,method:&str,args:Option<&glib::Variant>)->Result<glib::Variant>{
         Ok(self.connection.call_sync(Some(name),path,interface,method,args,None,gio::DBusCallFlags::NO_AUTO_START,TIMEOUT,None::<&gio::Cancellable>)?)
@@ -94,16 +130,23 @@ impl Bus{
         let (props,)=reply.get::<(Properties,)>().context("invalid MPRIS properties")?;
         Ok(details(identity,&props))
     }
-    pub fn selected(&self,name:&str)->Result<Details>{self.read(self.identity(name)?)}
+    pub fn selected(&self,name:&str)->Result<Details>{
+        let identity=self.identity(name)?;
+        *self.changes.owner.borrow_mut()=Some(identity.owner.clone());
+        self.read(identity)
+    }
+    pub fn clear_selection(&self){self.changes.owner.borrow_mut().take();}
+    pub fn take_change(&self)->bool{self.changes.dirty.replace(false)}
+    pub fn has_change(&self)->bool{self.changes.dirty.get()}
     pub fn action(&self,expected:&Identity,action:Action)->Result<()>{
         let current=self.identity(&expected.name)?;
         if &current!=expected{bail!("player instance changed; refresh and retry");}
         let state=self.read(current)?;
-        let (method,args)=action_call(&state,action)?;
+        let (interface,method,args)=action_call(&state,action)?;
         // Destination is the exact unique owner, never a replaceable alias.
         // SetPosition also supplies the track ID, so compliant players ignore
         // a seek if the track changes between GetAll and SetPosition.
-        self.call(&expected.owner,PATH,PLAYER,method,args.as_ref())?;
+        self.call(&expected.owner,PATH,interface,method,args.as_ref())?;
         Ok(())
     }
 }
@@ -112,10 +155,40 @@ mod tests{
     use super::*;
     fn identity()->Identity{Identity{name:format!("{PREFIX}test"),owner:":1.2".into()}}
     #[test]
+    fn invalidation_filters_owner_and_namespace_and_coalesces(){
+        let c=Changes::default();
+        c.name("org.example.Other");c.player(":1.2");assert!(!c.dirty.get());
+        c.name("org.mpris.MediaPlayer2.test");assert!(c.dirty.replace(false));
+        *c.owner.borrow_mut()=Some(":1.2".into());
+        c.player(":1.3");assert!(!c.dirty.get());
+        c.player(":1.2");c.player(":1.2");assert!(c.dirty.replace(false));assert!(!c.dirty.get());
+    }
+    #[test]
     fn unknown_capabilities_are_disabled(){
         let state=details(identity(),&Properties::new());
         assert!(!state.capabilities.play&&!state.capabilities.seek);
         assert!(state.track.is_none()&&state.position_us.is_none());
+    }
+    #[test]
+    fn optional_modes_require_fresh_matching_state_and_variant_types(){
+        let mut props=Properties::new();
+        props.insert("CanControl".into(),true.to_variant());
+        props.insert("Shuffle".into(),false.to_variant());
+        props.insert("LoopStatus".into(),"Track".to_variant());
+        let state=details(identity(),&props);
+        let (interface,method,args)=action_call(&state,Action::Shuffle(false)).unwrap();
+        assert_eq!(interface,"org.freedesktop.DBus.Properties");assert_eq!(method,"Set");
+        let (iface,key,value)=args.unwrap().get::<(String,String,glib::Variant)>().unwrap();
+        assert_eq!(iface,PLAYER);assert_eq!(key,"Shuffle");assert_eq!(value.get::<bool>(),Some(true));
+        let (_,_,args)=action_call(&state,Action::Repeat(Repeat::Track)).unwrap();
+        let (_,key,value)=args.unwrap().get::<(String,String,glib::Variant)>().unwrap();
+        assert_eq!(key,"LoopStatus");assert_eq!(value.get::<String>().as_deref(),Some("Playlist"));
+        assert!(action_call(&state,Action::Shuffle(true)).is_err());
+        assert!(action_call(&state,Action::Repeat(Repeat::Off)).is_err());
+        props.insert("LoopStatus".into(),"invalid".to_variant());
+        assert!(details(identity(),&props).repeat.is_none());
+        props.insert("CanControl".into(),false.to_variant());
+        assert!(action_call(&details(identity(),&props),Action::Shuffle(false)).is_err());
     }
     #[test]
     fn typed_track_metadata_and_capabilities(){
@@ -135,8 +208,8 @@ mod tests{
         props.insert("CanControl".into(),false.to_variant());
         assert!(!details(identity(),&props).capabilities.seek);
         let track=state.track.clone().unwrap();
-        let (method,args)=action_call(&state,Action::Seek(track.clone(),40_000_000)).unwrap();
-        assert_eq!(method,"SetPosition");assert_eq!(args.unwrap().type_().as_str(),"(ox)");
+        let (interface,method,args)=action_call(&state,Action::Seek(track.clone(),40_000_000)).unwrap();
+        assert_eq!(interface,PLAYER);assert_eq!(method,"SetPosition");assert_eq!(args.unwrap().type_().as_str(),"(ox)");
         let mut stale=track.clone();stale.id="/track/old".into();
         assert!(action_call(&state,Action::Seek(stale,40_000_000)).is_err());
         assert!(action_call(&state,Action::Seek(track.clone(),-1)).is_err());

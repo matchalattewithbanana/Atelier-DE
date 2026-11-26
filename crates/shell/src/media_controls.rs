@@ -1,17 +1,59 @@
 //! Capability-aware interactive media window. A single worker owns the
 //! session bus, and generation-tagged replies cannot overwrite newer choices.
-use crate::mpris::{Action,Bus,Details,Identity,Track};
+use crate::mpris::{Action,Bus,Details,Identity,Track,Repeat};
 use gtk::{glib,prelude::*};
-use crate::{media_artwork::{Artwork,Cache,Colors},media_wave::Wave};
+use crate::{media_artwork::{Artwork,Cache,Colors},media_wave::{Wave,Drag}};
 use std::sync::Arc;
-use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::Duration};
+use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::{Duration,Instant}};
 
 enum Request{Select(String),Act(Identity,Action),Artwork(bool)}
 struct Reply{
     revision:u64,names:Vec<String>,selected:Option<String>,
     details:Option<Details>,error:Option<String>,art:Option<Arc<Artwork>>,
 }
-fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
+type Command=(u64,Request);
+/// Requests wake the private worker context, including disconnect on close.
+struct RequestPort{sender:Option<mpsc::SyncSender<Command>>,context:glib::MainContext}
+impl RequestPort{
+    fn send(&self,request:Command)->bool{
+        if !self.sender.as_ref().is_some_and(|sender|sender.try_send(request).is_ok()){return false;}
+        self.context.wakeup();true
+    }
+}
+impl Drop for RequestPort{
+    fn drop(&mut self){drop(self.sender.take());self.context.wakeup();}
+}
+enum Wake{Request(Command),Refresh,Closed}
+/// Keep the main context blocked when idle. The deadline is a compatibility
+/// fallback for players that omit signals, and samples Position while playing.
+fn wait(context:&glib::MainContext,rx:&mpsc::Receiver<Command>,bus:Option<&Bus>,interval:Duration)->Wake{
+    let started=Instant::now();
+    let timer=glib::timeout_source_new(interval,Some("atelier-media-refresh"),glib::Priority::DEFAULT,||glib::ControlFlow::Break);
+    timer.attach(Some(context));
+    // Coalesce a signal burst into at most one refresh per 100ms. A single
+    // extra one-shot wakes the context at the end of the coalescing interval.
+    let mut debounce=None;
+    let result=loop{
+        match rx.try_recv(){
+            Ok(request)=>break Wake::Request(request),
+            Err(mpsc::TryRecvError::Disconnected)=>break Wake::Closed,
+            Err(mpsc::TryRecvError::Empty)=>{}
+        }
+        let elapsed=started.elapsed();
+        if elapsed>=interval{break Wake::Refresh;}
+        if bus.is_some_and(Bus::has_change){
+            if elapsed>=Duration::from_millis(100){break Wake::Refresh;}
+            if debounce.is_none(){
+                let source=glib::timeout_source_new(Duration::from_millis(100).saturating_sub(elapsed).max(Duration::from_millis(1)),Some("atelier-media-coalesce"),glib::Priority::DEFAULT,||glib::ControlFlow::Break);
+                source.attach(Some(context));debounce=Some(source);
+            }
+        }
+        context.iteration(true);
+    };
+    timer.destroy();if let Some(source)=debounce{source.destroy();}
+    result
+}
+fn worker(context:&glib::MainContext,rx:mpsc::Receiver<Command>,tx:mpsc::SyncSender<Reply>){
     let mut bus=None;
     let mut revision=0;
     let mut selected:Option<String>=None;
@@ -21,8 +63,10 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
         let result=(||->anyhow::Result<_>{
             if bus.is_none(){bus=Some(Bus::connect()?);}
             let bus=bus.as_ref().expect("connected");
+            bus.take_change();
             let names=bus.players()?;
             if selected.as_ref().is_none_or(|name|!names.contains(name)){selected=names.first().cloned();}
+            if selected.is_none(){bus.clear_selection();}
             let details=selected.as_ref().map(|name|bus.selected(name));
             Ok((names,details))
         })();
@@ -38,9 +82,10 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
             }
             Err(e)=>{bus=None;artwork.update(false,None);Reply{revision,names:vec![],selected:None,details:None,error:action_error.take().or(Some(e.to_string())),art:None}}
         };
+        let interval=if reply.error.is_some()||reply.details.as_ref().is_some_and(|d|d.status=="Playing"){Duration::from_secs(2)}else{Duration::from_secs(15)};
         if tx.send(reply).is_err(){break;}
-        match rx.recv_timeout(Duration::from_secs(2)){
-            Ok((next,request))=>{
+        match wait(context,&rx,bus.as_ref(),interval){
+            Wake::Request((next,request))=>{
                 revision=next;
                 match request{
                     Request::Select(name)=>selected=Some(name),
@@ -53,8 +98,8 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout)=>{}
-            Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+            Wake::Refresh=>{}
+            Wake::Closed=>break,
         }
     }
 }
@@ -68,27 +113,27 @@ fn label(text:&str,class:&str)->gtk::Label{
 }
 struct Ui{
     choice:gtk::ComboBoxText,track:gtk::Label,artist:gtk::Label,album:gtk::Label,playback:gtk::Label,
-    scale:gtk::Scale,position:gtk::Label,seek:gtk::Button,previous:gtk::Button,toggle:gtk::Button,next:gtk::Button,
+    scale:gtk::Scale,position:gtk::Label,seek:gtk::Button,previous:gtk::Button,toggle:gtk::Button,next:gtk::Button,shuffle:gtk::Button,repeat:gtk::Button,
     artwork_enabled:gtk::CheckButton,cover:gtk::Picture,wave:Wave,art:RefCell<Option<Arc<Artwork>>>,
     status:gtk::Label,names:RefCell<Vec<String>>,details:RefCell<Option<Details>>,
-    revision:Cell<u64>,busy:Cell<bool>,updating:Cell<bool>,draft:Cell<bool>,
-    requests:mpsc::SyncSender<(u64,Request)>,
+    revision:Cell<u64>,busy:Cell<bool>,updating:Cell<bool>,draft:Cell<bool>,drag_track:RefCell<Option<Track>>,
+    requests:RequestPort,
 }
 impl Ui{
     fn request(&self,request:Request){
         if self.busy.get(){return;}
         let Some(revision)=self.revision.get().checked_add(1)else{return;};
         let switching=matches!(&request,Request::Select(_));
-        if self.requests.try_send((revision,request)).is_ok(){
+        if self.requests.send((revision,request)){
             if switching{self.set_art(None);}
-            self.revision.set(revision);self.busy.set(true);self.draft.set(false);
+            self.revision.set(revision);self.busy.set(true);self.draft.set(false);self.drag_track.borrow_mut().take();self.wave.set_interactive(false);
             self.choice.set_sensitive(false);self.artwork_enabled.set_sensitive(false);
             self.wave.update(None,false,None);
             self.disable_actions();self.status.set_text("Updating player…");
         }else{self.status.set_text("Media worker busy or unavailable.");}
     }
     fn disable_actions(&self){
-        for button in [&self.previous,&self.toggle,&self.next,&self.seek]{button.set_sensitive(false);}
+        for button in [&self.previous,&self.toggle,&self.next,&self.seek,&self.shuffle,&self.repeat]{button.set_sensitive(false);}
         self.scale.set_sensitive(false);
     }
     fn apply(&self,reply:Reply){
@@ -100,6 +145,7 @@ impl Ui{
                 .is_some_and(|(a,b)|a==b)&&reply.details.as_ref().is_some_and(|d|d.capabilities.seek)
         };
         self.draft.set(keep_draft);
+        if !keep_draft{self.drag_track.borrow_mut().take();}
         if *self.names.borrow()!=reply.names{
             self.choice.remove_all();
             for name in &reply.names{self.choice.append(Some(name),name.strip_prefix("org.mpris.MediaPlayer2.").unwrap_or(name));}
@@ -135,7 +181,7 @@ impl Ui{
         let state=self.details.borrow();
         let Some(d)=state.as_ref()else{
             self.track.set_text("No track information");self.artist.set_text("");self.album.set_text("");self.playback.set_text("Unavailable");
-            self.wave.update(None,false,None);self.position.set_text("— / —");self.scale.set_value(0.0);self.toggle.set_label("Play");return;
+            self.wave.set_interactive(false);self.wave.update(None,false,None);self.shuffle.set_label("Shuffle unavailable");self.repeat.set_label("Repeat unavailable");self.position.set_text("— / —");self.scale.set_value(0.0);self.toggle.set_label("Play");return;
         };
         self.track.set_text(if d.title.is_empty(){"Unknown title"}else{&d.title});
         self.artist.set_text(&d.artist);self.album.set_text(&d.album);self.playback.set_text(&d.status);
@@ -143,18 +189,45 @@ impl Ui{
         self.toggle.set_label(if playing{"Pause"}else{"Play"});
         self.toggle.set_sensitive(if playing{d.capabilities.pause}else{d.capabilities.play});
         self.previous.set_sensitive(d.capabilities.previous);self.next.set_sensitive(d.capabilities.next);
+        self.shuffle.set_sensitive(d.shuffle.is_some());
+        self.shuffle.set_label(match d.shuffle{Some(true)=>"Shuffle on",Some(false)=>"Shuffle off",None=>"Shuffle unavailable"});
+        self.repeat.set_sensitive(d.repeat.is_some());
+        self.repeat.set_label(match d.repeat{Some(Repeat::Off)=>"Repeat off",Some(Repeat::Track)=>"Repeat track",Some(Repeat::Playlist)=>"Repeat playlist",None=>"Repeat unavailable"});
+        for (button,active) in [(&self.shuffle,d.shuffle==Some(true)),(&self.repeat,d.repeat.is_some_and(|r|r!=Repeat::Off))]{
+            if active{button.add_css_class("atelier-control-active");}else{button.remove_css_class("atelier-control-active");}
+        }
         if let (Some(track),Some(position))=(&d.track,d.position_us){
             if !self.draft.get(){self.scale.set_value(position as f64/track.length_us as f64*1000.0);}
+            self.wave.set_interactive(d.capabilities.seek);
             self.wave.update(Some(self.scale.value()/1000.0),playing&&!self.draft.get(),self.colors());
             self.scale.set_sensitive(d.capabilities.seek);
             self.seek.set_sensitive(d.capabilities.seek&&self.draft.get());
             self.position.set_text(&format!("{}{} / {}",if self.draft.get(){"Seek to "}else{""},
                 time(if self.draft.get(){target(track,self.scale.value())}else{position}),time(track.length_us)));
         }else{
+            self.wave.set_interactive(false);
             self.wave.update(None,false,None);
             self.scale.set_value(0.0);
             self.position.set_text(&format!("{} / —",d.position_us.map(time).unwrap_or_else(||"—".into())));
         }
+    }
+    fn drag(&self,event:Drag){
+        if matches!(event,Drag::Cancel){self.drag_track.borrow_mut().take();return;}
+        if self.busy.get()||self.updating.get(){return;}
+        let track=self.details.borrow().as_ref().filter(|d|d.capabilities.seek).and_then(|d|d.track.clone());
+        let Some(track)=track else{self.drag_track.borrow_mut().take();return;};
+        let fraction=match event{
+            Drag::Begin(v)=>{*self.drag_track.borrow_mut()=Some(track);v}
+            Drag::Move(v)|Drag::End(v)=>{
+                if self.drag_track.borrow().as_ref()!=Some(&track){return;}
+                if matches!(event,Drag::End(_)){self.drag_track.borrow_mut().take();}
+                v
+            }
+            Drag::Cancel=>return,
+        };
+        self.draft.set(true);self.updating.set(true);
+        self.scale.set_value(fraction*1000.0);
+        self.render();self.updating.set(false);
     }
     fn action(&self,action:impl FnOnce(&Details)->Option<Action>){
         let selected=self.details.borrow().as_ref().and_then(|d|action(d).map(|action|(d.identity.clone(),action)));
@@ -181,21 +254,32 @@ pub fn show(app:&gtk::Application){
     let position=label("— / —","body");card.append(&position);
     let wave=Wave::new();card.append(&wave.widget);
     let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,1000.0,1.0);
-    scale.set_draw_value(false);scale.set_size_request(-1,48);scale.add_css_class("atelier-expressive-slider");scale.set_tooltip_text(Some("Playback position draft; press Seek to apply"));card.append(&scale);
+    scale.set_draw_value(false);scale.set_size_request(-1,48);scale.add_css_class("atelier-expressive-slider");scale.set_tooltip_text(Some("Playback position draft; press Seek to apply"));
+    scale.set_direction(gtk::TextDirection::Ltr);
+    let keyboard=gtk::Expander::new(Some("Keyboard seek controls"));keyboard.set_child(Some(&scale));card.append(&keyboard);
     let seek=gtk::Button::with_label("Seek");seek.set_size_request(-1,48);card.append(&seek);
     let controls=gtk::Box::new(gtk::Orientation::Horizontal,8);
     let previous=gtk::Button::with_label("Previous");let toggle=gtk::Button::with_label("Play");let next=gtk::Button::with_label("Next");
     previous.add_css_class("atelier-control-tonal");next.add_css_class("atelier-control-tonal");toggle.add_css_class("atelier-control-active");toggle.set_hexpand(true);
     for button in [&previous,&toggle,&next]{button.set_size_request(-1,48);controls.append(button);}
     card.append(&controls);
+    let modes=gtk::Box::new(gtk::Orientation::Horizontal,8);
+    let shuffle=gtk::Button::with_label("Shuffle unavailable");let repeat=gtk::Button::with_label("Repeat unavailable");
+    for b in [&shuffle,&repeat]{b.set_size_request(-1,48);b.set_hexpand(true);b.add_css_class("atelier-control-tonal");modes.append(b);}
+    card.append(&modes);
     let status=label("Connecting to session media service…","dim-label");content.append(&status);
     let (requests,rx)=mpsc::sync_channel(1);let (tx,updates)=mpsc::sync_channel(1);
-    std::thread::spawn(move||worker(rx,tx));
-    let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,status,
+    let context=glib::MainContext::new();let worker_context=context.clone();
+    std::thread::spawn(move||{let _=worker_context.with_thread_default(||worker(&worker_context,rx,tx));});
+    let requests=RequestPort{sender:Some(requests),context};
+    let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,shuffle,repeat,status,
         artwork_enabled,cover,wave,art:RefCell::new(None),
         names:RefCell::new(vec![]),details:RefCell::new(None),revision:Cell::new(0),busy:Cell::new(false),
-        updating:Cell::new(false),draft:Cell::new(false),requests});
+        updating:Cell::new(false),draft:Cell::new(false),drag_track:RefCell::new(None),requests});
     ui.disable_actions();ui.artwork_enabled.set_sensitive(false);
+    {let weak=Rc::downgrade(&ui);ui.wave.connect_drag(move|event|{if let Some(ui)=weak.upgrade(){ui.drag(event);}});}
+    {let weak=Rc::downgrade(&ui);ui.shuffle.connect_clicked(move |_|{if let Some(ui)=weak.upgrade(){ui.action(|d|d.shuffle.map(Action::Shuffle));}});}
+    {let weak=Rc::downgrade(&ui);ui.repeat.connect_clicked(move |_|{if let Some(ui)=weak.upgrade(){ui.action(|d|d.repeat.map(Action::Repeat));}});}
     {let weak=Rc::downgrade(&ui);ui.artwork_enabled.connect_toggled(move|button|{
         if let Some(ui)=weak.upgrade(){
             if !button.is_active(){ui.set_art(None);ui.wave.update(None,false,None);}
@@ -225,7 +309,7 @@ pub fn show(app:&gtk::Application){
         match updates.try_recv(){
             Ok(reply)=>ui.apply(reply),
             Err(mpsc::TryRecvError::Empty)=>{},
-            Err(mpsc::TryRecvError::Disconnected)=>{ui.disable_actions();ui.choice.set_sensitive(false);ui.artwork_enabled.set_sensitive(false);ui.set_art(None);ui.wave.update(None,false,None);ui.status.set_text("Media worker stopped.");return glib::ControlFlow::Break;}
+            Err(mpsc::TryRecvError::Disconnected)=>{ui.disable_actions();ui.choice.set_sensitive(false);ui.artwork_enabled.set_sensitive(false);ui.set_art(None);ui.wave.set_interactive(false);ui.wave.update(None,false,None);ui.status.set_text("Media worker stopped.");return glib::ControlFlow::Break;}
         }
         glib::ControlFlow::Continue
     });
@@ -234,6 +318,28 @@ pub fn show(app:&gtk::Application){
 }
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn private_context_handles_request_and_disconnect(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (sender,rx)=mpsc::sync_channel(1);
+        let port=RequestPort{sender:Some(sender),context:context.clone()};
+        assert!(port.send((7,Request::Artwork(true))));
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Request((7,Request::Artwork(true)))));
+            drop(port);
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Closed));
+        }).unwrap();
+    }
+    #[test]
+    fn private_context_deadline_refreshes_without_signals(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (_sender,rx)=mpsc::sync_channel(1);
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_millis(5)),Wake::Refresh));
+        }).unwrap();
+    }
     #[test]
     fn clock_format(){assert_eq!(super::time(65_000_000),"1:05");assert_eq!(super::time(3661_000_000),"1:01:01");}
 }
