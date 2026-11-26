@@ -390,6 +390,13 @@ impl Appearance{
             .atelier-panel .atelier-workspace-button {{ min-width: 24px; padding: 3px 6px; }} \
             .atelier-panel .atelier-workspace-button.suggested-action {{ background-image: none; background-color: {primary}; color: {on_primary}; }} \
             .atelier-panel .atelier-workspace-mark {{ color: {fg}; }}",self.button_radius));
+        css.push_str(&format!(" .atelier-inbox .atelier-inbox-heading {{ font-size: 28px; font-weight: 500; }} \
+            .atelier-inbox .atelier-inbox-card {{ background-color: {container}; color: {fg}; padding: 16px; border-radius: {}px; }} \
+            .atelier-inbox .atelier-inbox-summary {{ font-size: 16px; font-weight: 700; }} \
+            .atelier-inbox .atelier-inbox-tag {{ background-color: {secondary}; color: {on_secondary}; padding: 4px 8px; border-radius: 12px; }} \
+            .atelier-inbox .atelier-inbox-critical {{ border: 2px solid currentColor; }} \
+            .atelier-inbox .atelier-inbox-actions button {{ min-height: 36px; border-radius: {}px; }} \
+            .atelier-inbox .atelier-inbox-group > title {{ padding: 8px; font-weight: 700; }}",self.notifications.radius,self.button_radius));
         Ok(css)
     }
 }
