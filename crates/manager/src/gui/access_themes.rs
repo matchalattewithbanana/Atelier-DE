@@ -1,6 +1,6 @@
 //! Offline native login/lock theme draft editor. Never connects to a greeter
 //! or collects real credentials. The drawing uses the shared layout contract.
-use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,Backdrop,GradientDirection,ImageFit,PRESETS};
+use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,Backdrop,GradientDirection,ImageFit,DashboardWidgets,Widget,PRESETS};
 use gtk::prelude::*;
 use atelier_config::{access_bundle::{self,Bundle},wallpaper::Raster};
 use std::{cell::{Cell,RefCell},path::PathBuf,rc::Rc};
@@ -73,16 +73,41 @@ fn backdrop(cr:&gtk::cairo::Context,w:f64,h:f64,theme:&Theme,image:Option<&Wallp
         }
     }
 }
+/// Offline-only samples. Never read notifications, weather, media metadata
+/// or account details while previewing a theme.
+fn widget_preview(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),widget:Widget,theme:&Theme,scale:f64){
+    let (heading,main,detail)=match widget{
+        Widget::Weather=>("WEATHER","24°","Sample forecast"),
+        Widget::System=>("SYSTEM","Atelier Desktop","Sample system status"),
+        Widget::Media=>("NOW PLAYING","Sample track","Previous · Play · Next"),
+        Widget::Resources=>("RESOURCES","CPU 42% · RAM 58%","Battery 82%"),
+        Widget::Notifications=>("NOTIFICATIONS","Private","Contents hidden"),
+    };
+    color(cr,&theme.palette.muted);text(cr,area,heading,0.20,9.0*scale);
+    color(cr,&theme.palette.accent);text(cr,area,main,0.48,if widget==Widget::Weather{28.0*scale}else{14.0*scale});
+    color(cr,&theme.palette.text);text(cr,area,detail,0.73,10.0*scale);
+}
 fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper>,compact:bool,login:bool){
     let (w,h)=(f64::from(w.max(1)),f64::from(h.max(1)));
     let (w,offset)=if compact{let narrow=w.min(h*0.82);(narrow,(w-narrow)/2.0)}else{(w,0.0)};
     let _=cr.save();cr.translate(offset,0.0);
     cr.rectangle(0.0,0.0,w,h);cr.clip();
     backdrop(cr,w,h,theme,image);
-    let geometry=theme.layout.geometry(compact||w<h*1.1);
+    let compact=compact||w<h*1.55;
+    let dashboard=theme.layout==Layout::Dashboard&&!compact&&!login;
+    let geometry=theme.layout.geometry(compact);
+    if dashboard{
+        color(cr,&theme.palette.background);
+        card(cr,Rect{x:20,y:40,w:960,h:920},w,h,theme.corner_radius);
+    }
     let family=match theme.typography{Typography::Sans=>"sans-serif",Typography::Monospace=>"monospace",Typography::Display=>"serif"};
     cr.select_font_face(family,gtk::cairo::FontSlant::Normal,gtk::cairo::FontWeight::Bold);
     let scale=(w/480.0).clamp(0.5,1.5);
+    for tile in theme.dashboard_tiles(compact,login){
+        color(cr,&theme.palette.panel);
+        let area=card(cr,tile.rect,w,h,theme.corner_radius);
+        widget_preview(cr,area,tile.widget,theme,scale);
+    }
     if theme.clock||theme.date{
         color(cr,&theme.palette.panel);
         let clock=card(cr,geometry.clock,w,h,theme.corner_radius);
@@ -93,12 +118,21 @@ fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper
     }
     color(cr,&theme.palette.panel);
     let auth=card(cr,geometry.auth,w,h,theme.corner_radius);
-    color(cr,&theme.palette.accent);text(cr,auth,"ATELIER",0.17,11.0*scale);
-    color(cr,&theme.palette.text);text(cr,auth,if login{"Sign in"}else{"Session locked"},0.36,18.0*scale);
+    color(cr,&theme.palette.accent);text(cr,auth,"ATELIER",0.13,11.0*scale);
+    if dashboard&&theme.dashboard.profile{
+        let (x,y,cw,ch)=auth;
+        let r=(cw*0.10).min(ch*0.12);
+        let (cx,cy)=(x+cw/2.0,y+ch*0.32);
+        color(cr,&theme.palette.background);cr.arc(cx,cy,r,0.0,2.0*std::f64::consts::PI);let _=cr.fill();
+        color(cr,&theme.palette.accent);cr.arc(cx,cy-r*0.22,r*0.30,0.0,2.0*std::f64::consts::PI);let _=cr.fill();
+        cr.arc(cx,cy+r*0.40,r*0.48,std::f64::consts::PI,2.0*std::f64::consts::PI);cr.close_path();let _=cr.fill();
+    }else{
+        color(cr,&theme.palette.text);text(cr,auth,if login{"Sign in"}else{"Session locked"},0.36,18.0*scale);
+    }
     let (x,y,cw,ch)=auth;
     color(cr,&theme.palette.background);cr.rectangle(x+cw*0.12,y+ch*0.53,cw*0.76,ch*0.17);let _=cr.fill();
     color(cr,&theme.palette.muted);text(cr,auth,"Password preview",0.615,10.0*scale);
-    color(cr,&theme.palette.accent);text(cr,auth,if login{"Sign in · session"}else{"Unlock"},0.83,11.0*scale);
+    color(cr,&theme.palette.accent);text(cr,auth,if login{"Sign in · session"}else if dashboard{"Session locked · Unlock"}else{"Unlock"},0.83,11.0*scale);
     let _=cr.restore();
 }
 // One form owns the editable draft; all paths share Theme::validate.
@@ -109,6 +143,7 @@ struct Fields{
     clock:gtk::CheckButton,date:gtk::CheckButton,
     background:gtk::ComboBoxText,gradient_end:gtk::ColorButton,direction:gtk::ComboBoxText,
     fit:gtk::ComboBoxText,dim:gtk::SpinButton,
+    widgets:[gtk::CheckButton;6],
 }
 fn row(parent:&gtk::Box,title:&str,control:&impl IsA<gtk::Widget>){
     let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
@@ -129,7 +164,7 @@ fn hex(value:gtk::gdk::RGBA)->String{
 impl Fields{
     fn build(parent:&gtk::Box)->Self{
         let name=gtk::Entry::new();name.set_max_length(80);row(parent,"Theme name",&name);
-        let layout=choice(parent,"Layout",&[("centered","Centered"),("split","Split screen"),("editorial","Editorial"),("bento","Bento")]);
+        let layout=choice(parent,"Layout",&[("centered","Centered"),("split","Split screen"),("editorial","Editorial"),("bento","Bento"),("dashboard","Dashboard"),("immersive","Immersive")]);
         let typography=choice(parent,"Typography",&[("sans","Sans serif"),("monospace","Monospace"),("display","Display")]);
         parent.append(&label("Palette","title-3"));
         let colors=["Background","Authentication panel","Primary text","Secondary text","Accent"].map(|title|{
@@ -145,11 +180,16 @@ impl Fields{
         let radius=spin(parent,"Corner radius",48.0,1.0);let motion=spin(parent,"Motion duration (ms)",400.0,10.0);
         let clock=gtk::CheckButton::with_label("Show clock");let date=gtk::CheckButton::with_label("Show date");
         parent.append(&clock);parent.append(&date);
-        Self{name,layout,typography,colors,radius,motion,clock,date,background,gradient_end,direction,fit,dim}
+        parent.append(&label("Dashboard widgets","title-3"));
+        parent.append(&label("Visibility only; sample data in Studio. Notification contents stay private. Session tiles are omitted on greeter and compact previews.","dim-label"));
+        let widgets=["Weather","System information","Media","Resources","Notifications (private indicator)","Profile placeholder"].map(|title|{
+            let button=gtk::CheckButton::with_label(title);parent.append(&button);button
+        });
+        Self{name,layout,typography,colors,radius,motion,clock,date,background,gradient_end,direction,fit,dim,widgets}
     }
     fn populate(&self,theme:&Theme){
         self.name.set_text(&theme.name);
-        self.layout.set_active_id(Some(match theme.layout{Layout::Centered=>"centered",Layout::Split=>"split",Layout::Editorial=>"editorial",Layout::Bento=>"bento"}));
+        self.layout.set_active_id(Some(match theme.layout{Layout::Centered=>"centered",Layout::Split=>"split",Layout::Editorial=>"editorial",Layout::Bento=>"bento",Layout::Dashboard=>"dashboard",Layout::Immersive=>"immersive"}));
         self.typography.set_active_id(Some(match theme.typography{Typography::Sans=>"sans",Typography::Monospace=>"monospace",Typography::Display=>"display"}));
         for (button,value) in self.colors.iter().zip([&theme.palette.background,&theme.palette.panel,&theme.palette.text,&theme.palette.muted,&theme.palette.accent]){
             button.set_rgba(&gtk::gdk::RGBA::parse(value).expect("validated palette"));
@@ -170,10 +210,13 @@ impl Fields{
         }
         self.radius.set_value(f64::from(theme.corner_radius));self.motion.set_value(f64::from(theme.motion_ms));
         self.clock.set_active(theme.clock);self.date.set_active(theme.date);
+        let w=theme.dashboard;
+        for (widget,active) in self.widgets.iter().zip([w.weather,w.system,w.media,w.resources,w.notifications,w.profile]){widget.set_active(active);}
+        self.update_widget_sensitivity();
     }
     fn read(&self)->anyhow::Result<Theme>{
         let layout=match self.layout.active_id().as_deref(){
-            Some("centered")=>Layout::Centered,Some("split")=>Layout::Split,Some("editorial")=>Layout::Editorial,Some("bento")=>Layout::Bento,
+            Some("centered")=>Layout::Centered,Some("split")=>Layout::Split,Some("editorial")=>Layout::Editorial,Some("bento")=>Layout::Bento,Some("dashboard")=>Layout::Dashboard,Some("immersive")=>Layout::Immersive,
             _=>anyhow::bail!("select a layout"),
         };
         let typography=match self.typography.active_id().as_deref(){
@@ -191,17 +234,28 @@ impl Fields{
             },dim:self.dim.value_as_int() as u32},
             _=>anyhow::bail!("select a background type"),
         };
+        let [weather,system,media,resources,notifications,profile]=self.widgets.each_ref().map(|w|w.is_active());
+        let dashboard=DashboardWidgets{weather,system,media,resources,notifications,profile};
         let theme=Theme{format:"atelier-access-theme".into(),version:1,name:self.name.text().to_string(),layout,typography,
             palette:Palette{background,panel,text,muted,accent},corner_radius:self.radius.value_as_int() as u32,
-            motion_ms:self.motion.value_as_int() as u32,clock:self.clock.is_active(),date:self.date.is_active(),backdrop};
+            motion_ms:self.motion.value_as_int() as u32,clock:self.clock.is_active(),date:self.date.is_active(),backdrop,dashboard};
         theme.validate()?;Ok(theme)
     }
+    fn update_widget_sensitivity(&self){
+        let enabled=self.layout.active_id().as_deref()==Some("dashboard");
+        for widget in &self.widgets{widget.set_sensitive(enabled);}
+    }
     fn connect_changes(&self,refresh:Rc<dyn Fn()>){
+        let widgets=self.widgets.each_ref().map(|w|w.downgrade());
+        self.layout.connect_changed(move|combo|{
+            let enabled=combo.active_id().as_deref()==Some("dashboard");
+            for widget in &widgets{if let Some(widget)=widget.upgrade(){widget.set_sensitive(enabled);}}
+        });
         {let refresh=refresh.clone();self.name.connect_changed(move |_|refresh());}
         for combo in [&self.layout,&self.typography,&self.background,&self.direction,&self.fit]{let refresh=refresh.clone();combo.connect_changed(move |_|refresh());}
         for color in self.colors.iter().chain(std::iter::once(&self.gradient_end)){let refresh=refresh.clone();color.connect_rgba_notify(move |_|refresh());}
         for spin in [&self.radius,&self.motion,&self.dim]{let refresh=refresh.clone();spin.connect_value_changed(move |_|refresh());}
-        for check in [&self.clock,&self.date]{let refresh=refresh.clone();check.connect_toggled(move |_|refresh());}
+        for check in [&self.clock,&self.date].into_iter().chain(self.widgets.iter()){let refresh=refresh.clone();check.connect_toggled(move |_|refresh());}
     }
 }
 pub(super) fn build()->gtk::Box{
