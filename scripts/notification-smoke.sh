@@ -52,4 +52,16 @@ if "$binary" invoke "$instance" "$action_id" "$((revision+1))" view; then echo '
 if "$binary" invoke "$instance" "$action_id" "$revision" wrong; then echo 'Unknown action accepted' >&2; exit 1; fi
 # gdbus Notify is a short-lived sender, so this tests rejection and
 # metadata only; delivery to a live application requires a separate test.
+"$binary" pause "$instance" 30m
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["dnd"] and not s["manual_dnd"] and s["pause_remaining_seconds"]>0 and not s["cards"]'
+"$binary" send success 'Preset success' 'Finished'
+"$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["missed"] and n["icon"]=="emblem-ok-symbolic" and n["urgency"]==1'
+"$binary" dnd "$instance" on
+"$binary" pause "$instance" off
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["dnd"] and s["manual_dnd"] and s["pause_remaining_seconds"]==0'
+"$binary" dnd "$instance" off
+"$binary" popup | python3 -c 'import json,sys; s=json.load(sys.stdin); assert not s["dnd"] and not s["cards"]'
+if "$binary" pause "$instance" 25h; then echo 'Invalid pause accepted' >&2; exit 1; fi
+if "$binary" pause wrong-instance 1m; then echo 'Stale pause accepted' >&2; exit 1; fi
+if "$binary" send unknown 'Invalid' ''; then echo 'Unknown preset accepted' >&2; exit 1; fi
 echo 'Notification D-Bus smoke passed'
