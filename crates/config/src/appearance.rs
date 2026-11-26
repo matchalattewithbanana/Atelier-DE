@@ -319,10 +319,7 @@ impl Appearance{
         self.validate()?;
         let mut css=format!(".atelier-panel {{ background: @theme_bg_color; padding: 2px; }} .atelier-panel button {{ border-radius: {}px; padding: 3px 12px; }} .atelier-launcher button {{ border-radius: {}px; }}",self.button_radius,self.button_radius);
         if !self.accent.is_empty(){
-            let n=u32::from_str_radix(&self.accent[1..],16)?;
-            let linear=|v:u32|{let v=v as f64/255.0;if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)}};
-            let l=0.2126*linear((n>>16)&255)+0.7152*linear((n>>8)&255)+0.0722*linear(n&255);
-            let foreground=if (l+0.05)/0.05>=1.05/(l+0.05){"#000000"}else{"#ffffff"};
+            let foreground=crate::design::Color::parse(&self.accent)?.contrasting_text().hex();
             css.push_str(&format!(" .atelier-panel button.suggested-action, .atelier-launcher button.suggested-action, .atelier-dock button.suggested-action {{ background-image: none; background-color: {}; color: {}; }}",self.accent,foreground));
         }
         css.push_str(&format!(" .atelier-dock {{ background: @theme_bg_color; border-radius: {}px; padding: 6px; }} .atelier-dock button {{ border-radius: {}px; padding: 6px; }}",self.button_radius,self.button_radius));
