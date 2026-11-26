@@ -23,6 +23,7 @@ pub struct Capabilities{pub play:bool,pub pause:bool,pub previous:bool,pub next:
 pub struct Details{
     pub identity:Identity,pub title:String,pub artist:String,pub album:String,pub status:String,
     pub track:Option<Track>,pub position_us:Option<i64>,pub capabilities:Capabilities,
+    pub art_uri:Option<String>,
 }
 #[derive(Debug,Clone)]
 pub enum Action{Play,Pause,Previous,Next,Seek(Track,i64)}
@@ -47,7 +48,8 @@ fn details(identity:Identity,props:&Properties)->Details{
     let capabilities=Capabilities{play:control&&flag(props,"CanPlay"),pause:control&&flag(props,"CanPause"),
         previous:control&&flag(props,"CanGoPrevious"),next:control&&flag(props,"CanGoNext"),
         seek:control&&flag(props,"CanSeek")&&track.is_some()&&position_us.is_some()};
-    Details{identity,title,artist,album,status,track,position_us,capabilities}
+    let art_uri=get::<String>(&metadata,"mpris:artUrl").filter(|s|s.len()<=4096&&!s.chars().any(char::is_control));
+    Details{identity,title,artist,album,status,track,position_us,capabilities,art_uri}
 }
 /// Bind authorization and the wire request to one fresh snapshot.
 fn action_call(state:&Details,action:Action)->Result<(&'static str,Option<glib::Variant>)>{
