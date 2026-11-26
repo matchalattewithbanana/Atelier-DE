@@ -323,7 +323,11 @@ impl Appearance{
             css.push_str(&format!(" .atelier-panel button.suggested-action, .atelier-launcher button.suggested-action, .atelier-dock button.suggested-action {{ background-image: none; background-color: {}; color: {}; }}",self.accent,foreground));
         }
         css.push_str(&format!(" .atelier-dock {{ background: @theme_bg_color; border-radius: {}px; padding: 6px; }} .atelier-dock button {{ border-radius: {}px; padding: 6px; }}",self.button_radius,self.button_radius));
-        css.push_str(" .atelier-dock button.running-task { border-bottom: 2px solid currentColor; }");
+        let dock_motion=self.motion.opening_duration().as_millis();
+        css.push_str(&format!(" .atelier-dock button.atelier-dock-tile {{ min-width: 36px; }} \
+            .atelier-dock .atelier-dock-mark {{ background-color: currentColor; min-width: 6px; min-height: 4px; border-radius: 2px; transition: min-width {dock_motion}ms ease-out; }} \
+            .atelier-dock .atelier-dock-mark.atelier-dock-mark-focused {{ min-width: 22px; }} \
+            .atelier-dock .atelier-dock-count {{ font-size: 10px; font-weight: 700; }}"));
         css.push_str(&format!(" .atelier-widget {{ background: @theme_bg_color; border-radius: {}px; padding: 12px; }} .atelier-widget button {{ border-radius: {}px; }}",self.button_radius,self.button_radius));
         if let Some(palette)=&self.shell_palette{css.push_str(&palette.css()?);}
         // Explicit transparent layer roots avoid an opaque GTK window backing.
@@ -638,6 +642,14 @@ mod tests{
         let invalid=DesktopWidgets{enabled:true,clock:false,calendar:false,media:false,system:false,..DesktopWidgets::default()};
         assert!(invalid.validate().is_err());
         assert!(DesktopWidgets{width:500,..DesktopWidgets::default()}.validate().is_err());
+    }
+    #[test]
+    fn dock_indicators_are_scoped_and_respect_reduced_motion(){
+        let a=Appearance{motion:Motion{opening_fade_ms:180,reduced_motion:true},..Appearance::default()};
+        let css=a.css().unwrap();
+        assert!(css.contains(".atelier-dock .atelier-dock-mark.atelier-dock-mark-focused"));
+        assert!(css.contains("transition: min-width 0ms ease-out"));
+        assert!(!css.contains("button.running-task"));
     }
     #[test]
     fn dock_pins_round_trip_and_validate(){
