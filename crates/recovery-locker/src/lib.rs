@@ -81,8 +81,9 @@ fn layout(width: u32, height: u32) -> Option<(i32, i32, i32, i32)> {
     Some((width as i32, height as i32, stride as i32, bytes as i32))
 }
 
-// Allocate and seal fresh anonymous backing. No writable mapping survives
-// the seal, and the compositor receives only immutable pixel storage.
+// Allocate fresh anonymous backing. Wayland SHM servers can require a
+// shared writable mapping, so seal the size, not the contents. The client
+// never writes or reuses a frame after handing its fd to the server.
 fn allocate_file(bytes:i32)->Result<File>{
     if bytes<=0||bytes as u32>MAX_BYTES{bail!("invalid lock buffer size");}
     let fd=unsafe{libc::memfd_create(b"atelier-recovery-frame\0".as_ptr().cast(),libc::MFD_CLOEXEC|libc::MFD_ALLOW_SEALING)};
@@ -91,9 +92,9 @@ fn allocate_file(bytes:i32)->Result<File>{
     file.set_len(bytes as u64)?;
     Ok(file)
 }
-fn seal_file(file:&File)->Result<()>{
+fn seal_size(file:&File)->Result<()>{
     use std::os::fd::AsRawFd;
-    let seals=libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_WRITE|libc::F_SEAL_SEAL;
+    let seals=libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_SEAL;
     if unsafe{libc::fcntl(file.as_raw_fd(),libc::F_ADD_SEALS,seals)}!=0{
         return Err(std::io::Error::last_os_error()).context("seal lock buffer");
     }
@@ -101,7 +102,7 @@ fn seal_file(file:&File)->Result<()>{
 }
 // Fresh anonymous memory is zero-filled. XRGB8888 ignores the unused alpha.
 fn black_file(bytes:i32)->Result<File>{
-    let file=allocate_file(bytes)?;seal_file(&file)?;Ok(file)
+    let file=allocate_file(bytes)?;seal_size(&file)?;Ok(file)
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -159,7 +160,7 @@ impl Dispatch<role::ExtSessionLockSurfaceV1, ()> for State {
             surface.attach(Some(&buffer),0,0);
             surface.damage(0,0,w,h);
             surface.commit();
-            // Server retains the immutable backing storage for its own use.
+            // Server retains the size-sealed backing storage for its own use.
             // Buffer release handler destroys the protocol object.
             state.configured = true;
         }
@@ -226,7 +227,7 @@ mod tests {
         }
     }
     #[test]
-    fn black_backing_is_zero_filled_and_sealed() {
+    fn black_backing_is_zero_filled_and_size_sealed() {
         use std::io::Read;
         let mut file = black_file(16).unwrap();
         let mut data = [255;16];
@@ -234,6 +235,18 @@ mod tests {
         assert_eq!(data,[0;16]);
         assert!(file.set_len(32).is_err());
         assert!(file.set_len(0).is_err());
+    }
+    #[test]
+    fn frame_supports_server_shared_writable_mapping() {
+        use std::os::fd::AsRawFd;
+        let file=black_file(4096).unwrap();
+        // Smithay's SHM pool requires READ|WRITE and MAP_SHARED.
+        let mapping=unsafe{libc::mmap(std::ptr::null_mut(),4096,
+            libc::PROT_READ|libc::PROT_WRITE,libc::MAP_SHARED,file.as_raw_fd(),0)};
+        assert_ne!(mapping,libc::MAP_FAILED);
+        assert_eq!(unsafe{libc::munmap(mapping,4096)},0);
+        assert!(file.set_len(0).is_err());
+        assert!(file.set_len(8192).is_err());
     }
     #[test]
     fn refuses_duplicate_or_removed_outputs() {
