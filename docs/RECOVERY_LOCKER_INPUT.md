@@ -1,0 +1,11 @@
+# Recovery locker input boundary (experimental)
+
+The internal entry state machine is compiled and unit-tested independently of the black-only Wayland client. It has no runtime callers, no unlock request, no keyboard protocol binding and no graphical password prompt.
+
+The eventual locker must derive entry readiness from its exact confirmed lock, successfully mapped surface and uninterrupted keyboard focus. Focus loss, root loss or protocol failure must invalidate pending attempts and clear unsubmitted input. A canceled attempt remains the only active attempt until its worker resolves. Polling never blocks the Wayland event loop. A positive result is consumable once only, with readiness still valid and before the monotonic 30-second deadline; it must be handled after processing pending protocol events and before any unlock request. The result is not itself an unlock capability.
+
+The password uses one bounded 4096-byte allocation, no cloning or debug rendering, UTF-8 character insertion and byte erasure on backspace, cancellation and drop. Submission moves ownership into the authentication thread, which erases its buffer before reporting a result. The renderer is offered only a generic has-input indicator. Control characters are intentionally rejected; compose, keyboard-layout handling and input-method integration are not yet implemented. This is best-effort memory hygiene, not a guarantee against paging, registers, compromised process memory or PAM's copies.
+
+A failed, canceled, disconnected or overdue attempt cannot verify; retries use 1/2/4/8-second bounded cooldowns. This is not a persistent rate limiter and does not replace administrator-configured PAM throttling. The worker implementation must impose its own process deadline; if it never returns, entry remains busy rather than starting concurrent authentication. No real PAM operation is invoked by these tests.
+
+Tests cover bounded Unicode entry, wiping removed bytes, entry readiness, focus-loss and cancel invalidation, single-attempt enforcement, consumed success, late results, worker panic and retry delays. The actual trusted launcher, keyboard mapping, rendering, protocol integration, hardware validation and same-UID isolation remain outstanding. Native locking stays disabled.
