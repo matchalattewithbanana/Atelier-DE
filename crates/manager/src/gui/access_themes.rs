@@ -2,7 +2,7 @@
 //! or collects real credentials. The drawing uses the shared layout contract.
 use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,Backdrop,GradientDirection,ImageFit,DashboardWidgets,Widget,PRESETS};
 use gtk::prelude::*;
-use atelier_config::{access_bundle::{self,Bundle},wallpaper::Raster};
+use atelier_config::{access_bundle::{self,Bundle},wallpaper::{self,Raster},dynamic_palette::{self,Options,Variant,Contrast}};
 use std::{cell::{Cell,RefCell},path::PathBuf,rc::Rc};
 use super::{label,background};
 mod resources;
@@ -195,9 +195,7 @@ impl Fields{
         self.name.set_text(&theme.name);
         self.layout.set_active_id(Some(match theme.layout{Layout::Centered=>"centered",Layout::Split=>"split",Layout::Editorial=>"editorial",Layout::Bento=>"bento",Layout::Dashboard=>"dashboard",Layout::Immersive=>"immersive"}));
         self.typography.set_active_id(Some(match theme.typography{Typography::Sans=>"sans",Typography::Monospace=>"monospace",Typography::Display=>"display"}));
-        for (button,value) in self.colors.iter().zip([&theme.palette.background,&theme.palette.panel,&theme.palette.text,&theme.palette.muted,&theme.palette.accent]){
-            button.set_rgba(&gtk::gdk::RGBA::parse(value).expect("validated palette"));
-        }
+        self.set_palette(&theme.palette);
         self.background.set_active_id(Some("solid"));
         self.gradient_end.set_rgba(&gtk::gdk::RGBA::parse("#334455").unwrap());
         self.direction.set_active_id(Some("diagonal"));self.fit.set_active_id(Some("cover"));self.dim.set_value(25.0);
@@ -217,6 +215,11 @@ impl Fields{
         let w=theme.dashboard;
         for (widget,active) in self.widgets.iter().zip([w.weather,w.system,w.media,w.resources,w.notifications,w.profile]){widget.set_active(active);}
         self.update_widget_sensitivity();
+    }
+    fn set_palette(&self,palette:&Palette){
+        for (button,value) in self.colors.iter().zip([&palette.background,&palette.panel,&palette.text,&palette.muted,&palette.accent]){
+            button.set_rgba(&gtk::gdk::RGBA::parse(value).expect("validated palette"));
+        }
     }
     fn read(&self)->anyhow::Result<Theme>{
         let layout=match self.layout.active_id().as_deref(){
@@ -277,6 +280,15 @@ pub(super) fn build()->gtk::Box{
     let preview=gtk::DrawingArea::new();preview.set_content_height(300);preview.set_hexpand(true);form.append(&preview);
     let status=label("Valid Classic draft. No settings changed.","dim-label");status.set_selectable(true);form.append(&status);
     let fields=Rc::new(Fields::build(&form));fields.populate(&initial);
+    form.append(&label("Material You palette generator","title-3"));
+    form.append(&label("Generate a new editable palette from a color or the loaded wallpaper. Only the five palette colors change.","dim-label"));
+    let seed=gtk::ColorButton::new();seed.set_use_alpha(false);seed.set_title("Palette seed");
+    seed.set_rgba(&gtk::gdk::RGBA::parse("#6750a4").unwrap());row(&form,"Source color",&seed);
+    let variant=choice(&form,"Color scheme",Variant::OPTIONS);variant.set_active_id(Some("tonal-spot"));
+    let light=gtk::CheckButton::with_label("Light palette");form.append(&light);
+    let high=gtk::CheckButton::with_label("High contrast (7:1)");form.append(&high);
+    let from_wallpaper=gtk::Button::with_label("Use loaded wallpaper color");form.append(&from_wallpaper);
+    let generate=gtk::Button::with_label("Generate palette into draft");form.append(&generate);
     let image_path=gtk::Entry::new();image_path.set_placeholder_text(Some("Absolute PNG, JPEG or WebP path"));form.append(&image_path);
     let choose_image=gtk::Button::with_label("Load static wallpaper");form.append(&choose_image);
     let asset_status=label("No wallpaper loaded.","dim-label");form.append(&asset_status);
@@ -309,6 +321,38 @@ pub(super) fn build()->gtk::Box{
         })
     };
     fields.connect_changes(refresh.clone());
+    {
+        let (seed,status)=(seed.downgrade(),status.downgrade());
+        let selected_image=selected_image.clone();
+        from_wallpaper.connect_clicked(move|_|{
+            let (Some(seed),Some(status))=(seed.upgrade(),status.upgrade())else{return;};
+            let selected=selected_image.borrow();
+            let Some(image)=selected.as_ref()else{status.set_text("Load a wallpaper first.");return;};
+            match wallpaper::seed_from_raster(&image.raster){
+                Ok([r,g,b])=>{
+                    seed.set_rgba(&gtk::gdk::RGBA::new(f32::from(r)/255.0,f32::from(g)/255.0,f32::from(b)/255.0,1.0));
+                    status.set_text("Wallpaper source color selected. Generate to update the draft.");
+                }
+                Err(e)=>status.set_text(&format!("No usable wallpaper color: {e:#}")),
+            }
+        });
+    }
+    {
+        let (seed,variant,light,high,status)=(seed.downgrade(),variant.downgrade(),light.downgrade(),high.downgrade(),status.downgrade());
+        let fields=fields.clone();let refresh=refresh.clone();let populating=populating.clone();
+        generate.connect_clicked(move|_|{
+            let (Some(seed),Some(variant),Some(light),Some(high),Some(status))=(seed.upgrade(),variant.upgrade(),light.upgrade(),high.upgrade(),status.upgrade())else{return;};
+            let result=(||{
+                let variant=Variant::parse(variant.active_id().as_deref().unwrap_or(""))?;
+                let seed=atelier_config::design::Color::parse(&hex(seed.rgba()))?.rgb();
+                dynamic_palette::generate(seed,Options{variant,light:light.is_active(),contrast:if high.is_active(){Contrast::High}else{Contrast::Normal}})
+            })();
+            match result{
+                Ok(palette)=>{populating.set(true);fields.set_palette(&palette.access);populating.set(false);refresh();}
+                Err(e)=>status.set_text(&format!("Palette not changed: {e:#}")),
+            }
+        });
+    }
     let populate:Rc<dyn Fn(Theme,Option<Wallpaper>)>={
         let fields=fields.clone();let refresh=refresh.clone();let selected_image=selected_image.clone();let asset_status=asset_status.downgrade();
         let populating=populating.clone();

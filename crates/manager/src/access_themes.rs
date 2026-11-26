@@ -2,6 +2,7 @@
 use anyhow::{bail,Result};
 use atelier_config::{access_theme::{self,Theme,Backdrop,ImageFit,PRESETS},access_bundle::{self,Bundle}};
 use std::path::Path;
+use atelier_config::{design::Color,dynamic_palette::{self,Contrast,Options,Variant}};
 
 pub(super) fn run(args:&[String])->Result<()>{
     match args{
@@ -28,7 +29,15 @@ pub(super) fn run(args:&[String])->Result<()>{
             Bundle::export(&theme,&raster,Path::new(path))?;
             println!("Exported new static wallpaper bundle: {path}");
         }
-        _=>bail!("use access-theme list | show ID | check FILE_OR_BUNDLE | export ID FILE | wallpaper-bundle ID IMAGE DIR"),
+        [action,id,seed,variant,mode,contrast,path] if action=="generate"=>{
+            let mut theme=access_theme::preset(id)?;
+            let light=match mode.as_str(){"light"=>true,"dark"=>false,_=>bail!("choose light or dark")};
+            let contrast=match contrast.as_str(){"normal"=>Contrast::Normal,"high"=>Contrast::High,_=>bail!("choose normal or high contrast")};
+            theme.palette=dynamic_palette::generate(Color::parse(seed)?.rgb(),Options{variant:Variant::parse(variant)?,light,contrast})?.access;
+            theme.export(Path::new(path))?;
+            println!("Exported new Material palette theme: {path}");
+        }
+        _=>bail!("use access-theme list | show ID | check FILE_OR_BUNDLE | export ID FILE | wallpaper-bundle ID IMAGE DIR | generate ID HEX VARIANT light|dark normal|high FILE"),
     }
     Ok(())
 }
