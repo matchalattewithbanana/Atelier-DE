@@ -99,10 +99,13 @@ impl Color{
     fn blend(self,other:Self,t:f64)->Self{
         Self(std::array::from_fn(|i|(f64::from(self.0[i])*(1.0-t)+f64::from(other.0[i])*t).round() as u8))
     }
-    fn readable_on(self,background:Self)->Self{
-        if self.contrast(background)>=4.5{return self;}
+    /// Highest-contrast black or white foreground for this fill.
+    pub fn contrasting_text(self)->Self{
         let black=Self([0;3]);let white=Self([255;3]);
-        if black.contrast(background)>=white.contrast(background){black}else{white}
+        if black.contrast(self)>=white.contrast(self){black}else{white}
+    }
+    fn readable_on(self,background:Self)->Self{
+        if self.contrast(background)>=4.5{self}else{background.contrasting_text()}
     }
     fn tinted(self,accent:Self,fg:Self,mut amount:f64)->Self{
         for _ in 0..16{
