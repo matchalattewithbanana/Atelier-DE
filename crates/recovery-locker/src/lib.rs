@@ -1,6 +1,10 @@
 //! Experimental black-only lock client. No executable or unlock authority.
 //! The caller must provide a compositor-created private socket, never an
 //! ambient desktop socket. This is not yet an interactive or secure locker.
+// Not connected to protocol events until exact keyboard focus is tracked.
+#[allow(dead_code)]
+mod entry;
+
 use anyhow::{bail, Context, Result};
 use std::{fs::File, os::{fd::{AsFd, FromRawFd}, unix::net::UnixStream}};
 use wayland_client::{
