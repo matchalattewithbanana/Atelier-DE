@@ -209,6 +209,7 @@ pub struct NotificationAppearance {
     pub position: NotificationPosition,
     /// Empty follows the panel; otherwise an exact connector name.
     pub output: String,
+    pub hide_when_session_unavailable: bool,
     pub width: u32,
     pub max_cards: u32,
     pub timeout_seconds: u32,
@@ -217,7 +218,7 @@ pub struct NotificationAppearance {
     pub opacity: u32,
 }
 impl Default for NotificationAppearance {
-    fn default()->Self{Self{style:NotificationStyle::LaunchDefault,position:NotificationPosition::Automatic,output:String::new(),width:340,max_cards:3,timeout_seconds:5,animation_ms:160,radius:16,opacity:100}}
+    fn default()->Self{Self{style:NotificationStyle::LaunchDefault,position:NotificationPosition::Automatic,output:String::new(),hide_when_session_unavailable:false,width:340,max_cards:3,timeout_seconds:5,animation_ms:160,radius:16,opacity:100}}
 }
 impl NotificationAppearance {
     pub fn is_default(&self)->bool{*self==Self::default()}
@@ -644,7 +645,7 @@ mod notification_tests{
         let old=decode(Some(b"version=1\n")).unwrap();
         assert_eq!(old.notifications,NotificationAppearance::default());
         let mut next=old;
-        next.notifications=NotificationAppearance{style:NotificationStyle::Compact,position:NotificationPosition::TopLeft,output:"DP-2".into(),width:420,max_cards:2,timeout_seconds:8,animation_ms:200,radius:24,opacity:90};
+        next.notifications=NotificationAppearance{style:NotificationStyle::Compact,position:NotificationPosition::TopLeft,output:"DP-2".into(),hide_when_session_unavailable:true,width:420,max_cards:2,timeout_seconds:8,animation_ms:200,radius:24,opacity:90};
         assert_eq!(decode(Some(&encoded(&next).unwrap())).unwrap(),next);
         assert!(next.css().unwrap().contains("border-radius: 24px"));
         assert_eq!(next.notifications.transition_ms(Motion{opening_fade_ms:0,reduced_motion:true}),0);

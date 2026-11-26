@@ -13,6 +13,8 @@ mod workspace_backend;
 #[cfg(feature = "layer-panel")]
 mod notification_toast;
 #[cfg(feature = "layer-panel")]
+mod notification_privacy;
+#[cfg(feature = "layer-panel")]
 mod dock;
 #[cfg(feature = "layer-panel")]
 mod task_backend;

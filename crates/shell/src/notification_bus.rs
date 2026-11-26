@@ -2,7 +2,7 @@
 //! Snapshots remain authoritative; signals only request a fresh snapshot.
 use gtk::{gio,glib};
 use glib::variant::ToVariant;
-use std::{cell::RefCell,rc::Rc,sync::{mpsc,Arc,atomic::{AtomicBool,Ordering}},time::Duration};
+use std::{cell::RefCell,rc::Rc,sync::{mpsc,Arc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant}};
 
 const NAME:&str="org.freedesktop.Notifications";
 const PATH:&str="/org/atelier/Notifications";
@@ -15,7 +15,7 @@ pub enum Request{
     // Only the transport's coalesced signal callback constructs this.
     Invalidate,
 }
-pub struct Reply<T>{pub snapshot:Result<T,String>,pub action_error:Option<String>}
+pub struct Reply<T>{pub snapshot:Result<T,String>,pub action_error:Option<String>,pub started:Instant}
 
 fn call(method:&str,args:Option<&glib::Variant>)->Result<glib::Variant,String>{
     // The GLib shared session connection is reused; no CLI subprocess or
@@ -84,7 +84,8 @@ pub fn start<T:Send+'static>(method:&'static str,parse:fn(&str)->Result<T,String
     std::thread::spawn(move||{
         let mut action_error=None;
         loop{
-            if outgoing.send(Reply{snapshot:snapshot(method,parse),action_error:action_error.take()}).is_err(){break;}
+            let started=Instant::now();
+            if outgoing.send(Reply{snapshot:snapshot(method,parse),action_error:action_error.take(),started}).is_err(){break;}
             match incoming.recv_timeout(Duration::from_secs(3)){
                 Ok(Request::Invalidate)=>{queued.store(false,Ordering::Release);}
                 Ok(Request::Refresh)|Err(mpsc::RecvTimeoutError::Timeout)=>{},
