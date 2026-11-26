@@ -15,6 +15,8 @@ mod panel;
 #[cfg(feature = "layer-panel")]
 mod workspace_backend;
 #[cfg(feature = "layer-panel")]
+mod workspace_strip;
+#[cfg(feature = "layer-panel")]
 mod notification_toast;
 #[cfg(feature = "layer-panel")]
 mod notification_privacy;

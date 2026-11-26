@@ -386,6 +386,10 @@ impl Appearance{
             .atelier-launcher .atelier-launcher-grid flowboxchild {{ border-radius: {}px; }} \
             .atelier-launcher .atelier-launcher-grid flowboxchild:selected {{ background-color: {primary}; color: {on_primary}; }} \
             .atelier-launcher .atelier-launcher-tile {{ padding: 10px; }}",self.button_radius,self.button_radius));
+        css.push_str(&format!(" .atelier-panel .atelier-workspaces {{ background-color: {container}; border-radius: {}px; }} \
+            .atelier-panel .atelier-workspace-button {{ min-width: 24px; padding: 3px 6px; }} \
+            .atelier-panel .atelier-workspace-button.suggested-action {{ background-image: none; background-color: {primary}; color: {on_primary}; }} \
+            .atelier-panel .atelier-workspace-mark {{ color: {fg}; }}",self.button_radius));
         Ok(css)
     }
 }
