@@ -8,6 +8,7 @@ use super::description;
 struct Fields {
     style: gtk::ComboBoxText,
     position: gtk::ComboBoxText,
+    output: gtk::ComboBoxText,
     width: gtk::SpinButton,
     cards: gtk::SpinButton,
     timeout: gtk::SpinButton,
@@ -16,7 +17,7 @@ struct Fields {
     opacity: gtk::SpinButton,
 }
 impl Fields {
-    fn populate(&self, n: NotificationAppearance) {
+    fn populate(&self, n: &NotificationAppearance) {
         self.style.set_active_id(Some(match n.style {
             NotificationStyle::LaunchDefault => "launch-default", NotificationStyle::Island => "island",
             NotificationStyle::Floating => "floating", NotificationStyle::Compact => "compact",
@@ -25,6 +26,7 @@ impl Fields {
             NotificationPosition::Automatic => "automatic", NotificationPosition::TopLeft => "top-left",
             NotificationPosition::TopCenter => "top-center", NotificationPosition::TopRight => "top-right",
         }));
+        refill_outputs(&self.output,&n.output);
         for (field,value) in [(&self.width,n.width),(&self.cards,n.max_cards),(&self.timeout,n.timeout_seconds),
             (&self.animation,n.animation_ms),(&self.radius,n.radius),(&self.opacity,n.opacity)] {
             field.set_value(f64::from(value));
@@ -40,6 +42,7 @@ impl Fields {
                 Some("top-left") => NotificationPosition::TopLeft, Some("top-center") => NotificationPosition::TopCenter,
                 Some("top-right") => NotificationPosition::TopRight, _ => NotificationPosition::Automatic,
             },
+            output:self.output.active_id().and_then(|id|id.strip_prefix("output:").map(str::to_owned)).unwrap_or_default(),
             width:self.width.value_as_int() as u32, max_cards:self.cards.value_as_int() as u32,
             timeout_seconds:self.timeout.value_as_int() as u32, animation_ms:self.animation.value_as_int() as u32,
             radius:self.radius.value_as_int() as u32, opacity:self.opacity.value_as_int() as u32,
@@ -52,6 +55,25 @@ fn choice(parent:&gtk::Box,title:&str,values:&[(&str,&str)])->gtk::ComboBoxText{
     for (id,label) in values {field.append(Some(id),label);}
     parent.append(&field);field
 }
+// Retain a disconnected preference so saving another field cannot silently
+// change the chosen output. Reload repopulates the current monitor list.
+fn refill_outputs(picker:&gtk::ComboBoxText,selected:&str){
+    picker.remove_all();picker.append(Some("panel"),"Follow panel (automatic)");
+    let mut found=selected.is_empty();
+    if let Some(display)=gtk::gdk::Display::default(){
+        let monitors=display.monitors();
+        for index in 0..monitors.n_items(){
+            let Some(monitor)=monitors.item(index).and_downcast::<gtk::gdk::Monitor>()else{continue;};
+            let Some(connector)=monitor.connector()else{continue;};
+            let geometry=monitor.geometry();
+            picker.append(Some(&format!("output:{connector}")),&format!("{} · {} × {}",connector,geometry.width(),geometry.height()));
+            found|=connector.as_str()==selected;
+        }
+    }
+    if !found{picker.append(Some(&format!("output:{selected}")),&format!("{selected} (not connected)"));}
+    let id=if selected.is_empty(){"panel".into()}else{format!("output:{selected}")};
+    picker.set_active_id(Some(&id));
+}
 fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64,step:f64)->gtk::SpinButton{
     let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
     let title=description(title);title.set_hexpand(true);row.append(&title);
@@ -63,6 +85,7 @@ pub fn build(parent:&gtk::Box){
     let fields=Fields{
         style:choice(parent,"Layout",&[("launch-default","Follow shell launch mode"),("island","Notification island"),("floating","Single floating card"),("compact","Compact stack")]),
         position:choice(parent,"Placement",&[("automatic","Automatic"),("top-left","Top left"),("top-center","Top center"),("top-right","Top right")]),
+        output:choice(parent,"Notification display",&[]),
         width:spin(parent,"Preferred width (logical pixels)",260.0,480.0,10.0),
         cards:spin(parent,"Maximum stacked cards",1.0,3.0,1.0),
         timeout:spin(parent,"Ordinary card timeout (seconds)",2.0,15.0,1.0),
@@ -70,7 +93,7 @@ pub fn build(parent:&gtk::Box){
         radius:spin(parent,"Card corner radius",0.0,32.0,1.0),
         opacity:spin(parent,"Background opacity (%)",85.0,100.0,1.0),
     };
-    parent.append(&description("Animation must be off (0) or 80–400 ms. Reduced motion overrides this setting. Progress and action cards follow their own lifecycle; the timeout affects ordinary cards on their next update."));
+    parent.append(&description("A disconnected display falls back to the panel display and is selected again when available. Reload to refresh the display list. Animation must be off (0) or 80–400 ms. Reduced motion overrides this setting. Progress and action cards follow their own lifecycle; the timeout affects ordinary cards on their next update."));
     let reload=gtk::Button::with_label("Reload saved notification appearance");
     let defaults=gtk::Button::with_label("Reset notification appearance in draft");
     let previous=gtk::Button::with_label("Load previous notification appearance");
@@ -85,7 +108,7 @@ pub fn build(parent:&gtk::Box){
             let result=AppearanceReview::load(&path);
             let enabled=result.is_ok();
             match result {
-                Ok(review)=>{fields.populate(review.value.notifications);*state.borrow_mut()=Some(review);status.set_text("Saved notification preferences loaded.");}
+                Ok(review)=>{fields.populate(&review.value.notifications);*state.borrow_mut()=Some(review);status.set_text("Saved notification preferences loaded.");}
                 Err(error)=>{state.borrow_mut().take();status.set_text(&format!("Load failed: {error:#}"));}
             }
             if let Some(button)=save.upgrade(){button.set_sensitive(enabled);}
@@ -93,11 +116,11 @@ pub fn build(parent:&gtk::Box){
         });
     }
     {let (fields,status)=(fields.clone(),status.clone());defaults.connect_clicked(move |_| {
-        fields.populate(NotificationAppearance::default());status.set_text("Defaults in draft only.");
+        fields.populate(&NotificationAppearance::default());status.set_text("Defaults in draft only.");
     });}
     {let (fields,state,status)=(fields.clone(),state.clone(),status.clone());previous.connect_clicked(move |_| {
         let state=state.borrow();let Some(review)=state.as_ref() else{return;};
-        match review.previous(){Ok(value)=>{fields.populate(value.notifications);status.set_text("Previous notification preferences loaded into draft.");}
+        match review.previous(){Ok(value)=>{fields.populate(&value.notifications);status.set_text("Previous notification preferences loaded into draft.");}
             Err(error)=>status.set_text(&format!("{error:#}"))}
     });}
     save.connect_clicked(move |_| {

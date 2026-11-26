@@ -74,10 +74,16 @@ The wrapper runs the executable directly with original argument bytes, working d
 
 The wrapper is not a process supervisor and does not install custom signal handlers. If the wrapper itself is killed, a completion notice is not guaranteed. Existing suppression and history rules apply. No automatic command hooks or AI integrations.
 
+## Monitor placement and responsive geometry
+
+Atelier Settings → Notifications now exposes a display selector. Choose Follow panel (the default) or an exact GDK output connector, such as DP-2. The choice is saved with the existing appearance transaction and reloads live. A disconnected preference remains saved and falls back to the panel output, then the first available display. The shell checks for output changes approximately once per second and restores the selected connector when it returns. The settings display list can be refreshed by reloading saved appearance.
+
+Only one popup presenter is routed to the selected output: notifications and actions are not duplicated across monitors. Width and available stack height are calculated using logical monitor geometry, and tall stacks use vertical scrolling. Text and action labels wrap at word or character boundaries. These are preferred geometry bounds, not a hard guarantee against toolkit minimum sizes or compositor-specific constraints. Live output remapping, scaling, panel placement and hotplug behavior still need acceptance tests on real multi-monitor Wayland sessions.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add lock-aware suppression and multi-output placement; measure the direct transport's real-world latency and idle resource use.
+- Add lock-aware suppression and validate output placement; measure the direct transport's real-world latency and idle resource use.
 - Consider a persistent script-friendly client for safe action selection only if needed; validate command tracking in actual use. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
