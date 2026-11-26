@@ -61,11 +61,24 @@ Open `atelier-settings --page notification-rules` to add, update or remove appli
 
 Both the notification centre and the layer-shell presenter use the same GIO session-bus transport rather than spawning the notification CLI and timeout processes for each refresh. D-Bus calls use a three-second method timeout, do not auto-start a daemon and are serialized on a worker outside the GTK thread. The daemon coalesces state changes into payload-free `org.atelier.Notifications1.Changed` signals on its existing 200 ms maintenance loop; notification revisions remain separate from this invalidation counter. The shell subscribes to change and bus-name ownership signals, bounds its pending requests and re-reads the authoritative snapshot. A three-second fallback refresh covers older services, initial subscription races and missed signals. No claim of lossless delivery of every intermediate notification state is made. GTK still checks its local reply queue on a short timer to handle animation and UI state. The CLI remains unchanged for scripts. Actual latency and idle resource consumption require measurement on a running desktop.
 
+## Command execution tracking
+
+Use an explicit task label and separate the executable from notification options with `--`:
+
+```sh
+atelier-notifications run "Build Atelier" -- cargo build --release
+atelier-notifications run "Create backup" -- tar -cf backup.tar documents/
+```
+
+The wrapper runs the executable directly with original argument bytes, working directory, environment and inherited standard streams. It does not insert a shell, capture output, escalate privileges or publish arguments. Notifications contain the supplied label, elapsed whole seconds and outcome/exit code. Avoid secrets in labels. The child runs even if notification delivery fails. Normal exit codes are preserved; a child terminated by a signal maps to 128 plus signal, missing executables to 127 and other execution errors to 126. Both notification calls target the same unique bus owner. After completion the wrapper waits at most two seconds for best-effort notification delivery. The running card expires after 60 seconds to avoid persistent orphans; long jobs can still receive a completion card. No percentage is invented.
+
+The wrapper is not a process supervisor and does not install custom signal handlers. If the wrapper itself is killed, a completion notice is not guaranteed. Existing suppression and history rules apply. No automatic command hooks or AI integrations.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
 - Add lock-aware suppression and multi-output placement; measure the direct transport's real-world latency and idle resource use.
-- Add a persistent script-friendly client for command tracking, safe action selection. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
+- Consider a persistent script-friendly client for safe action selection only if needed; validate command tracking in actual use. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
