@@ -13,15 +13,15 @@ struct Reply{
 }
 type Command=(u64,Request);
 /// Requests wake the private worker context, including disconnect on close.
-struct RequestPort{sender:mpsc::SyncSender<Command>,context:glib::MainContext}
+struct RequestPort{sender:Option<mpsc::SyncSender<Command>>,context:glib::MainContext}
 impl RequestPort{
     fn send(&self,request:Command)->bool{
-        if self.sender.try_send(request).is_err(){return false;}
+        if !self.sender.as_ref().is_some_and(|sender|sender.try_send(request).is_ok()){return false;}
         self.context.wakeup();true
     }
 }
 impl Drop for RequestPort{
-    fn drop(&mut self){self.context.wakeup();}
+    fn drop(&mut self){drop(self.sender.take());self.context.wakeup();}
 }
 enum Wake{Request(Command),Refresh,Closed}
 /// Keep the main context blocked when idle. The deadline is a compatibility
@@ -271,7 +271,7 @@ pub fn show(app:&gtk::Application){
     let (requests,rx)=mpsc::sync_channel(1);let (tx,updates)=mpsc::sync_channel(1);
     let context=glib::MainContext::new();let worker_context=context.clone();
     std::thread::spawn(move||{let _=worker_context.with_thread_default(||worker(&worker_context,rx,tx));});
-    let requests=RequestPort{sender:requests,context};
+    let requests=RequestPort{sender:Some(requests),context};
     let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,shuffle,repeat,status,
         artwork_enabled,cover,wave,art:RefCell::new(None),
         names:RefCell::new(vec![]),details:RefCell::new(None),revision:Cell::new(0),busy:Cell::new(false),
@@ -318,6 +318,28 @@ pub fn show(app:&gtk::Application){
 }
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn private_context_handles_request_and_disconnect(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (sender,rx)=mpsc::sync_channel(1);
+        let port=RequestPort{sender:Some(sender),context:context.clone()};
+        assert!(port.send((7,Request::Artwork(true))));
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Request((7,Request::Artwork(true)))));
+            drop(port);
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Closed));
+        }).unwrap();
+    }
+    #[test]
+    fn private_context_deadline_refreshes_without_signals(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (_sender,rx)=mpsc::sync_channel(1);
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_millis(5)),Wake::Refresh));
+        }).unwrap();
+    }
     #[test]
     fn clock_format(){assert_eq!(super::time(65_000_000),"1:05");assert_eq!(super::time(3661_000_000),"1:01:01");}
 }
