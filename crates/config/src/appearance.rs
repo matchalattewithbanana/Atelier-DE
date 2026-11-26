@@ -288,6 +288,7 @@ impl Appearance{
                 css.push_str(&format!(" .{class} {{ background-image: none; background-color: alpha({color}, {:.2}); }}",opacity as f64/100.0));
             }
         }
+        css.push_str(&format!(" window.atelier-notification-layer {{ background: transparent; }} .atelier-notification-card {{ background: {color}; border-radius: {}px; padding: 12px; }} .atelier-notification-pill {{ background: {color}; border-radius: 24px; padding: 6px 20px; font-weight: bold; }} .atelier-notification-card button {{ border-radius: {}px; }}", self.button_radius.max(12), self.button_radius));
         Ok(css)
     }
 }
