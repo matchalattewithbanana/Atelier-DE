@@ -29,9 +29,9 @@ fn read_regular(path:&Path,limit:usize)->Result<Vec<u8>>{
     Ok(bytes)
 }
 
-struct Snapshot{files:BTreeMap<PathBuf,Vec<u8>>,total:usize,entries:usize}
+pub(super) struct Snapshot{files:BTreeMap<PathBuf,Vec<u8>>,total:usize,entries:usize}
 impl Snapshot{
-    fn read(root:&Path)->Result<Self>{
+    pub(super) fn read(root:&Path)->Result<Self>{
         if !root.is_absolute()||!fs::symlink_metadata(root)?.is_dir(){bail!("choose an absolute real SDDM theme directory");}
         let mut s=Self{files:BTreeMap::new(),total:0,entries:0};
         s.walk(root,Path::new(""),0)?;
@@ -54,7 +54,7 @@ impl Snapshot{
         }
         Ok(())
     }
-    fn fingerprint(&self)->String{
+    pub(super) fn fingerprint(&self)->String{
         let mut hash=Sha256::new();
         for (path,bytes) in &self.files{
             let path=path.to_str().expect("validated UTF8").as_bytes();
@@ -62,6 +62,31 @@ impl Snapshot{
             hash.update((bytes.len() as u64).to_le_bytes());hash.update(bytes);
         }
         format!("{:x}",hash.finalize())
+    }
+    /// Used only after the administrator import boundary has validated the
+    /// source and created a fresh private destination. No QML is executed.
+    pub(super) fn copy_for_greeter(&self,dest:&Path)->Result<()>{
+        self.metadata()?;
+        fs::create_dir(dest)?;
+        for (rel,bytes) in &self.files{
+            let path=dest.join(rel);
+            let parent=path.parent().context("missing import parent")?;
+            fs::create_dir_all(parent)?;
+            let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            file.write_all(bytes)?;
+            file.set_permissions(fs::Permissions::from_mode(0o644))?;
+            file.sync_all()?;
+        }
+        // Only directories beneath the fresh destination are changed.
+        for rel in self.files.keys(){
+            for dir in dest.join(rel).parent().context("missing import directory")?.ancestors(){
+                if !dir.starts_with(dest){break;}
+                fs::set_permissions(dir,fs::Permissions::from_mode(0o755))?;
+                File::open(dir)?.sync_all()?;
+                if dir==dest{break;}
+            }
+        }
+        Ok(())
     }
     fn metadata(&self)->Result<Metadata>{
         let mut m=Metadata{main:"Main.qml".into(),screenshot:None,name:None};
@@ -164,7 +189,7 @@ impl Review{
 }
 pub(super) fn run(args:&[String])->Result<()>{
     if let [action,id]=args{if action=="pack-prepare"{return crate::login_packs::prepare(id);}}
-    if args.first().is_some_and(|a|matches!(a.as_str(),"selection-plan"|"select"|"rollback-selection")){
+    if args.first().is_some_and(|a|matches!(a.as_str(),"install-plan"|"install"|"selection-plan"|"select"|"rollback-selection")){
         return crate::login_selection::run(args);
     }
     let (prepare,path)=match args{
