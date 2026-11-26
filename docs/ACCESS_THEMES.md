@@ -16,4 +16,19 @@ atelier-manager access-theme export industrial /absolute/industrial.json
 atelier-manager access-theme check /absolute/industrial.json
 ```
 
-Future work: asset references with bounded local decoding and explicit licensing, safe per-display placement, real layout rendering and accessibility testing, and an independent trusted greeter/ordinary lock runtime. Do not feed these themes into the emergency recovery client. Do not claim authentication or unlock support from a visual preview. Native lock activation stays gated on real compositor protection, input isolation, crash recovery and trusted authentication validation.
+Future work: animated media with explicit licensing, safe per-display placement, real layout rendering and accessibility testing, and an independent trusted greeter/ordinary lock runtime. Do not feed these themes into the emergency recovery client. Do not claim authentication or unlock support from a visual preview. Native lock activation stays gated on real compositor protection, input isolation, crash recovery and trusted authentication validation.
+
+## Backgrounds and portable wallpaper bundles
+
+The optional v1 backdrop field defaults to solid for old JSON themes. Gradient uses the palette background and a second validated #RRGGBB color with horizontal, vertical or diagonal direction. Wallpaper uses cover, contain or stretch and 0–80% dimming. Authentication and clock cards remain opaque; no wallpaper-derived text or arbitrary layout is accepted. Reduced-motion preferences remain independent. New backdrop fields require an updated reader; earlier v1 readers may reject them.
+
+Studio can load an explicitly selected local PNG, JPEG or WebP through the existing bounded decoder, downsampled to at most 2048 pixels per edge. The Cairo surface is constructed once per successful load and reused during edits. Previewing an image neither captures the desktop nor changes session settings. Missing/invalid wallpaper drafts retain the last valid preview and disable export. Preset reset and JSON imports clear the loaded asset. File reads, decoding and bundle encoding run off the GTK thread. The preview is static, including for any supported animated image input; no video or animation playback is implemented.
+
+Solid/gradient drafts export as ordinary .json. Wallpaper drafts export to a new absolute .atelier-access directory with exactly theme.json and wallpaper.png. No original path, image metadata, scripts, additional files or external references are included. Pixels are normalized to PNG, potentially at reduced resolution; original licenses and redistribution rights remain the user's responsibility. Import checks the directory entries, manifest, bounded raster and wallpaper backdrop. The directory is atomically published without replacing an existing path. No system installation or runtime selection occurs.
+
+```sh
+atelier-manager access-theme wallpaper-bundle classic /absolute/wallpaper.jpg /absolute/classic.atelier-access
+atelier-manager access-theme check /absolute/classic.atelier-access
+```
+
+The CLI's wallpaper-bundle command uses cover fit and 25% dimming; the Studio exposes the editable settings. A standalone wallpaper manifest is not a complete theme package. The recovery locker never loads these themes or assets.
