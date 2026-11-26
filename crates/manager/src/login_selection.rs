@@ -1,6 +1,6 @@
-//! Narrow, explicit administrator transaction for an already installed SDDM
-//! theme. Never launch QML, copy user themes into system directories, alter
-//! authentication, switch display managers, or restart a service.
+//! Narrow administrator transactions for trusted SDDM theme imports and
+//! selection. Never launch QML, read user-writable import sources as root,
+//! alter authentication, switch display managers, or restart a service.
 use anyhow::{bail,Context,Result};
 use fs2::FileExt;
 use serde::{Deserialize,Serialize};
@@ -67,16 +67,16 @@ impl Location{
         self.protected_ancestors(&self.themes)?;
         let path=self.themes.join(name);self.directory(&path)?;
         let mut count=0;let mut total=0;let mut hash=Sha256::new();
-        self.hash_tree(&path,&path,0,&mut count,&mut total,&mut hash)?;
+        self.hash_tree(&path,&path,0,&mut count,&mut total,&mut hash,true)?;
         // Validate only entry-point metadata as administrator. Screenshot
         // decoding belongs exclusively to the unprivileged preview workflow.
         crate::login_theme::validate_entrypoint(&path)?;
         Ok(format!("{:x}",hash.finalize()))
     }
-    fn hash_tree(&self,base:&Path,dir:&Path,depth:usize,count:&mut usize,total:&mut usize,hash:&mut Sha256)->Result<()>{
+    fn hash_tree(&self,base:&Path,dir:&Path,depth:usize,count:&mut usize,total:&mut usize,hash:&mut Sha256,greeter_access:bool)->Result<()>{
         if depth>8{bail!("theme nesting exceeds limit");}
         self.directory(dir)?;
-        if fs::symlink_metadata(dir)?.permissions().mode()&0o005!=0o005{
+        if greeter_access&&fs::symlink_metadata(dir)?.permissions().mode()&0o005!=0o005{
             bail!("theme directory is not accessible to the greeter");
         }
         let mut entries=Vec::new();
@@ -93,10 +93,10 @@ impl Location{
             if rel.len()>512||rel.chars().any(char::is_control){bail!("unsafe theme path");}
             hash.update((rel.len() as u64).to_le_bytes());hash.update(rel.as_bytes());
             hash.update(m.permissions().mode().to_le_bytes());
-            if m.is_dir(){self.hash_tree(base,&path,depth+1,count,total,hash)?;}
+            if m.is_dir(){self.hash_tree(base,&path,depth+1,count,total,hash,greeter_access)?;}
             else if m.is_file(){
                 // Also require readability by an ordinary greeter user.
-                if m.permissions().mode()&0o004==0{bail!("theme file is not world-readable: {rel}");}
+                if greeter_access&&m.permissions().mode()&0o004==0{bail!("theme file is not world-readable: {rel}");}
                 let bytes=self.read(&path,(64*1024*1024-*total).min(32*1024*1024))?.context("theme file disappeared")?;
                 *total+=bytes.len();hash.update((bytes.len() as u64).to_le_bytes());hash.update(bytes);
             }else{bail!("theme contains a symlink or special file: {rel}");}
@@ -134,6 +134,65 @@ impl Location{
 fn valid_name(name:&str)->bool{
     !name.is_empty()&&name.len()<=128&&name!="."&&name!=".."&&
         name.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'))
+}
+// The source must already have been placed under administrator control.
+// Do not grant the privileged process access to a mutable home-directory
+// checkout. Installation and selection are distinct transactions.
+struct InstallPlan{
+    name:String,source:PathBuf,ownership_hash:String,
+    snapshot:crate::login_theme::Snapshot,
+}
+fn absent(path:&Path)->Result<()>{
+    match fs::symlink_metadata(path){
+        Err(e) if e.kind()==io::ErrorKind::NotFound=>Ok(()),
+        Err(e)=>Err(e.into()),
+        Ok(_)=>bail!("destination already exists; choose a new Atelier theme name"),
+    }
+}
+fn import_hash(location:&Location,source:&Path)->Result<String>{
+    if !source.is_absolute()||source.canonicalize()?!=source{bail!("choose a canonical protected import directory");}
+    location.protected_ancestors(source)?;
+    let mut count=0;let mut total=0;let mut hash=Sha256::new();
+    location.hash_tree(source,source,0,&mut count,&mut total,&mut hash,false)?;
+    Ok(format!("{:x}",hash.finalize()))
+}
+fn rename_new(source:&Path,dest:&Path)->Result<()>{
+    use std::{ffi::CString,os::unix::ffi::OsStrExt};
+    let source=CString::new(source.as_os_str().as_bytes())?;
+    let dest=CString::new(dest.as_os_str().as_bytes())?;
+    if unsafe{libc::renameat2(libc::AT_FDCWD,source.as_ptr(),libc::AT_FDCWD,dest.as_ptr(),libc::RENAME_NOREPLACE)}!=0{
+        return Err(io::Error::last_os_error()).context("publish new theme without replacing an existing directory");
+    }
+    Ok(())
+}
+impl InstallPlan{
+    fn review(location:&Location,name:&str,source:&Path)->Result<Self>{
+        if !valid_name(name)||!name.starts_with("atelier-")||name=="atelier-"{bail!("choose a new atelier-NAME theme directory");}
+        location.protected_ancestors(&location.themes)?;
+        absent(&location.themes.join(name))?;
+        let ownership_hash=import_hash(location,source)?;
+        let snapshot=crate::login_theme::Snapshot::read(source)?;
+        crate::login_theme::validate_entrypoint(source)?;
+        if import_hash(location,source)?!=ownership_hash{bail!("source changed during review");}
+        Ok(Self{name:name.into(),source:source.into(),ownership_hash,snapshot})
+    }
+    fn detail(&self,location:&Location)->String{
+        format!("Administrator-controlled source: {}\nContent SHA-256: {}\nNew directory: {}\nCopy regular files as 0644, directories as 0755. No overwrite, script execution, theme selection, service restart or authentication changes. QML remains executable code; inspect compatibility and trust independently.",
+            self.source.display(),self.snapshot.fingerprint(),location.themes.join(&self.name).display())
+    }
+    fn commit(self,location:&Location)->Result<PathBuf>{
+        location.protected_ancestors(&location.themes)?;
+        let dest=location.themes.join(&self.name);
+        absent(&dest)?;
+        if import_hash(location,&self.source)?!=self.ownership_hash{bail!("source changed since review");}
+        let temporary=tempfile::Builder::new().prefix(".atelier-import-").tempdir_in(&location.themes)?;
+        let staged=temporary.path().join("theme");
+        self.snapshot.copy_for_greeter(&staged)?;
+        if crate::login_theme::Snapshot::read(&staged)?.fingerprint()!=self.snapshot.fingerprint(){bail!("staged theme verification failed");}
+        rename_new(&staged,&dest)?;
+        File::open(&location.themes)?.sync_all().with_context(||format!("theme published at {}, but directory sync failed; inspect before retrying",dest.display()))?;
+        Ok(dest)
+    }
 }
 fn managed_bytes(name:&str)->Vec<u8>{
     format!("# Managed by Atelier; use login-theme rollback-selection\n[Theme]\nThemeDir=/usr/share/sddm/themes\nCurrent={name}\n").into_bytes()
@@ -221,6 +280,14 @@ fn confirm(phrase:&str)->Result<bool>{
 pub(super) fn run(args:&[String])->Result<()>{
     let location=Location::system();
     match args{
+        [action,name,flag,source] if flag=="--from"&&matches!(action.as_str(),"install-plan"|"install")=>{
+            if action=="install"{administrator()?;}
+            let plan=InstallPlan::review(&location,name,Path::new(source))?;
+            println!("{}",plan.detail(&location));
+            if action=="install-plan"{println!("Preview only. No changes.");return Ok(());}
+            if !confirm(&format!("install trusted {name}"))?{println!("Cancelled.");return Ok(());}
+            println!("Installed theme at {}. Selection remains separate.",plan.commit(&location)?.display());Ok(())
+        }
         [action,name] if action=="selection-plan"=>{
             println!("{}",Plan::review(&location,name)?.detail()?);
             println!("Preview only. No changes.");Ok(())
@@ -240,7 +307,7 @@ pub(super) fn run(args:&[String])->Result<()>{
             if !confirm("restore login selection")?{println!("Cancelled.");return Ok(());}
             rollback(&location,review)?;println!("Previous Atelier selection restored.");Ok(())
         }
-        _=>bail!("use login-theme selection-plan NAME | select NAME | rollback-selection"),
+        _=>bail!("use login-theme install-plan NAME --from DIR | install NAME --from DIR | selection-plan NAME | select NAME | rollback-selection"),
     }
 }
 
@@ -250,6 +317,33 @@ mod tests{
     fn fixture(root:&Path)->Location{
         let loc=Location{dropins:root.join("conf.d"),legacy:root.join("sddm.conf"),themes:root.join("themes"),owner:nix::unistd::Uid::effective().as_raw(),anchor:root.into()};
         fs::create_dir(&loc.dropins).unwrap();fs::create_dir(&loc.themes).unwrap();loc
+    }
+    #[test]
+    fn installs_reviewed_source_without_selection_or_overwrite(){
+        let root=tempfile::tempdir().unwrap();let loc=fixture(root.path());
+        let source=root.path().join("import");fs::create_dir(&source).unwrap();
+        fs::write(source.join("Main.qml"),b"// inert").unwrap();
+        fs::set_permissions(source.join("Main.qml"),fs::Permissions::from_mode(0o600)).unwrap();
+        let plan=InstallPlan::review(&loc,"atelier-demo",&source).unwrap();
+        let stale=InstallPlan::review(&loc,"atelier-stale",&source).unwrap();
+        let dest=plan.commit(&loc).unwrap();
+        assert_eq!(fs::read(dest.join("Main.qml")).unwrap(),b"// inert");
+        assert_eq!(fs::metadata(dest.join("Main.qml")).unwrap().permissions().mode()&0o777,0o644);
+        assert!(loc.theme_fingerprint("atelier-demo").is_ok());
+        assert!(loc.managed().unwrap().is_none());
+        assert!(InstallPlan::review(&loc,"atelier-demo",&source).is_err());
+        fs::write(source.join("Main.qml"),b"changed").unwrap();
+        assert!(stale.commit(&loc).is_err());
+        assert!(!loc.themes.join("atelier-stale").exists());
+        fs::set_permissions(&source,fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(InstallPlan::review(&loc,"atelier-bad",&source).is_err());
+    }
+    #[test]
+    fn publish_never_replaces_even_empty_directory(){
+        let root=tempfile::tempdir().unwrap();let src=root.path().join("a");let dst=root.path().join("b");
+        fs::create_dir(&src).unwrap();fs::create_dir(&dst).unwrap();
+        assert!(rename_new(&src,&dst).is_err());
+        assert!(src.is_dir()&&dst.is_dir());
     }
     #[test]
     fn managed_format_is_exact(){
