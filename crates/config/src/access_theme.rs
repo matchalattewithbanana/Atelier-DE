@@ -11,7 +11,7 @@ const MAX_BYTES:usize=16384;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="kebab-case")]
-pub enum Layout{Centered,Split,Editorial,Bento}
+pub enum Layout{Centered,Split,Editorial,Bento,Dashboard,Immersive}
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="kebab-case")]
 pub enum Typography{Sans,Monospace,Display}
@@ -39,6 +39,20 @@ impl Backdrop{
     fn is_solid(&self)->bool{matches!(self,Self::Solid)}
     pub fn needs_image(&self)->bool{matches!(self,Self::Wallpaper{..})}
 }
+/// Widget visibility is an appearance preference, not consent to read
+/// private data. Runtime hosts must enforce their own separate policy.
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct DashboardWidgets{
+    pub weather:bool,pub system:bool,pub media:bool,pub resources:bool,pub notifications:bool,pub profile:bool,
+}
+impl DashboardWidgets{
+    fn is_default(&self)->bool{*self==Self::default()}
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum Widget{Weather,System,Media,Resources,Notifications}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct Tile{pub widget:Widget,pub rect:Rect}
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme{
@@ -47,6 +61,8 @@ pub struct Theme{
     pub corner_radius:u32,pub clock:bool,pub date:bool,pub motion_ms:u32,
     #[serde(default,skip_serializing_if="Backdrop::is_solid")]
     pub backdrop:Backdrop,
+    #[serde(default,skip_serializing_if="DashboardWidgets::is_default")]
+    pub dashboard:DashboardWidgets,
 }
 /// Coordinates are fractions of a 1000 × 1000 logical canvas, not pixels.
 /// The trusted host owns authentication controls within the required card.
@@ -59,19 +75,22 @@ impl Layout{
         let rect=|x,y,w,h|Rect{x,y,w,h};
         if compact{return Geometry{auth:rect(80,390,840,480),clock:rect(80,100,840,230)};}
         match self{
-            Self::Centered=>Geometry{auth:rect(320,390,360,450),clock:rect(320,100,360,240)},
+            Self::Centered|Self::Dashboard=>Geometry{auth:rect(320,390,360,450),clock:rect(320,100,360,240)},
             Self::Split=>Geometry{auth:rect(570,200,360,600),clock:rect(70,200,450,600)},
             Self::Editorial=>Geometry{auth:rect(620,410,320,420),clock:rect(60,120,510,600)},
+            Self::Immersive=>Geometry{auth:rect(340,650,320,310),clock:rect(320,70,360,350)},
             Self::Bento=>Geometry{auth:rect(510,120,430,760),clock:rect(60,120,390,760)},
         }
     }
 }
 pub const PRESETS:&[(&str,&str)]=&[
-    ("classic","Atelier Classic"),("sekaipop","SekaiPop"),("monogram","Monogram"),("industrial","Industrial"),
+    ("classic","Atelier Classic"),("minimal","Classic Minimal"),("immersive","Classic Immersive"),("sekaipop","SekaiPop"),("monogram","Monogram"),("industrial","Industrial"),
 ];
 pub fn preset(id:&str)->Result<Theme>{
     let (name,layout,typography,colors,radius)=match id{
-        "classic"=>("Atelier Classic",Layout::Centered,Typography::Sans,["#101522","#202b40","#f2f5ff","#bdc8db","#abc4ff"],24),
+        "classic"=>("Atelier Classic",Layout::Dashboard,Typography::Sans,["#101522","#202b40","#f2f5ff","#bdc8db","#abc4ff"],24),
+        "minimal"=>("Classic Minimal",Layout::Centered,Typography::Sans,["#101522","#202b40","#f2f5ff","#bdc8db","#abc4ff"],24),
+        "immersive"=>("Classic Immersive",Layout::Immersive,Typography::Sans,["#101522","#202b40","#f2f5ff","#bdc8db","#abc4ff"],24),
         "sekaipop"=>("SekaiPop",Layout::Split,Typography::Sans,["#24182c","#392543","#fff1fb","#e1c4e6","#ffb6e5"],28),
         "monogram"=>("Monogram",Layout::Bento,Typography::Monospace,["#e7e7e7","#fafafa","#151515","#454545","#a22424"],12),
         "industrial"=>("Industrial",Layout::Editorial,Typography::Display,["#171717","#292522","#fff0dd","#d7c3ad","#ffb064"],4),
@@ -79,10 +98,30 @@ pub fn preset(id:&str)->Result<Theme>{
     };
     let [background,panel,text,muted,accent]=colors.map(str::to_owned);
     let theme=Theme{format:FORMAT.into(),version:1,name:name.into(),layout,typography,
-        palette:Palette{background,panel,text,muted,accent},corner_radius:radius,clock:true,date:true,motion_ms:160,backdrop:Backdrop::Solid};
+        palette:Palette{background,panel,text,muted,accent},corner_radius:radius,clock:true,date:true,motion_ms:160,backdrop:Backdrop::Solid,
+        dashboard:if id=="classic"{DashboardWidgets{weather:true,system:true,media:true,resources:true,notifications:false,profile:true}}else{DashboardWidgets::default()}};
     theme.validate()?;Ok(theme)
 }
 impl Theme{
+    /// Greeters and compact displays never get session dashboard tiles.
+    /// A host may suppress any optional tile; a theme cannot authorize data.
+    pub fn dashboard_tiles(&self,compact:bool,greeter:bool)->Vec<Tile>{
+        if self.layout!=Layout::Dashboard||compact||greeter{return Vec::new();}
+        let w=self.dashboard;
+        let left=[(Widget::Weather,w.weather),(Widget::System,w.system),(Widget::Media,w.media)];
+        let right=[(Widget::Resources,w.resources),(Widget::Notifications,w.notifications)];
+        let groups=[(50,left.as_slice()),(720,right.as_slice())];
+        let mut tiles=Vec::new();
+        for (x,items) in groups{
+            let count=items.iter().filter(|(_,show)|*show).count() as u32;
+            if count==0{continue;}
+            let height=(840-(count-1)*24)/count;
+            for (i,(widget,_)) in items.iter().filter(|(_,show)|*show).enumerate(){
+                tiles.push(Tile{widget:*widget,rect:Rect{x,y:80+i as u32*(height+24),w:230,h:height}});
+            }
+        }
+        tiles
+    }
     pub fn validate(&self)->Result<()>{
         if self.format!=FORMAT||self.version!=1||self.name.trim().is_empty()||self.name.len()>80||
             self.name.chars().any(|c|c.is_control()||matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')){
@@ -141,6 +180,30 @@ mod tests{
             }
             assert_eq!(theme.motion(true),0);
         }
+    }
+    #[test]
+    fn dashboard_tiles_reflow_and_never_cover_authentication(){
+        let mut theme=preset("classic").unwrap();
+        assert_eq!(theme.layout,Layout::Dashboard);assert!(!theme.dashboard.notifications);
+        assert!(theme.dashboard_tiles(true,false).is_empty());
+        assert!(theme.dashboard_tiles(false,true).is_empty());
+        let overlaps=|a:Rect,b:Rect|a.x<b.x+b.w&&b.x<a.x+a.w&&a.y<b.y+b.h&&b.y<a.y+a.h;
+        for mask in 0..32{
+            theme.dashboard=DashboardWidgets{weather:mask&1!=0,system:mask&2!=0,media:mask&4!=0,resources:mask&8!=0,notifications:mask&16!=0,profile:true};
+            let geometry=theme.layout.geometry(false);
+            let tiles=theme.dashboard_tiles(false,false);
+            assert_eq!(tiles.len(),(mask as u32).count_ones() as usize);
+            for (i,t) in tiles.iter().enumerate(){
+                let r=t.rect;assert!(r.x+r.w<=1000&&r.y+r.h<=1000&&r.h>=200);
+                assert!(!overlaps(r,geometry.auth)&&!overlaps(r,geometry.clock));
+                assert!(tiles[..i].iter().all(|other|!overlaps(r,other.rect)));
+            }
+        }
+        let mut old=serde_json::to_value(preset("minimal").unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("dashboard");
+        assert_eq!(Theme::parse(&old.to_string()).unwrap().dashboard,DashboardWidgets::default());
+        old["dashboard"]=serde_json::json!({"notifications":true,"reveal_contents":true});
+        assert!(Theme::parse(&old.to_string()).is_err());
     }
     #[test]
     fn rejects_executable_fields_paths_unreadable_colors_and_unknown_versions(){
