@@ -53,13 +53,15 @@ Publish with `atelier-notifications send backup "Backup complete" "Files saved"`
 
 App rules match the exact case-sensitive reported application label, not a trusted identity. Disabling popups keeps notices in the active inbox and marks new suppressed deliveries as missed. Disabling history prevents active notices from entering closed history; it does not remove existing history or prevent active inbox visibility. Existing active notices are suppressed on a valid rule change, and reenabling a rule does not replay them. Replacements are new deliveries. Rules never override global DND or pause. The daemon checks for changes about once per second and retains the last valid settings on malformed live edits; deleting the file restores defaults. Invalid preferences at startup prevent the optional daemon from starting. Built-in CLI presets remain usable even when the custom preferences file is malformed. Custom presets are loaded on each CLI invocation.
 
-The notification centre also offers optional application grouping for active and closed notices, combinable with the missed-only filter. Individual records remain independent. A graphical editor for custom policy and presets is not yet available.
+The notification centre now presents graphical notification cards, with text search, application filtering, missed-only filtering, expandable application groups, progress indicators, per-card dismissal and active application actions. Individual records remain independent. Group expansion is preserved on updates within the same daemon instance; pause countdown changes do not rebuild card content.
+
+Open `atelier-settings --page notification-rules` to add, update or remove application rules and custom presets. Changes remain in a draft until explicitly saved. The editor and daemon share one validated configuration implementation. Saves reject stale drafts and use atomic file replacement with `notifications.previous.toml` as a previous-version backup. Load previous preferences into a draft and save to restore them. The editor does not start the daemon.
 
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add lock-aware suppression and multi-output placement.
+- Add lock-aware suppression and multi-output placement; replace subprocess polling with direct event-driven D-Bus where practical.
 - Add a persistent script-friendly client for command tracking, safe action selection. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
-- Expose custom policy and preset editing in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
+- Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
