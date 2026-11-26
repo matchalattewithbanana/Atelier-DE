@@ -30,7 +30,9 @@ impl Map{
         let context=xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES|xkb::CONTEXT_NO_ENVIRONMENT_NAMES);
         let map=xkb::Keymap::new_from_string(&context,text,xkb::KEYMAP_FORMAT_TEXT_V1,xkb::KEYMAP_COMPILE_NO_FLAGS)
             .context("invalid XKB keymap")?;
-        Ok(Self{xkb:xkb::State::new(&map)})
+        let state=xkb::State::new(&map);
+        if state.get_raw_ptr().is_null(){bail!("could not allocate XKB state");}
+        Ok(Self{xkb:state})
     }
     fn modifiers(&mut self,depressed:u32,latched:u32,locked:u32,group:u32){
         self.xkb.update_mask(depressed,latched,locked,0,0,group);
@@ -118,7 +120,7 @@ mod tests{
     // then exercise the same decoder used for compositor-provided maps.
     fn fixture()->String{
         let context=xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        xkb::Keymap::new_from_names(&context,"evdev","pc105","us","",None,xkb::KEYMAP_COMPILE_NO_FLAGS)
+        xkb::Keymap::new_from_names(&context,"evdev","pc105","us","",Some(String::new()),xkb::KEYMAP_COMPILE_NO_FLAGS)
             .unwrap().get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)
     }
     fn file(bytes:&[u8])->OwnedFd{
