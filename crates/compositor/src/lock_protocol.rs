@@ -49,6 +49,7 @@ pub(super) struct Protocol{
     owner:Option<ExtSessionLockV1>,
     surface:Option<AcceptedSurface>,
     recovery_client:Option<ClientId>,
+    recovery_owner:Option<ClientId>,
     recovering:bool,
 }
 
@@ -123,11 +124,16 @@ impl Atelier{
     /// Scoped cancellation: do not revoke a later grant or unrelated owner.
     pub(crate) fn revoke_recovery(&mut self,id:&ClientId){
         if self.lock_protocol.recovery_client.as_ref()==Some(id){self.lock_protocol.recovery_client=None;}
-        let owns=self.lock_protocol.owner.as_ref().and_then(|owner|owner.client()).is_some_and(|client|&client.id()==id);
-        if owns{self.prepare_protected_recovery();}
+        if self.lock_protocol.recovery_owner.as_ref()==Some(id){self.prepare_protected_recovery();}
     }
     pub(crate) fn recovery_confirmed(&self,id:&ClientId)->bool{
-        self.lock_protocol.owner.as_ref().is_some_and(|owner|owner.client().is_some_and(|client|&client.id()==id)&&self.session_lock.can_unlock(&owner.id()))
+        self.lock_protocol.recovery_owner.as_ref()==Some(id)&&
+            self.lock_protocol.owner.as_ref().is_some_and(|owner|owner.is_alive()&&self.session_lock.can_unlock(&owner.id()))
+    }
+    pub(crate) fn recovery_pending(&self,id:&ClientId)->bool{
+        (self.session_lock.orphaned()&&self.lock_protocol.recovery_client.as_ref()==Some(id))||
+            (self.lock_protocol.recovery_owner.as_ref()==Some(id)&&
+                self.lock_protocol.owner.as_ref().is_some_and(|owner|owner.is_alive()&&self.session_lock.owns_request(&owner.id())&&!self.session_lock.can_unlock(&owner.id())))
     }
     pub(super) fn recovery_input_ready(&self)->bool{!self.lock_protocol.recovering}
     pub(super) fn sync_lock_input(&mut self,time:u32){
@@ -250,7 +256,7 @@ impl Atelier{
         if self.session_lock.orphaned(){
             let granted=owner.client().is_some_and(|c|self.lock_protocol.recovery_client.as_ref()==Some(&c.id()));
             if !granted||!self.session_lock.recover(owner.id()){owner.finished();return;}
-            self.lock_protocol.recovery_client=None;
+            self.lock_protocol.recovery_owner=self.lock_protocol.recovery_client.take();
             self.lock_protocol.recovering=true;
             self.lock_protocol.owner=Some(owner);
             self.isolate_input(0);
