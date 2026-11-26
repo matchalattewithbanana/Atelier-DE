@@ -162,12 +162,13 @@ impl Review{
     }
 }
 pub(super) fn run(args:&[String])->Result<()>{
+    if let [action,id]=args{if action=="pack-prepare"{return crate::login_packs::prepare(id);}}
     if args.first().is_some_and(|a|matches!(a.as_str(),"selection-plan"|"select"|"rollback-selection")){
         return crate::login_selection::run(args);
     }
     let (prepare,path)=match args{
         [action,flag,path] if flag=="--from"&&matches!(action.as_str(),"inspect"|"prepare")=>(action=="prepare",path),
-        _=>bail!("use login-theme inspect --from DIR | prepare --from DIR"),
+        _=>bail!("use login-theme inspect --from DIR | prepare --from DIR | pack-prepare ID"),
     };
     let review=inspect(Path::new(path))?;
     println!("{}",review.detail()?);
