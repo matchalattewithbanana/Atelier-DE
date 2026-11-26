@@ -46,14 +46,21 @@ impl Drop for Subscription{
 fn subscribe(connection:gio::DBusConnection,provider:Provider,invalidate:Rc<dyn Fn()>)->Subscription{
     let changed=invalidate.clone();let structure=invalidate.clone();
     let name=provider.name();
-    let ids=vec![
+    let mut ids=vec![
         connection.signal_subscribe(Some(name),Some("org.freedesktop.DBus.Properties"),Some("PropertiesChanged"),None,None,
             gio::DBusSignalFlags::NONE,move|_,_,_,_,_,parameters|{if provider.changed(parameters){changed();}}),
-        connection.signal_subscribe(Some(name),None,None,None,None,
-            gio::DBusSignalFlags::NONE,move|_,_,_,interface,member,parameters|{if provider.structure(interface,member,parameters){structure();}}),
         connection.signal_subscribe(Some("org.freedesktop.DBus"),Some("org.freedesktop.DBus"),Some("NameOwnerChanged"),Some("/org/freedesktop/DBus"),Some(name),
             gio::DBusSignalFlags::NONE,move|_,_,_,_,_,_|invalidate()),
     ];
+    let interfaces:&[&str]=match provider{
+        Provider::Network=>&["org.freedesktop.NetworkManager","org.freedesktop.NetworkManager.Settings","org.freedesktop.NetworkManager.Settings.Connection"],
+        Provider::Bluetooth=>&["org.freedesktop.DBus.ObjectManager"],
+    };
+    for interface in interfaces{
+        let structure=structure.clone();
+        ids.push(connection.signal_subscribe(Some(name),Some(interface),None,None,None,
+            gio::DBusSignalFlags::NONE,move|_,_,_,interface,member,parameters|{if provider.structure(interface,member,parameters){structure();}}));
+    }
     Subscription{connection,ids}
 }
 #[derive(Default)]
@@ -108,7 +115,9 @@ pub fn attach(card:&gtk::Box,provider:Provider,refresh:Rc<dyn Fn()>){
         let weak=card.downgrade();let life=Rc::downgrade(&state);
         let source=glib::timeout_add_local(Duration::from_secs(30),move||{
             let (Some(card),Some(life))=(weak.upgrade(),life.upgrade())else{return glib::ControlFlow::Break;};
-            if !card.is_mapped()||life.borrow().epoch!=epoch{
+            if life.borrow().epoch!=epoch{return glib::ControlFlow::Break;}
+            if !card.is_mapped(){
+                life.borrow_mut().fallback.take();
                 return glib::ControlFlow::Break;
             }
             connect(&life,epoch,provider,invalidate.clone());
