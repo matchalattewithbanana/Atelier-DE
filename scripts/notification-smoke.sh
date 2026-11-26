@@ -5,9 +5,20 @@ binary=target/debug/atelier-notifications
 test -x "$binary"
 test -n "${DBUS_SESSION_BUS_ADDRESS:-}"
 # Must be invoked under dbus-run-session (CI uses an isolated bus).
+export XDG_CONFIG_HOME="$(mktemp -d)"
+mkdir -p "$XDG_CONFIG_HOME/atelier-de"
+cat > "$XDG_CONFIG_HOME/atelier-de/notifications.toml" <<'TOML'
+[applications."Muted smoke"]
+popups=false
+history=false
+[presets.backup]
+icon="document-save-symbolic"
+urgency=1
+timeout_ms=8000
+TOML
 "$binary" daemon &
 daemon_pid=$!
-trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; rm -rf -- "$XDG_CONFIG_HOME"' EXIT
 for _ in {1..60}; do
     if "$binary" list >/dev/null 2>&1; then break; fi
     kill -0 "$daemon_pid"
@@ -64,4 +75,11 @@ if "$binary" invoke "$instance" "$action_id" "$revision" wrong; then echo 'Unkno
 if "$binary" pause "$instance" 25h; then echo 'Invalid pause accepted' >&2; exit 1; fi
 if "$binary" pause wrong-instance 1m; then echo 'Stale pause accepted' >&2; exit 1; fi
 if "$binary" send unknown 'Invalid' ''; then echo 'Unknown preset accepted' >&2; exit 1; fi
+custom_id="$("$binary" send backup 'Backup complete' 'Saved')"
+"$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["icon"]=="document-save-symbolic" and n["summary"]=="Backup complete"'
+call Notify 'Muted smoke' 0 '' 'Muted rule title' 'Body' '[]' '{}' 0
+muted_id="$("$binary" list | python3 -c 'import json,sys; n=json.load(sys.stdin)["active"][-1]; assert n["missed"] and not n["popup_allowed"]; print(n["id"])')"
+"$binary" dismiss "$instance" "$muted_id"
+"$binary" list | python3 -c 'import json,sys; assert all(n["app"]!="Muted smoke" for n in json.load(sys.stdin)["history"])'
+"$binary" dismiss "$instance" "$custom_id"
 echo 'Notification D-Bus smoke passed'
