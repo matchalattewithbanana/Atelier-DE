@@ -36,7 +36,7 @@ impl SearchFields{
     /// All query terms must match; title matches outrank identifier and
     /// metadata matches. The caller resolves equal ranks by catalog order.
     fn score(&self,query:&str)->Option<u32>{
-        let query=query.trim().to_lowercase();
+        let query=query.trim().chars().take(512).collect::<String>().to_lowercase();
         if query.is_empty(){return Some(0);}
         let mut rank=if self.name==query{1000}else if self.name.starts_with(&query){500}else{0};
         for word in query.split_whitespace(){
