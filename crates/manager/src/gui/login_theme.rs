@@ -9,7 +9,7 @@ pub(super) fn build()->gtk::Box{
     outer.set_margin_top(24);outer.set_margin_bottom(24);outer.set_margin_start(24);outer.set_margin_end(24);
     outer.append(&label("Login themes · SDDM","title-1"));
     outer.append(&label("Inspect an installed or local theme. Static screenshots only. QML is executable code; staging does not establish trust or readiness. No system changes.","dim-label"));
-    let selection=label("For installed, trusted themes only: atelier-manager login-theme selection-plan NAME. Selection and rollback require an explicitly reviewed root-owned Manager binary in a terminal. No service is restarted.","dim-label");selection.set_selectable(true);outer.append(&selection);
+    let selection=label("For trusted themes placed in an administrator-controlled import directory: atelier-manager login-theme install-plan atelier-NAME --from DIR. Installation, selection and rollback require separate terminal review and a root-owned Manager binary. No service is restarted.","dim-label");selection.set_selectable(true);outer.append(&selection);
     let form=gtk::Box::new(gtk::Orientation::Vertical,8);outer.append(&form);
     let path=gtk::Entry::new();path.set_placeholder_text(Some("Absolute local theme directory"));form.append(&path);
     let installed=gtk::ComboBoxText::new();
