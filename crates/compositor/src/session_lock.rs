@@ -32,6 +32,17 @@ impl<Owner:Eq> Lifecycle<Owner>{
         self.epoch=epoch;
         self.phase=Phase::Pending{owner,epoch};true
     }
+    #[cfg(feature = "native-session")]
+    pub(crate) fn orphaned(&self)->bool{matches!(self.phase,Phase::Orphaned)}
+    /// Only the compositor's private recovery connection may call this.
+    /// It establishes a new owner and epoch, never an unlocked desktop.
+    #[cfg(feature = "native-session")]
+    pub(crate) fn recover(&mut self,owner:Owner)->bool{
+        if !self.orphaned(){return false;}
+        let Some(epoch)=self.epoch.checked_add(1)else{return false;};
+        self.epoch=epoch;
+        self.phase=Phase::Pending{owner,epoch};true
+    }
     pub(crate) fn protected_frame(&self)->Option<ProtectedFrame>{
         match &self.phase{
             Phase::Pending{epoch,..}=>Some(ProtectedFrame(*epoch)),
@@ -95,6 +106,8 @@ impl<K:Eq+std::hash::Hash+Copy> Controls<K>{
         released
     }
     fn is_empty(&self)->bool{self.holders.is_empty()}
+    #[cfg(feature = "native-session")]
+    fn drain(&mut self)->Vec<K>{self.holders.drain().map(|(code,_)|code).collect()}
 }
 
 /// Physical controls are tracked independently of client focus. A boundary
@@ -125,6 +138,14 @@ impl<K:Eq+std::hash::Hash+Copy> InputGate<K>{
     pub(crate) fn remove_device(&mut self,device:&str)->(Vec<K>,Vec<u32>){
         let keys=self.keys.remove(device);let buttons=self.buttons.remove(device);
         self.recheck();(keys,buttons)
+    }
+    /// Discard stale physical observations after source loss. Return logical
+    /// releases to reset the seat with no focus. This is not proof that
+    /// physical devices are neutral; a fresh backend is still required.
+    #[cfg(feature = "native-session")]
+    pub(crate) fn reset_after_loss(&mut self)->(Vec<K>,Vec<u32>){
+        let keys=self.keys.drain();let buttons=self.buttons.drain();
+        self.waiting=false;(keys,buttons)
     }
     fn recheck(&mut self){
         if self.keys.is_empty()&&self.buttons.is_empty(){self.waiting=false;}
@@ -205,6 +226,29 @@ mod tests{
         assert_eq!(gate.remove_device("a"),(vec![],vec![]));assert!(gate.waiting());
         assert_eq!(gate.remove_device("b"),(vec![1],vec![272]));assert!(!gate.waiting());
         assert!(gate.key("a",1,true)); // backend IDs may be reused after removal
+    }
+    #[test]
+    #[cfg(feature = "native-session")]
+    fn orphan_recovery_requires_fresh_owner_and_presentation(){
+        let mut state=Lifecycle::default();
+        assert!(!state.recover(2));assert!(state.begin(1));
+        let stale=state.protected_frame().unwrap();
+        assert!(!state.recover(2));assert!(state.disconnected(&1));
+        assert!(state.orphaned());assert!(state.recover(2));
+        let fresh=state.protected_frame().unwrap();assert_ne!(stale,fresh);
+        assert!(!state.presented(stale));assert!(!state.unlock(&1));assert!(!state.unlock(&2));
+        assert!(state.presented(fresh));assert!(state.unlock(&2));
+    }
+    #[test]
+    #[cfg(feature = "native-session")]
+    fn loss_reset_releases_each_logical_control_once(){
+        let mut gate=InputGate::default();
+        gate.key("a",1,true);gate.key("b",1,true);
+        gate.button("a",272,true);gate.button("b",272,true);
+        gate.boundary();assert!(gate.waiting());
+        assert_eq!(gate.reset_after_loss(),(vec![1],vec![272]));
+        assert_eq!(gate.reset_after_loss(),(vec![],vec![]));
+        assert!(!gate.waiting());assert!(!gate.key("a",1,false));
     }
     #[test]
     fn generation_exhaustion_cannot_wrap(){

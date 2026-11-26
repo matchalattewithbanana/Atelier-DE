@@ -24,6 +24,14 @@ impl Harness{
         let (server,client)=UnixStream::pair().unwrap();
         client.set_nonblocking(true).unwrap();
         self.display.handle().insert_client(server,Arc::new(ClientState::default())).unwrap();
+        self.wire(client)
+    }
+    fn recovery_client(&mut self)->Wire{
+        let endpoint=self.state.recovery_connection().unwrap();
+        endpoint.set_nonblocking(true).unwrap();
+        self.wire(endpoint)
+    }
+    fn wire(&mut self,client:UnixStream)->Wire{
         let mut wire=Wire{socket:client,next:2,bytes:vec![],events:vec![],closed:false,registry:None};
         let registry=wire.id();wire.words(1,1,&[registry]);wire.roundtrip(self);
         let mut globals=BTreeMap::new();
@@ -292,4 +300,40 @@ fn preexisting_buffer_cannot_become_lock_role(){
     let lock=w.lock(m);let _role=w.role(lock,root,o);
     w.error(&mut h,lock,4);
     assert!(!h.state.desktop_visible());assert!(h.state.lock_surface().is_none());
+}
+
+#[test]
+fn private_recovery_rejects_public_clients_and_stale_presentation(){
+    let mut h=Harness::new();let (mut old,m,_,_)=setup(&mut h);
+    let old_lock=old.lock(m);old.roundtrip(&mut h);
+    let stale=h.state.protected_frame().unwrap();
+    h.state.prepare_protected_recovery();
+    assert!(!h.state.desktop_visible());assert!(h.state.protected_frame().is_none());
+    assert!(h.state.lock_protocol.owner.is_none());
+    let (mut foreign,n,_,_)=setup(&mut h);
+    let rejected=foreign.lock(n);foreign.roundtrip(&mut h);assert!(foreign.saw(rejected,1));
+    let mut recovery=h.recovery_client();
+    assert!(h.state.recovery_connection().is_err());
+    let mgr=recovery.bind("ext_session_lock_manager_v1",1);
+    let compositor=recovery.bind("wl_compositor",4);
+    let output=recovery.bind("wl_output",1);
+    let lock=recovery.lock(mgr);let root=recovery.surface(compositor);let role=recovery.role(lock,root,output);
+    recovery.roundtrip(&mut h);
+    assert!(!recovery.saw(lock,1));assert!(!recovery.saw(lock,0));
+    let serial=recovery.configure(role);
+    recovery.words(role,1,&[serial]);let buffer=recovery.shm_buffer(64,48);
+    recovery.attach_commit(root,buffer);recovery.roundtrip(&mut h);
+    assert!(h.state.lock_surface().is_some());
+    h.state.sync_input_boundary(0);
+    assert!(h.state.seat.get_keyboard().unwrap().current_focus().is_none());
+    assert!(h.state.input_pointer_focus().is_none());
+    h.state.protected_frame_presented(stale);recovery.roundtrip(&mut h);
+    assert!(!recovery.saw(lock,0));
+    old.words(old_lock,2,&[]);old.error(&mut h,old_lock,1);
+    assert!(!h.state.desktop_visible());
+    h.confirm();recovery.roundtrip(&mut h);assert!(recovery.saw(lock,0));
+    h.state.sync_input_boundary(0);
+    assert!(h.state.seat.get_keyboard().unwrap().current_focus().is_some());
+    assert!(h.state.input_pointer_focus().is_some());
+    recovery.words(lock,2,&[]);recovery.roundtrip(&mut h);assert!(h.state.desktop_visible());
 }

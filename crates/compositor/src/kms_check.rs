@@ -922,6 +922,7 @@ pub fn run_native(
         let owned=slots.iter().map(|(_,fb,_)|u64::from(u32::from(*fb))).collect();
         // Input source was removed above. No client dispatch or old flip
         // completion handling in quarantine; no automatic unlock/resume.
+        state.borrow_mut().prepare_protected_recovery();
         return quarantine_protected(&card,&route,owned,session,&continuity,event_loop,&running);
     }
     // Even if the seat is currently active again, an observed pause
