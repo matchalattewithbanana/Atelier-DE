@@ -27,7 +27,7 @@ pub struct Details{
 #[derive(Debug,Clone)]
 pub enum Action{Play,Pause,Previous,Next,Seek(Track,i64)}
 
-fn clean(text:&str)->String{text.chars().filter(|c|!c.is_control()).take(240).collect()}
+fn clean(text:&str)->String{text.chars().filter(|c|!c.is_control()&&!matches!(*c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).take(240).collect()}
 fn get<T:glib::variant::FromVariant>(props:&Properties,key:&str)->Option<T>{props.get(key)?.get::<T>()}
 fn flag(props:&Properties,key:&str)->bool{get::<bool>(props,key)==Some(true)}
 fn details(identity:Identity,props:&Properties)->Details{
@@ -48,6 +48,23 @@ fn details(identity:Identity,props:&Properties)->Details{
         previous:control&&flag(props,"CanGoPrevious"),next:control&&flag(props,"CanGoNext"),
         seek:control&&flag(props,"CanSeek")&&track.is_some()&&position_us.is_some()};
     Details{identity,title,artist,album,status,track,position_us,capabilities}
+}
+/// Bind authorization and the wire request to one fresh snapshot.
+fn action_call(state:&Details,action:Action)->Result<(&'static str,Option<glib::Variant>)>{
+    let (method,args)=match action{
+            Action::Play if state.capabilities.play=>("Play",None),
+            Action::Pause if state.capabilities.pause=>("Pause",None),
+            Action::Previous if state.capabilities.previous=>("Previous",None),
+            Action::Next if state.capabilities.next=>("Next",None),
+            Action::Seek(track,position) if state.capabilities.seek=>{
+                if state.track.as_ref()!=Some(&track)||position<0||position>track.length_us{bail!("track or duration changed; seek discarded");}
+                let path=ObjectPath::try_from(track.id).context("invalid track path")?;
+                ("SetPosition",Some((path,position).to_variant()))
+            }
+            _=>bail!("player no longer supports this action"),
+    };
+
+    Ok((method,args))
 }
 pub struct Bus{connection:gio::DBusConnection}
 impl Bus{
@@ -80,18 +97,7 @@ impl Bus{
         let current=self.identity(&expected.name)?;
         if &current!=expected{bail!("player instance changed; refresh and retry");}
         let state=self.read(current)?;
-        let (method,args)=match action{
-            Action::Play if state.capabilities.play=>("Play",None),
-            Action::Pause if state.capabilities.pause=>("Pause",None),
-            Action::Previous if state.capabilities.previous=>("Previous",None),
-            Action::Next if state.capabilities.next=>("Next",None),
-            Action::Seek(track,position) if state.capabilities.seek=>{
-                if state.track.as_ref()!=Some(&track)||position<0||position>track.length_us{bail!("track or duration changed; seek discarded");}
-                let path=ObjectPath::try_from(track.id).context("invalid track path")?;
-                ("SetPosition",Some((path,position).to_variant()))
-            }
-            _=>bail!("player no longer supports this action"),
-        };
+        let (method,args)=action_call(&state,action)?;
         // Destination is the exact unique owner, never a replaceable alias.
         // SetPosition also supplies the track ID, so compliant players ignore
         // a seek if the track changes between GetAll and SetPosition.
@@ -126,5 +132,14 @@ mod tests{
         assert!(state.capabilities.seek&&state.capabilities.play&&!state.capabilities.pause);
         props.insert("CanControl".into(),false.to_variant());
         assert!(!details(identity(),&props).capabilities.seek);
+        let track=state.track.clone().unwrap();
+        let (method,args)=action_call(&state,Action::Seek(track.clone(),40_000_000)).unwrap();
+        assert_eq!(method,"SetPosition");assert_eq!(args.unwrap().type_().as_str(),"(ox)");
+        let mut stale=track.clone();stale.id="/track/old".into();
+        assert!(action_call(&state,Action::Seek(stale,40_000_000)).is_err());
+        assert!(action_call(&state,Action::Seek(track.clone(),-1)).is_err());
+        assert!(action_call(&state,Action::Seek(track.clone(),track.length_us+1)).is_err());
+        assert!(action_call(&details(identity(),&props),Action::Seek(track,0)).is_err());
+        assert!(action_call(&state,Action::Pause).is_err());
     }
 }
