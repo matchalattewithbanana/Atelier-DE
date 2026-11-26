@@ -1,4 +1,5 @@
 //! Optional layer-shell notification cards. No daemon ownership or replay.
+use crate::notification_bus::{self,Request};
 use atelier_config::{Appearance, NotificationAppearance, NotificationPosition, NotificationStyle};
 use gtk::{glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -82,15 +83,14 @@ impl Cursor {
     fn cards(&self) -> Vec<Notice> { self.visible.iter().map(|v| v.notice.clone()).collect() }
 }
 
-fn snapshot() -> Result<Popup, String> {
-    let popup: Popup = serde_json::from_str(&crate::notification_centre::call(&["popup"])?).map_err(|error| error.to_string())?;
+fn snapshot(json:&str) -> Result<Popup, String> {
+    let popup: Popup = serde_json::from_str(json).map_err(|error| error.to_string())?;
     if popup.schema != 1 || popup.instance.is_empty() || popup.cards.len() > 3 ||
         popup.eligible().iter().any(|n| n.actions.len() > 8 || n.progress.is_some_and(|p| p > 100)) {
         return Err("Invalid notification popup snapshot".into());
     }
     Ok(popup)
 }
-enum Request { Invoke(String,u32,u64,String), Dismiss(String,u32) }
 fn clipped(value: &str, length: usize) -> String { value.chars().take(length).collect() }
 fn label(text: &str, class: &str, limit: usize) -> gtk::Label {
     let label = gtk::Label::new(Some(&clipped(text, limit)));
@@ -223,28 +223,12 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     let revealer = gtk::Revealer::new(); revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
     revealer.set_child(Some(&root)); window.set_child(Some(&revealer));
     let mut applied=live.borrow().clone();apply_layout(&window,&root,&revealer,&applied,island);
-    let (send, receive) = mpsc::sync_channel(1);
-    let (requests, incoming) = mpsc::sync_channel::<Request>(1);
-    std::thread::spawn(move || {
-        let mut action_result = None;
-        loop {
-        if send.send((snapshot(), action_result.take())).is_err() { break; }
-        match incoming.recv_timeout(Duration::from_millis(500)) {
-            Ok(Request::Invoke(instance,id,revision,key)) => {
-                action_result = Some(crate::notification_centre::call(&["invoke",&instance,&id.to_string(),&revision.to_string(),&key]).map(|_| ()));
-            }
-            Ok(Request::Dismiss(instance,id)) => {
-                action_result = Some(crate::notification_centre::call(&["dismiss",&instance,&id.to_string()]).map(|_| ()));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        }
-    });
+    let (requests,receive,watch)=notification_bus::start("Popup",snapshot);
     let panel = panel.downgrade(); let mut cursor = Cursor::default();
     let mut rendered = Vec::new(); let mut rendered_instance = None; let mut rendered_queued = 0;
     glib::timeout_add_local(Duration::from_millis(100), move || {
         if panel.upgrade().is_none() { window.close(); return glib::ControlFlow::Break; }
+        let _=&watch;
         let now = Instant::now();
         let current=live.borrow();
         let layout_changed=applied.notifications!=current.notifications || applied.motion!=current.motion || applied.panel_height!=current.panel_height;
@@ -255,8 +239,10 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
         let card_limit=limit(prefs,island);
         let mut action_reply = None;
         match receive.try_recv() {
-            Ok((Ok(state), reply)) => { cursor.observe(&state,now,card_limit,Duration::from_secs(u64::from(prefs.timeout_seconds))); action_reply = reply; }
-            Ok((Err(_), _)) => cursor = Cursor::default(),
+            Ok(reply) => match reply.snapshot {
+                Ok(state)=>{cursor.observe(&state,now,card_limit,Duration::from_secs(u64::from(prefs.timeout_seconds)));action_reply=reply.action_error;}
+                Err(_)=>cursor=Cursor::default(),
+            },
             Err(mpsc::TryRecvError::Disconnected) => { window.close(); return glib::ControlFlow::Break; }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -270,7 +256,7 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
                 let expansions=if same_instance{expansion_state(&root)}else{HashMap::new()};
                 render(&root,&cards,cursor.instance.as_deref().unwrap_or(""),cursor.queued,&requests,style,&expansions);
             }
-            if matches!(action_reply, Some(Err(_))) && !cards.is_empty() {
+            if action_reply.is_some() && !cards.is_empty() {
                 root.append(&label("Action unavailable. Refreshing notification state.", "dim-label", 80));
             }
             rendered = cards; rendered_instance = cursor.instance.clone(); rendered_queued = cursor.queued;
