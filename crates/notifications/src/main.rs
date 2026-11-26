@@ -1,7 +1,7 @@
 //! Explicitly started notification service for an isolated or user-selected session.
 mod store;
 mod presets;
-mod preferences;
+use atelier_config::notification_preferences as preferences;
 use anyhow::{bail, Context, Result};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
 use store::{Details, Store};
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode, preset, summary, body] if mode == "send" => {
-            let preset=match presets::builtin(preset){Some(value)=>value,None=>preferences::Preferences::load(&preferences::path()?)?.preset(preset)?};
+            let preset=match preferences::builtin(preset){Some(value)=>value,None=>preferences::Preferences::load(&preferences::path()?)?.preset(preset)?};
             let connection=Connection::session()?;
             let proxy=Proxy::new(&connection,NAME,HISTORY_PATH,HISTORY_INTERFACE)?;
             let _:String=proxy.call("List",&())?;
