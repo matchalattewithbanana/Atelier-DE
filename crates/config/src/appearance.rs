@@ -352,6 +352,7 @@ impl Appearance{
                 if self.accent.is_empty(){"@theme_selected_fg_color".into()}else{crate::design::Color::parse(&self.accent)?.contrasting_text().hex()},
                 "@theme_bg_color".into(),"@theme_fg_color".into())
         };
+        let control_motion=self.motion.opening_duration().as_millis();
         css.push_str(&format!(" .atelier-control-window {{ background-color: {surface}; color: {fg}; }} \
             .atelier-control-card {{ background-color: {container}; color: {fg}; border-radius: 28px; padding: 16px; }} \
             .atelier-control-window .atelier-control-heading {{ font-size: 28px; font-weight: 500; }} \
@@ -361,6 +362,10 @@ impl Appearance{
             .atelier-control-window button.atelier-control-active, .atelier-control-window button.suggested-action {{ background-image: none; background-color: {primary}; color: {on_primary}; }} \
             .atelier-control-window button.atelier-control-tonal:not(.atelier-control-active) {{ background-image: none; background-color: {secondary}; color: {on_secondary}; }} \
             .atelier-control-window button.atelier-control-active, .atelier-control-window button.atelier-control-tonal {{ border-radius: 24px; }} \
+            .atelier-quick-popover > contents {{ background-color: {surface}; border-radius: 28px; padding: 0; }} \
+            .atelier-control-window .atelier-control-tabs button {{ min-height: 40px; }} \
+            .atelier-control-window button.atelier-control-switch {{ border-radius: 24px; transition: border-radius {control_motion}ms ease-out; }} \
+            .atelier-control-window button.atelier-control-switch.atelier-control-active {{ border-radius: 12px; }} \
             .atelier-control-window button.atelier-control-active:active, .atelier-control-window button.atelier-control-tonal:active {{ border-radius: 12px; }} \
             .atelier-control-window scale.atelier-expressive-slider trough {{ min-height: 16px; border-radius: 8px; background-color: {secondary}; }} \
             .atelier-control-window scale.atelier-expressive-slider highlight {{ border-radius: 8px; background-color: {primary}; }} \
@@ -487,6 +492,8 @@ mod tests{
     use super::*;
     #[test]
     fn expressive_controls_are_scoped_and_use_readable_roles(){
+        let reduced=Appearance{motion:Motion{opening_fade_ms:180,reduced_motion:true},..Appearance::default()};
+        assert!(reduced.css().unwrap().contains("transition: border-radius 0ms ease-out"));
         let mut a=Appearance::default();
         a.shell_palette=Some(crate::themes::ShellPalette{surface:"#101522".into(),elevated:"#202b40".into(),text:"#f2f5ff".into(),muted:"#bdc8db".into()});
         a.accent="#abc4ff".into();
