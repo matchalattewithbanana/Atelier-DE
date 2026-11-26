@@ -9,6 +9,7 @@ struct Fields {
     style: gtk::ComboBoxText,
     position: gtk::ComboBoxText,
     output: gtk::ComboBoxText,
+    privacy: gtk::CheckButton,
     width: gtk::SpinButton,
     cards: gtk::SpinButton,
     timeout: gtk::SpinButton,
@@ -27,6 +28,7 @@ impl Fields {
             NotificationPosition::TopCenter => "top-center", NotificationPosition::TopRight => "top-right",
         }));
         refill_outputs(&self.output,&n.output);
+        self.privacy.set_active(n.hide_when_session_unavailable);
         for (field,value) in [(&self.width,n.width),(&self.cards,n.max_cards),(&self.timeout,n.timeout_seconds),
             (&self.animation,n.animation_ms),(&self.radius,n.radius),(&self.opacity,n.opacity)] {
             field.set_value(f64::from(value));
@@ -43,6 +45,7 @@ impl Fields {
                 Some("top-right") => NotificationPosition::TopRight, _ => NotificationPosition::Automatic,
             },
             output:self.output.active_id().and_then(|id|id.strip_prefix("output:").map(str::to_owned)).unwrap_or_default(),
+            hide_when_session_unavailable:self.privacy.is_active(),
             width:self.width.value_as_int() as u32, max_cards:self.cards.value_as_int() as u32,
             timeout_seconds:self.timeout.value_as_int() as u32, animation_ms:self.animation.value_as_int() as u32,
             radius:self.radius.value_as_int() as u32, opacity:self.opacity.value_as_int() as u32,
@@ -86,6 +89,7 @@ pub fn build(parent:&gtk::Box){
         style:choice(parent,"Layout",&[("launch-default","Follow shell launch mode"),("island","Notification island"),("floating","Single floating card"),("compact","Compact stack")]),
         position:choice(parent,"Placement",&[("automatic","Automatic"),("top-left","Top left"),("top-center","Top center"),("top-right","Top right")]),
         output:choice(parent,"Notification display",&[]),
+        privacy:{let check=gtk::CheckButton::with_label("Hide popups unless this logind session reports active and unlocked");parent.append(&check);check},
         width:spin(parent,"Preferred width (logical pixels)",260.0,480.0,10.0),
         cards:spin(parent,"Maximum stacked cards",1.0,3.0,1.0),
         timeout:spin(parent,"Ordinary card timeout (seconds)",2.0,15.0,1.0),
@@ -93,7 +97,7 @@ pub fn build(parent:&gtk::Box){
         radius:spin(parent,"Card corner radius",0.0,32.0,1.0),
         opacity:spin(parent,"Background opacity (%)",85.0,100.0,1.0),
     };
-    parent.append(&description("A disconnected display falls back to the panel display and is selected again when available. Reload to refresh the display list. Animation must be off (0) or 80–400 ms. Reduced motion overrides this setting. Progress and action cards follow their own lifecycle; the timeout affects ordinary cards on their next update."));
+    parent.append(&description("Session privacy is advisory: enable only with a locker that updates logind LockedHint. Unknown or inactive sessions hide popups; this is not a security boundary. A disconnected display falls back to the panel display and is selected again when available. Reload to refresh the display list. Animation must be off (0) or 80–400 ms. Reduced motion overrides this setting. Progress and action cards follow their own lifecycle; the timeout affects ordinary cards on their next update."));
     let reload=gtk::Button::with_label("Reload saved notification appearance");
     let defaults=gtk::Button::with_label("Reset notification appearance in draft");
     let previous=gtk::Button::with_label("Load previous notification appearance");
