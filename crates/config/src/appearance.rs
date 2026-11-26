@@ -193,6 +193,48 @@ pub const CURSOR_PRESETS:&[&str]=&[
     "GoogleDot-Black","GoogleDot-White","GoogleDot-Blue","GoogleDot-Red",
 ];
 
+/// Presentation preferences only; never start a daemon or enable popups.
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum NotificationStyle { #[default] LaunchDefault, Island, Floating, Compact }
+
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum NotificationPosition { #[default] Automatic, TopLeft, TopCenter, TopRight }
+
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct NotificationAppearance {
+    pub style: NotificationStyle,
+    pub position: NotificationPosition,
+    pub width: u32,
+    pub max_cards: u32,
+    pub timeout_seconds: u32,
+    pub animation_ms: u32,
+    pub radius: u32,
+    pub opacity: u32,
+}
+impl Default for NotificationAppearance {
+    fn default()->Self{Self{style:NotificationStyle::LaunchDefault,position:NotificationPosition::Automatic,width:340,max_cards:3,timeout_seconds:5,animation_ms:160,radius:16,opacity:100}}
+}
+impl NotificationAppearance {
+    pub fn is_default(&self)->bool{*self==Self::default()}
+    pub fn validate(&self)->Result<()>{
+        for (name,value,min,max) in [("Notification width",self.width,260,480),("Notification stack",self.max_cards,1,3),("Notification timeout",self.timeout_seconds,2,15),("Notification radius",self.radius,0,32),("Notification opacity",self.opacity,85,100)]{
+            if !(min..=max).contains(&value){bail!("{name} must be {min}–{max}");}
+        }
+        if self.animation_ms!=0 && !(80..=400).contains(&self.animation_ms){bail!("notification animation must be off (0) or 80–400 ms");}
+        Ok(())
+    }
+    pub fn transition_ms(&self,motion:Motion)->u32{if motion.reduced_motion{0}else{self.animation_ms}}
+    pub fn style_for_launch(&self,island:bool)->NotificationStyle{
+        match self.style{NotificationStyle::LaunchDefault if island=>NotificationStyle::Island,NotificationStyle::LaunchDefault=>NotificationStyle::Floating,style=>style}
+    }
+    pub fn position_for_style(&self,style:NotificationStyle)->NotificationPosition{
+        match self.position{NotificationPosition::Automatic if style==NotificationStyle::Island=>NotificationPosition::TopCenter,NotificationPosition::Automatic=>NotificationPosition::TopRight,position=>position}
+    }
+}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -208,6 +250,8 @@ pub struct Appearance {
     pub show_battery:bool,
     pub show_media:bool,
     pub show_notifications:bool,
+    #[serde(skip_serializing_if="NotificationAppearance::is_default")]
+    pub notifications:NotificationAppearance,
     pub show_audio:bool,
     pub show_terminal:bool,
     pub dock_enabled:bool,
@@ -237,7 +281,7 @@ pub struct Appearance {
 }
 impl Default for Appearance{
     fn default()->Self{Self{version:1,accent:String::new(),cursor:CursorPreferences::default(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
-        show_date:true,show_battery:true,show_media:true,show_notifications:true,show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,window_rules:crate::WindowRules::default(),backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),motion:Motion::default(),shell_palette:None}}
+        show_date:true,show_battery:true,show_media:true,show_notifications:true,notifications:NotificationAppearance::default(),show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,window_rules:crate::WindowRules::default(),backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),motion:Motion::default(),shell_palette:None}}
 }
 impl Appearance{
     pub fn validate(&self)->Result<()>{
@@ -259,6 +303,7 @@ impl Appearance{
         if self.window_corner_radius>24{bail!("window corner radius must be 0–24 logical pixels");}
         self.transparency.validate()?;
         self.motion.validate()?;
+        self.notifications.validate()?;
         if self.wallpaper_blur>24{bail!("wallpaper blur must be 0–24");}
         if let Some(slideshow)=&self.wallpaper_slideshow{slideshow.validate()?;}
         if let Some(palette)=&self.shell_palette{palette.validate()?;}
@@ -288,7 +333,8 @@ impl Appearance{
                 css.push_str(&format!(" .{class} {{ background-image: none; background-color: alpha({color}, {:.2}); }}",opacity as f64/100.0));
             }
         }
-        css.push_str(&format!(" window.atelier-notification-layer {{ background: transparent; }} .atelier-notification-card {{ background: {color}; border-radius: {}px; padding: 12px; }} .atelier-notification-pill {{ background: {color}; border-radius: 24px; padding: 6px 20px; font-weight: bold; }} .atelier-notification-card button {{ border-radius: {}px; }}", self.button_radius.max(12), self.button_radius));
+        let notification_bg=format!("alpha({color}, {:.2})",self.notifications.opacity as f64/100.0);
+        css.push_str(&format!(" window.atelier-notification-layer {{ background: transparent; }} .atelier-notification-card {{ background: {notification_bg}; border-radius: {}px; padding: 12px; }} .atelier-notification-pill {{ background: {notification_bg}; border-radius: 24px; padding: 6px 20px; font-weight: bold; }} .atelier-notification-card button {{ border-radius: {}px; }} .atelier-notification-compact {{ padding: 6px 10px; }}", self.notifications.radius, self.button_radius));
         Ok(css)
     }
 }
@@ -584,5 +630,31 @@ mod cursor_tests{
         assert_eq!(decoded.cursor,appearance.cursor);
         let mut command=std::process::Command::new("test");decoded.cursor.apply_to(&mut command);
         assert!(command.get_envs().any(|(key,value)|key=="XCURSOR_THEME"&&value.is_some_and(|v|v=="GoogleDot-Blue")));
+    }
+}
+
+#[cfg(test)]
+mod notification_tests{
+    use super::*;
+    #[test]
+    fn legacy_defaults_and_local_preferences_round_trip(){
+        let old=decode(Some(b"version=1\n")).unwrap();
+        assert_eq!(old.notifications,NotificationAppearance::default());
+        let mut next=old;
+        next.notifications=NotificationAppearance{style:NotificationStyle::Compact,position:NotificationPosition::TopLeft,width:420,max_cards:2,timeout_seconds:8,animation_ms:200,radius:24,opacity:90};
+        assert_eq!(decode(Some(&encoded(&next).unwrap())).unwrap(),next);
+        assert!(next.css().unwrap().contains("border-radius: 24px"));
+        assert_eq!(next.notifications.transition_ms(Motion{opening_fade_ms:0,reduced_motion:true}),0);
+    }
+    #[test]
+    fn invalid_notification_geometry_is_rejected(){
+        let mut n=NotificationAppearance::default();n.width=1000;assert!(n.validate().is_err());
+        n=NotificationAppearance::default();n.max_cards=0;assert!(n.validate().is_err());
+        n=NotificationAppearance::default();n.opacity=10;assert!(n.validate().is_err());
+        n=NotificationAppearance::default();n.animation_ms=20;assert!(n.validate().is_err());
+        let n=NotificationAppearance::default();
+        assert_eq!(n.style_for_launch(true),NotificationStyle::Island);
+        assert_eq!(n.style_for_launch(false),NotificationStyle::Floating);
+        assert_eq!(n.position_for_style(NotificationStyle::Island),NotificationPosition::TopCenter);
     }
 }
