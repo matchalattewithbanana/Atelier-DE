@@ -46,6 +46,8 @@ pub struct Notice {
     pub urgency: u8,
     #[serde(skip)]
     owner: Option<String>,
+    #[serde(skip)]
+    owner_bound:bool,
     pub app: String,
     pub summary: String,
     pub body: String,
@@ -113,7 +115,7 @@ impl Store {
         let app=bounded(app,256);
         let rule=self.preferences.app(&app);
         let suppressed = self.suppressed(now) || !rule.popups;
-        let index = self.active.iter().position(|n| n.id == replaces && ((n.actions.is_empty() && details.actions.is_empty()) || (n.owner.is_some() && n.owner == details.owner)));
+        let index = self.active.iter().position(|n| n.id == replaces && ((!n.owner_bound && details.actions.is_empty()) || (n.owner.is_some() && n.owner == details.owner)));
         let revision = self.revision.checked_add(1).ok_or("Notification revision space exhausted")?;
         let id = if index.is_some() { replaces } else {
             if self.active.len() >= MAX_ACTIVE { return Err("Active notification capacity reached"); }
@@ -127,9 +129,19 @@ impl Store {
         };
         self.revision = revision;
         self.changed();
-        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app, summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, history_allowed:rule.history, closed_reason: None, deadline };
+        let owner_bound=!details.actions.is_empty()||index.is_some_and(|i|self.active[i].owner_bound);
+        let notice = Notice { id, revision, owner_bound, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app, summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, history_allowed:rule.history, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
+    }
+    pub fn close_revision(&mut self,instance:&str,id:u32,revision:u64)->bool{
+        if revision==0||!self.matches_instance(instance)||!self.active.iter().any(|n|n.id==id&&n.revision==revision){return false;}
+        self.close(id,2)
+    }
+    pub fn clear_reviewed(&mut self,instance:&str,entries:&[(u32,u64)])->bool{
+        if !self.matches_instance(instance)||entries.len()!=self.history.len()||
+            !self.history.iter().zip(entries).all(|(n,(id,revision))|n.id==*id&&n.revision==*revision){return false;}
+        self.clear_history();true
     }
     pub fn close(&mut self, id: u32, reason: u32) -> bool {
         let Some(index) = self.active.iter().position(|notice| notice.id == id) else { return false; };
@@ -155,7 +167,7 @@ impl Store {
         Some(owner)
     }
     pub fn close_from(&mut self, id: u32, owner: Option<&str>) -> bool {
-        if self.active.iter().any(|n| n.id == id && !n.actions.is_empty() && n.owner.as_deref() != owner) { return false; }
+        if self.active.iter().any(|n| n.id == id && n.owner_bound && n.owner.as_deref() != owner) { return false; }
         self.close(id, 3)
     }
     pub fn expire(&mut self, now: Instant) -> Vec<u32> {
@@ -229,6 +241,22 @@ mod tests {
         store.notify(replace, "app".into(), "title".into(), "body".into(), transient, timeout, now).unwrap()
     }
     #[test]
+    fn reviewed_dismiss_and_history_clear_reject_stale_content(){
+        let mut store=Store::default();let now=Instant::now();let instance=store.instance.clone();
+        let id=add(&mut store,0,false,0,now);let revision=store.active[0].revision;
+        add(&mut store,id,false,0,now);
+        assert!(!store.close_revision(&instance,id,revision));
+        let latest=store.active[0].revision;
+        assert!(!store.close_revision("other",id,latest));
+        assert!(store.close_revision(&instance,id,latest));
+        let reviewed=vec![(id,latest)];
+        let other=add(&mut store,0,false,0,now);store.close(other,2);
+        assert!(!store.clear_reviewed(&instance,&reviewed));
+        let reviewed=store.history.iter().map(|n|(n.id,n.revision)).collect::<Vec<_>>();
+        assert!(store.clear_reviewed(&instance,&reviewed));
+        assert!(store.history.is_empty());
+    }
+    #[test]
     fn replacement_expiry_and_persistent_active() {
         let mut store = Store::default(); let now = Instant::now();
         let id = add(&mut store, 0, false, 100, now);
@@ -299,6 +327,8 @@ mod tests {
         assert!(store.invoke(&instance,id,revision,"wrong",now).is_none());
         assert_eq!(store.invoke(&instance,id,revision,"view",now).as_deref(),Some(":1.2"));
         assert!(store.invoke(&instance,id,revision,"view",now).is_none());
+        assert!(!store.close_from(id,Some(":1.3")));
+        assert_ne!(add(&mut store,id,false,0,now),id);
         assert!(store.close_from(id,Some(":1.2")));
         assert!(store.history[0].actions.is_empty());
     }
