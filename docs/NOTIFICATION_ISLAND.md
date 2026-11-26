@@ -80,11 +80,17 @@ Atelier Settings → Notifications now exposes a display selector. Choose Follow
 
 Only one popup presenter is routed to the selected output: notifications and actions are not duplicated across monitors. Width and available stack height are calculated using logical monitor geometry, and tall stacks use vertical scrolling. Text and action labels wrap at word or character boundaries. These are preferred geometry bounds, not a hard guarantee against toolkit minimum sizes or compositor-specific constraints. Live output remapping, scaling, panel placement and hotplug behavior still need acceptance tests on real multi-monitor Wayland sessions.
 
+## Optional session privacy guard
+
+The Notifications appearance page offers **Hide popups unless this logind session reports active and unlocked**. It is off by default to preserve compatibility with environments that do not report lock hints. When enabled, the shell probes the system bus for its own process's session using GetSessionByPID and reads Active and LockedHint. It never guesses another session or modifies global DND. Unknown, inactive, locked, malformed or stale (two-second) observations suppress this presenter's popups. Calls run outside GTK; the probe waits about 500 ms between samples. On suppression the presenter hides immediately, discards visible content and rejects snapshot requests started before resume. The first fresh snapshot after resume establishes a new no-replay watermark.
+
+This is an advisory, popup-only measure. Lockers must reliably update logind LockedHint; a missing integration can report false while actually locked. Polling has a detection delay, and a shell launched outside a logind session may suppress all popups. It does not protect inbox content, session-bus access, notification history or compositor rendering. A real security boundary requires the compositor to exclude ordinary shell surfaces while locked. Native lock activation remains separate. Do not rely on this setting for secrets.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add lock-aware suppression and validate output placement; measure the direct transport's real-world latency and idle resource use.
+- Validate the advisory guard and output placement; integrate compositor-enforced lock isolation separately; measure the direct transport's real-world latency and idle resource use.
 - Consider a persistent script-friendly client for safe action selection only if needed; validate command tracking in actual use. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Improve graphical editor ergonomics and preview; validate the notification centre on real displays. Keep the interface compositor-independent wherever layer-shell is supported.
 
-No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
+No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; the advisory popup guard is not a security boundary. CI must verify the changes before merge.
