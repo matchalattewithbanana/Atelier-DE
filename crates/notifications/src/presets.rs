@@ -1,12 +1,28 @@
-//! Built-in script presets; no commands, network access or executable hooks.
+//! Built-in and configurable script presets; never execute hooks.
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 
+#[derive(Clone,Debug,PartialEq,Eq,Deserialize)]
+#[serde(default,deny_unknown_fields)]
 pub struct Preset {
-    pub icon: &'static str,
+    pub icon: String,
     pub urgency: u8,
     pub timeout_ms: i32,
 }
-pub fn resolve(name:&str)->Result<Preset>{
+impl Default for Preset{
+    fn default()->Self{Self{icon:"dialog-information-symbolic".into(),urgency:1,timeout_ms:5000}}
+}
+impl Preset{
+    pub fn validate(&self)->Result<()>{
+        if self.icon.is_empty()||self.icon.len()>128||!self.icon.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_')){
+            bail!("preset icon must be a simple theme icon name");
+        }
+        if self.urgency>2{bail!("preset urgency must be 0, 1 or 2");}
+        if self.timeout_ms!=0 && !(1000..=60000).contains(&self.timeout_ms){bail!("preset timeout must be 0 (persistent) or 1000–60000 ms");}
+        Ok(())
+    }
+}
+pub fn builtin(name:&str)->Option<Preset>{
     let (icon,urgency,timeout_ms)=match name{
         "info"=>("dialog-information-symbolic",1,5000),
         "success"=>("emblem-ok-symbolic",1,5000),
@@ -14,9 +30,9 @@ pub fn resolve(name:&str)->Result<Preset>{
         "error"=>("dialog-error-symbolic",2,0),
         "download"=>("folder-download-symbolic",1,5000),
         "update"=>("system-software-update-symbolic",1,5000),
-        _=>bail!("unknown preset: choose info, success, warning, error, download or update"),
+        _=>return None,
     };
-    Ok(Preset{icon,urgency,timeout_ms})
+    Some(Preset{icon:icon.into(),urgency,timeout_ms})
 }
 pub fn parse_duration(value:&str)->Result<u32>{
     if value=="off"{return Ok(0);}
@@ -42,8 +58,8 @@ mod tests{
     }
     #[test]
     fn presets_are_fixed_and_do_not_execute(){
-        assert_eq!(resolve("success").unwrap().icon,"emblem-ok-symbolic");
-        assert_eq!(resolve("error").unwrap().urgency,2);
-        assert!(resolve("$(id)").is_err());
+        assert_eq!(builtin("success").unwrap().icon,"emblem-ok-symbolic");
+        assert_eq!(builtin("error").unwrap().urgency,2);
+        assert!(builtin("$(id)").is_none());
     }
 }
