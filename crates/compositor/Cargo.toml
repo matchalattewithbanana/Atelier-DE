@@ -17,7 +17,7 @@ native-session = ["native-kms", "native-input", "dep:xcursor"]
 
 [dependencies]
 xcursor = { version = "0.3.10", optional = true }
-rustix = { version = "1", features = ["fs", "event", "net"], optional = true }
+rustix = { version = "1", features = ["fs", "event", "net", "process"], optional = true }
 atelier-config.workspace = true
 anyhow.workspace = true
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_winit", "desktop", "wayland_frontend"] }
