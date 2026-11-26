@@ -20,11 +20,25 @@ Use a replacement ID only within the same daemon lifetime. Legacy non-action not
 
 Run `atelier-shell --panel --notification-island` for the centred, three-card layer-shell stack, or `atelier-shell --panel --notification-popups` for a single floating card. Both remain opt-in and mutually exclusive; neither starts a notification daemon. Cards display plain text, expandable details, progress and bounded action buttons. The revision watermark prevents startup replay, and DND clears the visible stack. Incomplete progress and active actions can remain visible while eligible; other cards use a five-second local lifetime. The existing shell palette and button radius supply card styling. The slide-in transition respects reduced motion. The presentation can be customized live from Atelier Settings → Notifications (`atelier-settings --page notifications`); saving uses the existing appearance transaction and previous-version backup. Layouts are follow-launch, island, floating and compact. Placement is automatic or top left/center/right. Width (260–480 logical pixels), stacked cards (1–3), ordinary timeout (2–15 seconds), slide-in duration (off or 80–400 ms), corner radius (0–32) and background opacity (85–100%) are validated. The shell reuses its appearance watcher; settings do not enable an otherwise disabled presenter. Progress-only updates with stable card order and no actions patch the progress widget in place, while replacements requiring a rebuild preserve expansion state for the same daemon instance. The timeout applies to subsequent card updates, not the original daemon expiry. Geometry is a preferred size rather than a hard maximum on narrow displays. Graphical behavior still requires CI and desktop testing.
 
+## Pause and built-in presets
+
+The inbox offers timed pauses of 15 minutes, 30 minutes, 1 hour, 2 hours and 8 hours, plus an end-pause button. The CLI supports 1 second through 24 hours. A pause expires automatically against a monotonic clock. Manual DND is independent; ending a pause cannot disable manual DND. Existing popups disappear and do not replay. Notifications published during suppression remain in the active inbox or bounded history, marked missed; transient notices still do not enter history. The missed-only view filters both active and closed notices. State is in memory and resets on daemon restart.
+
+```sh
+instance=$(atelier-notifications list | jq -r .instance)
+atelier-notifications pause "$instance" 30m
+atelier-notifications pause "$instance" off
+atelier-notifications send success "Download complete" "Ready to use"
+atelier-notifications send error "Update failed" "Check the package manager"
+```
+
+Built-in presets: info, success, warning, error, download and update. They supply theme icon names, urgency and an expiry hint. Error cards use critical urgency and remain active until dismissed. Only simple theme icon names are rendered, not notification-supplied file paths. Custom user presets and application-specific preferences are future work. Critical notifications obey DND and pause; neither mode is a lock-screen privacy boundary.
+
 ## Next phases
 
 - Refine transitions and responsive geometry; verify live placement changes, accessibility and visual behavior on actual desktops.
-- Add explicit pause, missed-card handling, lock-aware suppression and output placement.
-- Add a persistent script-friendly client for command tracking, safe action selection and presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
+- Add lock-aware suppression and multi-output placement.
+- Add a persistent script-friendly client for command tracking, safe action selection and user-defined presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Expose layout, position, animation and color options in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
