@@ -9,12 +9,15 @@ const MAX_POPUPS: usize = 3;
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Action { pub key: String, pub label: String }
 
-#[derive(Default)]
 pub struct Details {
     pub actions: Vec<Action>,
     pub progress: Option<u8>,
     pub icon: String,
+    pub urgency: u8,
     pub owner: Option<String>,
+}
+impl Default for Details {
+    fn default()->Self{Self{actions:vec![],progress:None,icon:String::new(),urgency:1,owner:None}}
 }
 impl Details {
     pub fn parse(actions: Vec<String>, progress: Option<i32>, icon: String, owner: Option<String>) -> Self {
@@ -27,7 +30,7 @@ impl Details {
                 if !label.trim().is_empty() { valid.push(Action { key: key.clone(), label }); }
             }
         }
-        Self { actions: valid, progress: progress.and_then(|v| u8::try_from(v).ok()).filter(|v| *v <= 100), icon: bounded(icon, 256), owner }
+        Self { actions: valid, progress: progress.and_then(|v| u8::try_from(v).ok()).filter(|v| *v <= 100), icon: bounded(icon, 256), urgency:1, owner }
     }
 }
 
@@ -39,6 +42,7 @@ pub struct Notice {
     pub actions: Vec<Action>,
     pub progress: Option<u8>,
     pub icon: String,
+    pub urgency: u8,
     #[serde(skip)]
     owner: Option<String>,
     pub app: String,
@@ -115,7 +119,7 @@ impl Store {
             _ => Some(now + Duration::from_secs(5)),
         };
         self.revision = revision;
-        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, owner: details.owner, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, closed_reason: None, deadline };
+        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
     }
