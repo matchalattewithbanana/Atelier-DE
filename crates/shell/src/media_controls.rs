@@ -10,23 +10,29 @@ pub fn show(app: &gtk::Application) {
     if let Some(window) = app.windows().into_iter().find(|window| window.widget_name() == "atelier-media") {
         window.present(); return;
     }
-    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Media").default_width(440).default_height(300).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("Atelier · Media").default_width(440).default_height(360).build();
     window.set_widget_name("atelier-media");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.add_css_class("atelier-control-window");
     content.set_margin_top(24); content.set_margin_bottom(24); content.set_margin_start(24); content.set_margin_end(24);
     let title = gtk::Label::new(Some("Now playing"));
-    title.set_xalign(0.0); title.add_css_class("title-1"); content.append(&title);
+    title.set_xalign(0.0); title.add_css_class("atelier-control-heading"); content.append(&title);
     let choice = gtk::ComboBoxText::new(); content.append(&choice);
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 8); card.add_css_class("atelier-control-card"); content.append(&card);
     let track = gtk::Label::new(Some("Looking for media players…"));
-    track.set_xalign(0.0); track.set_wrap(true); track.add_css_class("title-2"); content.append(&track);
-    let artist = gtk::Label::new(None); artist.set_xalign(0.0); artist.set_wrap(true); content.append(&artist);
-    let playback = gtk::Label::new(None); playback.set_xalign(0.0); playback.add_css_class("dim-label"); content.append(&playback);
+    track.set_xalign(0.0); track.set_wrap(true); track.add_css_class("atelier-control-title"); card.append(&track);
+    let artist = gtk::Label::new(None); artist.set_xalign(0.0); artist.set_wrap(true); card.append(&artist);
+    let playback = gtk::Label::new(None); playback.set_xalign(0.0); playback.add_css_class("dim-label"); card.append(&playback);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let previous = gtk::Button::with_label("Previous");
-    let toggle = gtk::Button::with_label("Play / pause");
+    let toggle = gtk::Button::with_label("Play");
+    toggle.add_css_class("atelier-control-active");
+    previous.add_css_class("atelier-control-tonal");
     let next = gtk::Button::with_label("Next");
-    for button in [&previous, &toggle, &next] { button.set_hexpand(true); button.set_sensitive(false); controls.append(button); }
-    content.append(&controls);
+    next.add_css_class("atelier-control-tonal");
+    for button in [&previous, &toggle, &next] { button.set_size_request(-1,48); button.set_sensitive(false); controls.append(button); }
+    toggle.set_hexpand(true);
+    card.append(&controls);
     let status = gtk::Label::new(None); status.set_xalign(0.0); status.set_wrap(true); status.add_css_class("dim-label"); content.append(&status);
 
     let (requests, receiver) = mpsc::sync_channel::<Request>(1);
@@ -56,6 +62,7 @@ pub fn show(app: &gtk::Application) {
             let selected = selected.as_ref().and_then(|id| players.iter().find(|player| player.id == id.as_str()));
             let available = selected.is_some_and(|player| player.status.is_some() && !players.iter().any(|other| other.id.starts_with(&format!("{}.", player.id))));
             for button in [&previous, &toggle, &next] { button.set_sensitive(available); }
+            toggle.set_label(if selected.is_some_and(|p|p.status.as_deref()==Some("Playing")){"Pause"}else{"Play"});
             track.set_text(selected.and_then(|p| p.title.as_deref()).unwrap_or("No track information"));
             artist.set_text(selected.and_then(|p| p.artist.as_deref()).unwrap_or(""));
             playback.set_text(selected.and_then(|p| p.status.as_deref()).unwrap_or("Playback status unavailable"));

@@ -69,8 +69,10 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     let app_ref = app.downgrade();
     notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::notification_centre::show(&app); } });
     bar.append(&notifications); notifications.set_visible(appearance.show_notifications);
-    let audio = gtk::Button::with_label("Audio");
-    audio.connect_clicked(move |_| { let mut command = component("atelier-settings"); command.args(["--page", "audio"]); spawn(command); });
+    let audio = gtk::Button::with_label("Quick controls");
+    audio.set_tooltip_text(Some("Wi-Fi, Bluetooth, audio and media"));
+    let app_ref = app.downgrade();
+    audio.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { crate::quick_controls::show(&app); } });
     bar.append(&audio); audio.set_visible(appearance.show_audio);
     let terminal = gtk::Button::with_label("Terminal");
     let terminal_path = config.terminal.clone();

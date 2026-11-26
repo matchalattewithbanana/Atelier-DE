@@ -4,6 +4,7 @@ use atelier_config::{appearance_path, component, config_path, Appearance, Config
 use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 mod media_controls;
+mod quick_controls;
 mod notification_centre;
 mod notification_bus;
 #[cfg(feature = "layer-panel")]
@@ -144,6 +145,10 @@ fn build_shell(app: &gtk::Application) {
     let app_ref = app.downgrade();
     notifications.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { notification_centre::show(&app); } });
     shortcuts.append(&notifications); content.append(&shortcuts);
+    let quick = gtk::Button::with_label("Quick controls");
+    let app_ref = app.downgrade();
+    quick.connect_clicked(move |_| { if let Some(app) = app_ref.upgrade() { quick_controls::show(&app); } });
+    content.append(&quick);
 
     let search = gtk::Entry::new(); search.set_placeholder_text(Some("Search installed applications")); content.append(&search);
     let list = gtk::ListBox::new(); list.set_selection_mode(gtk::SelectionMode::None); list.add_css_class("boxed-list");
