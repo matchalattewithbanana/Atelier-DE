@@ -55,12 +55,15 @@ impl Strip{
     pub fn new(backend:Rc<WorkspaceBackend>)->Self{
         let root=gtk::Box::new(gtk::Orientation::Vertical,0);
         root.add_css_class("atelier-workspaces");root.set_valign(gtk::Align::Center);
-        let row=gtk::Box::new(gtk::Orientation::Horizontal,0);row.set_homogeneous(true);
+        let row=gtk::Box::new(gtk::Orientation::Horizontal,0);row.set_homogeneous(true);row.set_direction(gtk::TextDirection::Ltr);
         let mut buttons=Vec::new();
         for index in 1..=backend.count() as u8{
             let button=gtk::Button::with_label(&index.to_string());
             button.add_css_class("flat");button.add_css_class("atelier-workspace-button");
             button.set_sensitive(false);
+            let description=format!("Workspace {index} · Unavailable");
+            button.set_tooltip_text(Some(&description));
+            button.update_property(&[gtk::accessible::Property::Label(&description)]);
             let target=backend.clone();button.connect_clicked(move |_|target.focus(index));
             row.append(&button);buttons.push(button);
         }
@@ -96,13 +99,14 @@ impl Strip{
             self.marks.borrow_mut().update(snapshot,snap);
             self.area.queue_draw();
         }
-        for (index,button) in self.buttons.iter().enumerate(){
+        if changed{for (index,button) in self.buttons.iter().enumerate(){
             let active=snapshot.is_some_and(|s|s.active[index]);
             button.set_sensitive(snapshot.is_some());
             if active{button.add_css_class("suggested-action");}else{button.remove_css_class("suggested-action");}
             let description=format!("Workspace {}{}",index+1,if snapshot.is_none(){" · Unavailable"}else if active{" · Active"}else{""});
             button.set_tooltip_text(Some(&description));
             button.update_property(&[gtk::accessible::Property::Label(&description)]);
+        }
         }
         if !self.marks.borrow().moving()||self.running.replace(true){return;}
         let (marks,running,local)=(self.marks.clone(),self.running.clone(),self.local_reduced.clone());
