@@ -17,3 +17,6 @@ serde_json = "1"
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"], optional = true }
 libc = "0.2"
+
+# Native HCT/CAM16 implementation; keep the palette algorithm version explicit.
+material-color-utilities-rust = "=0.1.0"
