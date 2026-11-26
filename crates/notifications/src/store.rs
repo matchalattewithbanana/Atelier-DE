@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::preferences::Preferences;
+use atelier_config::notification_preferences::Preferences;
 use std::{collections::VecDeque, time::{Duration, Instant}};
 
 const MAX_ACTIVE: usize = 128;
