@@ -74,6 +74,32 @@ impl Wire{
         let mut payload=vec![];for &w in words{push(&mut payload,w);}
         self.send(object,opcode,&payload);
     }
+    /// SCM_RIGHTS carries the pool fd; Wayland's wire body contains only
+    /// the new object ID and the size, not an integer fd placeholder.
+    fn shm_buffer(&mut self,width:u32,height:u32)->u32{
+        use std::{io::IoSlice,mem::MaybeUninit,os::fd::AsFd};
+        use rustix::net::{sendmsg,SendAncillaryBuffer,SendAncillaryMessage,SendFlags};
+        let shm=self.bind("wl_shm",1);
+        let pool=self.id();let buffer=self.id();
+        let stride=width.checked_mul(4).unwrap();
+        let size=stride.checked_mul(height).unwrap();
+        let mut file=tempfile::tempfile().unwrap();
+        file.write_all(&vec![0xff;size as usize]).unwrap();
+        let mut message=Vec::new();for word in [shm,16u32<<16,pool,size]{push(&mut message,word);}
+        let mut storage=[MaybeUninit::uninit();rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary=SendAncillaryBuffer::new(&mut storage);
+        let fds=[file.as_fd()];
+        assert!(ancillary.push(SendAncillaryMessage::ScmRights(&fds)));
+        let n=sendmsg(&self.socket,&[IoSlice::new(&message)],&mut ancillary,SendFlags::empty()).unwrap();
+        assert!(n>0);self.socket.write_all(&message[n..]).unwrap();
+        self.words(pool,0,&[buffer,0,width,height,stride,0]); // ARGB8888
+        self.words(pool,1,&[]);
+        buffer
+    }
+    fn attach_commit(&mut self,root:u32,buffer:u32){
+        self.words(root,1,&[buffer,0,0]);
+        self.words(root,6,&[]);
+    }
     fn bind(&mut self,interface:&str,version:u32)->u32{
         let id=self.id();let (registry,globals)=self.registry.as_ref().unwrap();
         let name=globals[interface].0;let registry=*registry;
@@ -208,4 +234,62 @@ fn premature_unlock_and_owner_disconnect_fail_closed(){
         let (mut other,m,_,_)=setup(&mut h);let rejected=other.lock(m);other.roundtrip(&mut h);
         assert!(other.saw(rejected,1));assert!(!h.state.desktop_visible());
     }
+}
+
+#[test]
+fn actual_shm_buffer_maps_lock_root_and_excludes_other_focus(){
+    let mut h=Harness::new();let (mut w,m,c,o)=setup(&mut h);
+    let lock=w.lock(m);let root=w.surface(c);let role=w.role(lock,root,o);
+    w.roundtrip(&mut h);
+    let serial=w.configure(role);w.words(role,1,&[serial]);
+    let buffer=w.shm_buffer(64,48);
+    w.attach_commit(root,buffer);w.roundtrip(&mut h);
+    let accepted=h.state.lock_surface().expect("valid shared memory root").clone();
+    assert_eq!(accepted.id().protocol_id(),root);
+    h.state.sync_input_boundary(0);
+    assert_eq!(h.state.seat.get_keyboard().unwrap().current_focus(),Some(accepted.clone()));
+    assert_eq!(h.state.input_pointer_focus().map(|(s,_)|s),Some(accepted));
+    assert!(!h.state.desktop_visible());assert!(!w.saw(lock,0));
+    h.confirm();w.roundtrip(&mut h);assert!(w.saw(lock,0));
+    w.words(role,0,&[]);w.roundtrip(&mut h);
+    h.state.sync_input_boundary(0);
+    assert!(h.state.lock_surface().is_none());
+    assert!(h.state.seat.get_keyboard().unwrap().current_focus().is_none());
+    assert!(h.state.seat.get_pointer().unwrap().current_focus().is_none());
+    assert!(!h.state.desktop_visible());
+    let next=w.surface(c);let role2=w.role(lock,next,o);w.roundtrip(&mut h);
+    w.words(role2,1,&[w.configure(role2)]);
+    w.attach_commit(next,buffer);w.roundtrip(&mut h);
+    assert_eq!(h.state.lock_surface().unwrap().id().protocol_id(),next);
+    w.words(lock,2,&[]);w.roundtrip(&mut h);assert!(h.state.desktop_visible());
+}
+#[test]
+fn wrong_dimensions_and_null_buffers_fail_closed(){
+    for wrong_dimensions in [true,false]{
+        let mut h=Harness::new();let (mut w,m,c,o)=setup(&mut h);
+        let lock=w.lock(m);let root=w.surface(c);let role=w.role(lock,root,o);
+        w.roundtrip(&mut h);w.words(role,1,&[w.configure(role)]);
+        if wrong_dimensions{
+            let buffer=w.shm_buffer(63,48);
+            w.attach_commit(root,buffer);w.error(&mut h,role,2);
+        }else{
+            let buffer=w.shm_buffer(64,48);
+            w.attach_commit(root,buffer);w.roundtrip(&mut h);
+            assert!(h.state.lock_surface().is_some());
+            h.confirm();w.roundtrip(&mut h);
+            w.attach_commit(root,0);w.error(&mut h,role,1);
+        }
+        h.state.sync_input_boundary(0);
+        assert!(!h.state.desktop_visible());assert!(h.state.lock_surface().is_none());
+        assert!(h.state.seat.get_keyboard().unwrap().current_focus().is_none());
+    }
+}
+#[test]
+fn preexisting_buffer_cannot_become_lock_role(){
+    let mut h=Harness::new();let (mut w,m,c,o)=setup(&mut h);
+    let root=w.surface(c);let buffer=w.shm_buffer(64,48);
+    w.attach_commit(root,buffer);w.roundtrip(&mut h);
+    let lock=w.lock(m);let _role=w.role(lock,root,o);
+    w.error(&mut h,lock,4);
+    assert!(!h.state.desktop_visible());assert!(h.state.lock_surface().is_none());
 }
