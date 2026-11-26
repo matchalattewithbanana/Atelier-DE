@@ -297,6 +297,20 @@ mod tests {
         assert!(c.cards().is_empty());
     }
     #[test]
+    fn configurable_timeout_and_stack_limits(){
+        let now=Instant::now();let mut c=Cursor::default();
+        let lifetime=Duration::from_secs(2);
+        c.observe(&state("a",1,false,vec![]),now,2,lifetime);
+        c.observe(&state("a",4,false,vec![notice(4,4,None),notice(3,3,None),notice(2,2,None)]),now,2,lifetime);
+        assert_eq!(c.cards().len(),2);assert_eq!(c.queued,1);
+        c.expire(now+Duration::from_secs(1));assert_eq!(c.cards().len(),2);
+        c.expire(now+lifetime);assert!(c.cards().is_empty());
+        let mut prefs=NotificationAppearance::default();
+        assert_eq!(limit(prefs,false),1);assert_eq!(limit(prefs,true),3);
+        prefs.style=NotificationStyle::Compact;prefs.max_cards=2;
+        assert_eq!(limit(prefs,false),2);
+    }
+    #[test]
     fn stack_and_dnd_never_replay_old_cards() {
         let now=Instant::now();let mut c=Cursor::default();
         c.observe(&state("a",1,false,vec![]),now,3,LIFETIME);
