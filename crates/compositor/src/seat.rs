@@ -3,10 +3,27 @@
 
 use anyhow::{bail, Result};
 use smithay::{
-    backend::{session::{libseat::LibSeatSession, Session}, udev::UdevBackend},
+    backend::{session::{libseat::LibSeatSession, Event as SessionEvent, Session}, udev::UdevBackend},
     reexports::calloop::EventLoop,
 };
-use std::{io::IsTerminal, time::{Duration, Instant}};
+use std::{cell::Cell,io::IsTerminal,rc::Rc,time::{Duration, Instant}};
+
+/// Once a running native session loses the seat, its original DRM/GBM
+/// ownership assumptions cannot be re-established by an Enable event alone.
+/// This latch deliberately survives a Pause + Activate in one dispatch.
+#[derive(Default)]
+pub(crate) struct SeatContinuity{interrupted:Cell<bool>}
+impl SeatContinuity{
+    fn observe(&self,event:&SessionEvent){
+        if matches!(event,SessionEvent::PauseSession){self.interrupted.set(true);}
+    }
+    pub(crate) fn usable(&self,active:bool)->bool{active&&!self.interrupted.get()}
+    #[cfg(feature = "native-session")]
+    pub(crate) fn ensure(&self,active:bool)->Result<()>{
+        if !self.usable(active){bail!("native seat ownership interrupted; recovery requires a verified new route");}
+        Ok(())
+    }
+}
 
 fn tty_allowed(tty: bool, session: Option<&str>, graphical: bool) -> bool {
     tty && session == Some("tty") && !graphical
@@ -40,7 +57,10 @@ pub fn check(kind: Check) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("open libseat session: {error}"))?;
     let mut event_loop = EventLoop::<()>::try_new()
         .map_err(|error| anyhow::anyhow!("create session event loop: {error}"))?;
-    event_loop.handle().insert_source(notifier, |event, _, _| {
+    let continuity=Rc::new(SeatContinuity::default());
+    let observed=Rc::clone(&continuity);
+    event_loop.handle().insert_source(notifier, move |event, _, _| {
+        observed.observe(&event);
         tracing::debug!(?event, "seat lifecycle event");
     }).map_err(|error| anyhow::anyhow!("register seat notifier: {error}"))?;
 
@@ -71,7 +91,7 @@ pub fn check(kind: Check) -> Result<()> {
         #[cfg(feature = "native-input")]
         Check::Input => unreachable!("input handled before DRM acquisition"),
         #[cfg(feature = "native-session")]
-        Check::Native { socket, config } => crate::kms_check::run_native(&fd, &session, &mut event_loop, &socket, &config),
+        Check::Native { socket, config } => crate::kms_check::run_native(&fd, &session, &mut event_loop, &socket, &config, Rc::clone(&continuity)),
         #[cfg(feature = "native-gbm")]
         Check::Gbm => crate::gbm_check::check(&fd, false),
         #[cfg(feature = "native-gbm")]
@@ -111,6 +131,17 @@ pub fn check(kind: Check) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_pause_is_not_erased_by_reactivation(){
+        let continuity=SeatContinuity::default();
+        assert!(continuity.usable(true));assert!(!continuity.usable(false));
+        continuity.observe(&SessionEvent::ActivateSession);
+        assert!(continuity.usable(true));
+        continuity.observe(&SessionEvent::PauseSession);
+        assert!(!continuity.usable(false));
+        continuity.observe(&SessionEvent::ActivateSession);
+        assert!(!continuity.usable(true));
+    }
     #[test]
     fn rejects_non_text_sessions() {
         assert!(tty_allowed(true, Some("tty"), false));
