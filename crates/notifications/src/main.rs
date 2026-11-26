@@ -1,6 +1,7 @@
 //! Explicitly started notification service for an isolated or user-selected session.
 mod store;
 mod presets;
+mod preferences;
 use anyhow::{bail, Context, Result};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
 use store::{Details, Store};
@@ -104,7 +105,9 @@ impl History {
 }
 
 fn daemon() -> Result<()> {
-    let state = Arc::new(Mutex::new(Store::default()));
+    let mut monitor=preferences::Monitor::start(preferences::path()?).context("load notification preferences")?;
+    let mut store=Store::default();store.apply_preferences(monitor.initial());
+    let state = Arc::new(Mutex::new(store));
     let connection = Builder::session()?
         .serve_at(PATH, Notifications { state: Arc::clone(&state) })?
         .serve_at(HISTORY_PATH, History { state: Arc::clone(&state) })?
@@ -113,8 +116,17 @@ fn daemon() -> Result<()> {
         .allow_name_replacements(false)
         .build().context("acquire notification name without replacing existing daemon")?;
     println!("Atelier notification inbox ready (presentation is optional)");
+    let mut next_reload=Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(200));
+        if Instant::now()>=next_reload{
+            next_reload=Instant::now()+Duration::from_secs(1);
+            match monitor.poll(){
+                Ok(Some(next))=>state.lock().map_err(|_|anyhow::anyhow!("notification state unavailable"))?.apply_preferences(next),
+                Ok(None)=>{},
+                Err(error)=>eprintln!("Retaining last valid notification preferences: {error:#}"),
+            }
+        }
         let expired = state.lock().map_err(|_| anyhow::anyhow!("notification state unavailable"))?.expire(Instant::now());
         for id in expired {
             connection.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(id, 1u32))?;
@@ -149,13 +161,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode, preset, summary, body] if mode == "send" => {
-            let preset=presets::resolve(preset)?;
+            let preset=match presets::builtin(preset){Some(value)=>value,None=>preferences::Preferences::load(&preferences::path()?)?.preset(preset)?};
             let connection=Connection::session()?;
             let proxy=Proxy::new(&connection,NAME,HISTORY_PATH,HISTORY_INTERFACE)?;
             let _:String=proxy.call("List",&())?;
             let target=Proxy::new(&connection,NAME,PATH,NAME)?;
             let hints=HashMap::from([("urgency",OwnedValue::from(preset.urgency))]);
-            let id:u32=target.call("Notify",&("Atelier CLI",0u32,preset.icon,summary.as_str(),body.as_str(),Vec::<String>::new(),hints,preset.timeout_ms))?;
+            let id:u32=target.call("Notify",&("Atelier CLI",0u32,preset.icon.as_str(),summary.as_str(),body.as_str(),Vec::<String>::new(),hints,preset.timeout_ms))?;
             println!("{id}");
             Ok(())
         }
