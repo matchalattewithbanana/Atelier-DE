@@ -9,6 +9,7 @@ pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
 pub mod access_theme;
+pub mod design;
 #[cfg(feature = "wallpaper")]
 pub mod access_bundle;
 pub mod cursor_images;
