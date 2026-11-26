@@ -36,17 +36,8 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
     let backend_label = gtk::Label::new(Some(backend.label()));
     backend_label.add_css_class("dim-label");
     bar.append(&backend_label);
-    let mut workspaces = Vec::new();
-    for index in 1..=backend.count() as u8 {
-        let button = gtk::Button::with_label(&index.to_string());
-        button.set_tooltip_text(Some(&format!("Workspace {index}")));
-        button.add_css_class("flat");
-        button.set_sensitive(false);
-        let target = Rc::clone(&backend);
-        button.connect_clicked(move |_| target.focus(index));
-        bar.append(&button);
-        workspaces.push(button);
-    }
+    let workspaces=crate::workspace_strip::Strip::new(backend.clone());
+    bar.append(&workspaces.root);
     if backend.is_external() && installed_helper("atelier").is_some() {
         let rices = gtk::Button::with_label("Rices");
         rices.set_tooltip_text(Some("Browse installed and available Atelier rice products"));
@@ -103,11 +94,7 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
             if let Ok(text) = now.format(if current.show_date { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
         }
         let snapshot = backend.snapshot();
-        for (index, button) in workspaces.iter().enumerate() {
-            button.set_sensitive(snapshot.is_some());
-            if snapshot.as_ref().is_some_and(|state| state.active[index]) { button.add_css_class("suggested-action"); }
-            else { button.remove_css_class("suggested-action"); }
-        }
+        workspaces.update(snapshot.as_ref(),current.motion.reduced_motion);
     };
     tick();
     let weak = window.downgrade();
