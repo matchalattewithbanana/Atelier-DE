@@ -1,5 +1,6 @@
 //! Explicitly started notification service for an isolated or user-selected session.
 mod store;
+mod presets;
 use anyhow::{bail, Context, Result};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
 use store::{Details, Store};
@@ -32,7 +33,8 @@ impl Notifications {
         let transient = hints.get("transient").and_then(|value| bool::try_from(value).ok()).unwrap_or(false);
         let progress = hints.get("value").and_then(|value| i32::try_from(value).ok());
         let owner = header.sender().map(|name| name.as_str().to_owned());
-        let details = Details::parse(actions, progress, app_icon, owner);
+        let mut details = Details::parse(actions, progress, app_icon, owner);
+        details.urgency=hints.get("urgency").and_then(|v|u8::try_from(v).ok()).filter(|v|*v<=2).unwrap_or(1);
         lock(&self.state)?.notify_with(replaces_id, app_name, summary, body, transient, expire_timeout, Instant::now(), details)
             .map_err(|error| fdo::Error::LimitsExceeded(error.into()))
     }
@@ -64,6 +66,11 @@ impl History {
         let mut state = lock(&self.state)?;
         if !state.matches_instance(&instance) { return Err(fdo::Error::Failed("Notification daemon changed".into())); }
         state.set_dnd(enabled); Ok(())
+    }
+    fn pause(&self, instance: String, seconds: u32) -> fdo::Result<()> {
+        let mut state=lock(&self.state)?;
+        if !state.matches_instance(&instance) {return Err(fdo::Error::Failed("Notification daemon changed".into()));}
+        state.pause(seconds,Instant::now()).map_err(|error|fdo::Error::InvalidArgs(error.into()))
     }
     async fn dismiss(&self, instance: String, id: u32, #[zbus(connection)] connection: &zbus::Connection) -> fdo::Result<()> {
         {
@@ -105,7 +112,7 @@ fn daemon() -> Result<()> {
         .replace_existing_names(false)
         .allow_name_replacements(false)
         .build().context("acquire notification name without replacing existing daemon")?;
-    println!("Atelier notification inbox ready (no graphical popups yet)");
+    println!("Atelier notification inbox ready (presentation is optional)");
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let expired = state.lock().map_err(|_| anyhow::anyhow!("notification state unavailable"))?.expire(Instant::now());
@@ -132,6 +139,24 @@ fn main() -> Result<()> {
             let connection = Connection::session()?;
             let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
             let _: () = proxy.call("SetDnd", &(instance.as_str(), enabled))?;
+            Ok(())
+        }
+        [mode, instance, duration] if mode == "pause" => {
+            let seconds=presets::parse_duration(duration)?;
+            let connection=Connection::session()?;
+            let proxy=Proxy::new(&connection,NAME,HISTORY_PATH,HISTORY_INTERFACE)?;
+            let _:()=proxy.call("Pause",&(instance.as_str(),seconds))?;
+            Ok(())
+        }
+        [mode, preset, summary, body] if mode == "send" => {
+            let preset=presets::resolve(preset)?;
+            let connection=Connection::session()?;
+            let proxy=Proxy::new(&connection,NAME,HISTORY_PATH,HISTORY_INTERFACE)?;
+            let _:String=proxy.call("List",&())?;
+            let target=Proxy::new(&connection,NAME,PATH,NAME)?;
+            let hints=HashMap::from([("urgency",OwnedValue::from(preset.urgency))]);
+            let id:u32=target.call("Notify",&("Atelier CLI",0u32,preset.icon,summary.as_str(),body.as_str(),Vec::<String>::new(),hints,preset.timeout_ms))?;
+            println!("{id}");
             Ok(())
         }
         [mode, instance, id] if mode == "dismiss" => {
@@ -171,7 +196,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | progress ID PERCENT SUMMARY BODY | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | progress ID PERCENT SUMMARY BODY | dnd INSTANCE on|off | pause INSTANCE DURATION | send PRESET SUMMARY BODY\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),
