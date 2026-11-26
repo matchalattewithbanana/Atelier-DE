@@ -33,67 +33,86 @@ fn settings_button(page:&'static str)->gtk::Button{
 }
 
 type Request<A>=Option<A>; // None requests a fresh snapshot.
-struct Reply<S>{snapshot:Result<S,String>,action_error:Option<String>}
-/// A card is disabled until its authoritative post-action snapshot arrives.
-/// No periodic overwrite of volume drafts; refresh is explicit.
+type Refresh=Rc<dyn Fn()>;
+struct Reply<S>{snapshot:Result<S,String>,action_error:Option<String>,reactive:bool}
+/// Serialize provider operations. A pending invalidation is a single bit,
+/// not a queue of snapshots; hidden cards never start follow-up reads.
 fn worker<S:Send+'static,A:Send+'static>(
     card:&gtk::Box,status:&gtk::Label,read:impl Fn()->anyhow::Result<S>+Send+'static,
     act:impl Fn(A)->anyhow::Result<()>+Send+'static,
-    display:impl Fn(Option<S>)+'static,
-)->Rc<dyn Fn(Request<A>)>{
-    let (tx,rx)=mpsc::sync_channel::<Request<A>>(1);
+    display:impl Fn(Option<S>,bool)+'static,
+)->(Rc<dyn Fn(Request<A>)>,Refresh){
+    let (tx,rx)=mpsc::sync_channel::<(Request<A>,bool)>(1);
     let (events,updates)=mpsc::sync_channel::<Reply<S>>(1);
     std::thread::spawn(move||{
-        while let Ok(request)=rx.recv(){
+        while let Ok((request,reactive))=rx.recv(){
             let action_error=request.and_then(|action|act(action).err()).map(|e|e.to_string());
             let snapshot=read().map_err(|e|e.to_string());
-            if events.send(Reply{snapshot,action_error}).is_err(){break;}
+            if events.send(Reply{snapshot,action_error,reactive}).is_err(){break;}
         }
     });
     let busy=Rc::new(Cell::new(false));
+    let pending=Rc::new(Cell::new(None::<bool>));
     let updates=Rc::new(updates);
     let display=Rc::new(display);
     let (weak_card,weak_status)=(card.downgrade(),status.downgrade());
-    let request:Rc<dyn Fn(Request<A>)>=Rc::new(move|action|{
+    let submit:Rc<dyn Fn(Request<A>,bool)>=Rc::new(move|action,reactive|{
         let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return;};
-        if busy.get(){return;}
-        if tx.try_send(action).is_err(){
+        if !card.is_mapped(){return;}
+        if busy.get(){
+            if action.is_none(){pending.set(Some(pending.get().unwrap_or(true)&&reactive));}
+            return;
+        }
+        if tx.try_send((action,reactive)).is_err(){
             status.set_text("Service unavailable; reopen controls.");return;
         }
-        busy.set(true);card.set_sensitive(false);status.set_text("Updating…");
-        // Poll only for an outstanding request; hidden, idle cards cause
-        // neither provider work nor recurring main-loop wakeups.
+        busy.set(true);card.set_sensitive(false);
+        if !reactive{status.set_text("Updating…");}
         let (weak_card,weak_status)=(weak_card.clone(),weak_status.clone());
-        let (busy,updates,display)=(busy.clone(),updates.clone(),display.clone());
+        let (busy,pending,updates,display,tx)=(busy.clone(),pending.clone(),updates.clone(),display.clone(),tx.clone());
         glib::timeout_add_local(Duration::from_millis(100),move||{
             let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return glib::ControlFlow::Break;};
             match updates.try_recv(){
                 Ok(reply)=>{
-                    busy.set(false);card.set_sensitive(true);
                     match reply.snapshot{
-                        Ok(snapshot)=>{display(Some(snapshot));status.set_text(reply.action_error.as_deref().unwrap_or("Up to date"));}
-                        Err(e)=>{display(None);status.set_text(&format!("Unavailable: {}{e}",reply.action_error.map(|e|format!("{e}; ")).unwrap_or_default()));}
+                        Ok(snapshot)=>{display(Some(snapshot),reply.reactive);status.set_text(reply.action_error.as_deref().unwrap_or("Up to date"));}
+                        Err(e)=>{display(None,reply.reactive);status.set_text(&format!("Unavailable: {}{e}",reply.action_error.map(|e|format!("{e}; ")).unwrap_or_default()));}
                     }
+                    if let Some(reactive)=pending.take(){
+                        if card.is_mapped()&&tx.try_send((None,reactive)).is_ok(){return glib::ControlFlow::Continue;}
+                    }
+                    busy.set(false);card.set_sensitive(true);
                 }
                 Err(mpsc::TryRecvError::Empty)=>return glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected)=>{
-                    busy.set(false);display(None);card.set_sensitive(true);status.set_text("Service worker stopped.");
+                    pending.take();busy.set(false);display(None,false);card.set_sensitive(true);status.set_text("Service worker stopped.");
                 }
             }
             glib::ControlFlow::Break
         });
     });
-    // Reopening a popover or switching to a hidden page establishes a
-    // fresh inventory. One outstanding action remains serialized.
+    let request:Rc<dyn Fn(Request<A>)>={let submit=submit.clone();Rc::new(move|action|submit(action,false))};
     let refresh=request.clone();
     card.connect_map(move |_|refresh(None));
-    request
+    let reactive:Refresh=Rc::new(move||submit(None,true));
+    (request,reactive)
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct AudioView{id:String,description:String,volume:Option<u32>,muted:Option<bool>}
 fn inventory(snapshot:&AudioSnapshot,direction:Direction)->(&Option<String>,&[Device]){
     match direction{Direction::Output=>(&snapshot.default_output,&snapshot.outputs),Direction::Input=>(&snapshot.default_input,&snapshot.inputs)}
+}
+/// Ignore channel and mute changes when comparing the device selector.
+fn inventory_changed(old:Option<&AudioSnapshot>,new:Option<&AudioSnapshot>,direction:Direction)->bool{
+    match (old,new){
+        (Some(old),Some(new))=>{
+            let (a,ad)=inventory(old,direction);let (b,bd)=inventory(new,direction);
+            a!=b||ad.len()!=bd.len()||ad.iter().zip(bd).any(|(a,b)|a.id!=b.id||a.description!=b.description||a.monitor!=b.monitor)
+        }
+        (None,None)=>false,
+        _=>true,
+    }
 }
 fn default_device(snapshot:&AudioSnapshot,direction:Direction)->Option<AudioView>{
     let (id,devices)=inventory(snapshot,direction);
@@ -214,13 +233,21 @@ fn audio_card()->gtk::Box{
     let out_display=output.weak_display();let in_display=input.weak_display();
     let out_inventory=output.weak_inventory(Direction::Output);let in_inventory=input.weak_inventory(Direction::Input);
     let (out,in_)= (out_state.clone(),in_state.clone());
-    let request=worker(&card,&status,audio_snapshot,|cmd:AudioCommand|audio_action(cmd.direction,&cmd.id,cmd.action),move|snapshot|{
+    let previous=RefCell::new(None::<AudioSnapshot>);
+    let (request,reactive)=worker(&card,&status,audio_snapshot,|cmd:AudioCommand|audio_action(cmd.direction,&cmd.id,cmd.action),move|snapshot,reactive|{
+        let mut previous=previous.borrow_mut();
+        if reactive&&*previous==snapshot{return;}
         let ov=snapshot.as_ref().and_then(|s|default_device(s,Direction::Output));
         let iv=snapshot.as_ref().and_then(|s|default_device(s,Direction::Input));
+        let old_out=out.borrow().clone();let old_in=in_.borrow().clone();
         *out.borrow_mut()=ov.clone();*in_.borrow_mut()=iv.clone();
-        out_inventory(snapshot.as_ref());in_inventory(snapshot.as_ref());
-        out_display(ov);in_display(iv);
+        if !reactive||inventory_changed(previous.as_ref(),snapshot.as_ref(),Direction::Output){out_inventory(snapshot.as_ref());}
+        if !reactive||inventory_changed(previous.as_ref(),snapshot.as_ref(),Direction::Input){in_inventory(snapshot.as_ref());}
+        if !reactive||old_out!=ov{out_display(ov);}
+        if !reactive||old_in!=iv{in_display(iv);}
+        *previous=snapshot;
     });
+    crate::audio_watch::attach(&card,reactive);
     output.connect(Direction::Output,out_state,request.clone());input.connect(Direction::Input,in_state,request.clone());
     refresh.connect_clicked(move |_|request(None));card
 }
@@ -236,7 +263,7 @@ fn radio_card<S:Send+'static,A:Send+'static>(
     let status=label("Checking…","dim-label");card.append(&status);
     let state=Rc::new(Cell::new(None::<bool>));
     let (weak_toggle,weak_detail,s)=(toggle.downgrade(),detail.downgrade(),state.clone());
-    let request=worker(&card,&status,read,act,move|snapshot|{
+    let (request,_reactive)=worker(&card,&status,read,act,move|snapshot,_|{
         let (value,summary)=snapshot.map(&state_of).unwrap_or((None,"Provider unavailable".into()));
         s.set(value);
         if let (Some(toggle),Some(detail))=(weak_toggle.upgrade(),weak_detail.upgrade()){
