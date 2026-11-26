@@ -13,6 +13,8 @@ mod notification_bus;
 #[cfg(feature = "layer-panel")]
 mod panel;
 #[cfg(feature = "layer-panel")]
+mod panel_layout;
+#[cfg(feature = "layer-panel")]
 mod workspace_backend;
 #[cfg(feature = "layer-panel")]
 mod workspace_strip;
