@@ -46,6 +46,7 @@ pub struct Notice {
     pub body: String,
     pub transient: bool,
     pub popup_allowed: bool,
+    pub missed: bool,
     pub closed_reason: Option<u32>,
     #[serde(skip)]
     deadline: Option<Instant>,
@@ -54,6 +55,7 @@ pub struct Notice {
 pub struct Store {
     instance: String,
     dnd: bool,
+    paused_until: Option<Instant>,
     next_id: u32,
     revision: u64,
     active: Vec<Notice>,
@@ -65,6 +67,8 @@ pub struct Snapshot<'a> {
     schema: u32,
     instance: &'a str,
     dnd: bool,
+    manual_dnd: bool,
+    pause_remaining_seconds: u32,
     active: &'a [Notice],
     history: &'a VecDeque<Notice>,
 }
@@ -76,6 +80,8 @@ pub struct PopupSnapshot<'a> {
     last_id: u32,
     latest_revision: u64,
     dnd: bool,
+    manual_dnd: bool,
+    pause_remaining_seconds: u32,
     notice: Option<&'a Notice>,
     cards: Vec<&'a Notice>,
     queued: usize,
@@ -84,7 +90,7 @@ pub struct PopupSnapshot<'a> {
 impl Default for Store {
     fn default() -> Self {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, next_id: 0, revision: 0, active: Vec::new(), history: VecDeque::new() }
+        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, paused_until: None, next_id: 0, revision: 0, active: Vec::new(), history: VecDeque::new() }
     }
 }
 
@@ -95,6 +101,7 @@ impl Store {
         self.notify_with(replaces, app, summary, body, transient, timeout, now, Details::default())
     }
     pub fn notify_with(&mut self, replaces: u32, app: String, summary: String, body: String, transient: bool, timeout: i32, now: Instant, details: Details) -> Result<u32, &'static str> {
+        let suppressed = self.suppressed(now);
         let index = self.active.iter().position(|n| n.id == replaces && ((n.actions.is_empty() && details.actions.is_empty()) || (n.owner.is_some() && n.owner == details.owner)));
         let revision = self.revision.checked_add(1).ok_or("Notification revision space exhausted")?;
         let id = if index.is_some() { replaces } else {
@@ -108,7 +115,7 @@ impl Store {
             _ => Some(now + Duration::from_secs(5)),
         };
         self.revision = revision;
-        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, owner: details.owner, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !self.dnd, closed_reason: None, deadline };
+        let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, owner: details.owner, app: bounded(app, 256), summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
     }
@@ -142,18 +149,44 @@ impl Store {
         for id in &expired { self.close(*id, 1); }
         expired
     }
-    pub fn snapshot(&self) -> Snapshot<'_> { Snapshot { schema: 1, instance: &self.instance, dnd: self.dnd, active: &self.active, history: &self.history } }
+    fn suppressed(&self, now: Instant) -> bool {
+        self.dnd || self.paused_until.is_some_and(|until| now < until)
+    }
+    fn remaining(&self, now: Instant) -> u32 {
+        self.paused_until.and_then(|until| until.checked_duration_since(now))
+            .map_or(0, |left| left.as_secs().min(u64::from(u32::MAX - 1)) as u32 + u32::from(left.subsec_nanos() != 0))
+    }
+    pub fn snapshot(&self) -> Snapshot<'_> {
+        let now=Instant::now();
+        Snapshot { schema: 1, instance: &self.instance, dnd: self.suppressed(now), manual_dnd: self.dnd,
+            pause_remaining_seconds: self.remaining(now), active: &self.active, history: &self.history }
+    }
+    fn hide_popups(&mut self) {
+        for notice in &mut self.active { notice.popup_allowed = false; }
+    }
     pub fn set_dnd(&mut self, enabled: bool) {
         self.dnd = enabled;
-        if enabled { for notice in &mut self.active { notice.popup_allowed = false; } }
+        if enabled { self.hide_popups(); }
     }
-    pub fn popup_snapshot(&self) -> PopupSnapshot<'_> {
-        let notice = if self.dnd { None } else { self.active.iter().filter(|n| n.popup_allowed).max_by_key(|n| n.id) };
-        let mut eligible: Vec<_> = if self.dnd { Vec::new() } else { self.active.iter().filter(|n| n.popup_allowed).collect() };
+    /// Zero cancels only the temporary pause; manual DND is independent.
+    pub fn pause(&mut self, seconds: u32, now: Instant) -> Result<(), &'static str> {
+        if seconds > 24 * 60 * 60 { return Err("Pause exceeds 24 hours"); }
+        self.paused_until = if seconds == 0 { None } else {
+            Some(now.checked_add(Duration::from_secs(u64::from(seconds))).ok_or("Pause deadline overflow")?)
+        };
+        if seconds != 0 { self.hide_popups(); }
+        Ok(())
+    }
+    pub fn popup_snapshot(&self) -> PopupSnapshot<'_> { self.popup_at(Instant::now()) }
+    fn popup_at(&self, now: Instant) -> PopupSnapshot<'_> {
+        let dnd=self.suppressed(now);
+        let notice = if dnd { None } else { self.active.iter().filter(|n| n.popup_allowed).max_by_key(|n| n.id) };
+        let mut eligible: Vec<_> = if dnd { Vec::new() } else { self.active.iter().filter(|n| n.popup_allowed).collect() };
         eligible.sort_unstable_by_key(|n| std::cmp::Reverse(n.revision));
         let queued = eligible.len().saturating_sub(MAX_POPUPS);
         eligible.truncate(MAX_POPUPS);
-        PopupSnapshot { schema: 1, instance: &self.instance, last_id: self.next_id, latest_revision: self.revision, dnd: self.dnd, notice, cards: eligible, queued }
+        PopupSnapshot { schema: 1, instance: &self.instance, last_id: self.next_id, latest_revision: self.revision,
+            dnd, manual_dnd:self.dnd, pause_remaining_seconds:self.remaining(now), notice, cards:eligible, queued }
     }
     pub fn matches_instance(&self, instance: &str) -> bool { self.instance == instance }
     pub fn clear_history(&mut self) { self.history.clear(); }
@@ -238,6 +271,32 @@ mod tests {
         assert!(store.invoke(&instance,id,revision,"view",now).is_none());
         assert!(store.close_from(id,Some(":1.2")));
         assert!(store.history[0].actions.is_empty());
+    }
+    #[test]
+    fn temporary_pause_expires_without_replay_and_preserves_manual_dnd() {
+        let mut store=Store::default();let now=Instant::now();
+        let old=add(&mut store,0,false,0,now);
+        store.pause(60,now).unwrap();
+        assert_eq!(store.popup_at(now).pause_remaining_seconds,60);
+        let missed=add(&mut store,0,false,0,now);
+        assert!(store.popup_at(now).dnd);
+        assert!(!store.active.iter().find(|n|n.id==old).unwrap().missed);
+        assert!(store.active.iter().find(|n|n.id==missed).unwrap().missed);
+        let later=now+Duration::from_secs(60);
+        assert!(!store.popup_at(later).dnd);
+        assert!(store.popup_at(later).cards.is_empty());
+        let fresh=add(&mut store,0,false,0,later);
+        assert_eq!(store.popup_at(later).cards[0].id,fresh);
+        store.set_dnd(true);
+        store.pause(10,later).unwrap();
+        store.pause(0,later).unwrap();
+        assert!(store.popup_at(later).dnd);
+        assert!(store.popup_at(later).manual_dnd);
+        store.set_dnd(false);
+        assert!(!store.popup_at(later).dnd);
+        assert!(store.pause(86401,later).is_err());
+        assert!(store.close(missed,2));
+        assert!(store.history[0].missed);
     }
     #[test]
     fn rejects_over_capacity_and_unknown_close() {
