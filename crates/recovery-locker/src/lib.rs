@@ -4,6 +4,8 @@
 // Not connected to protocol events until exact keyboard focus is tracked.
 #[allow(dead_code)]
 mod entry;
+#[allow(dead_code)]
+mod keyboard;
 
 use anyhow::{bail, Context, Result};
 use std::{fs::File, os::{fd::{AsFd, FromRawFd}, unix::net::UnixStream}};
