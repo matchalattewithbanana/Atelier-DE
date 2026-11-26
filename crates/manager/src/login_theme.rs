@@ -95,7 +95,7 @@ pub(super) struct Inspection{
     pub source:PathBuf,pub name:String,pub fingerprint:String,pub bytes:usize,pub files:Vec<PathBuf>,
     pub main:PathBuf,pub screenshot:Option<PathBuf>,pub preview_status:String,
 }
-pub(super) struct Review{pub info:Inspection,pub preview:Option<Raster>}
+pub(super) struct Review{pub info:Inspection,pub preview:Option<Raster>,_temporary_source:Option<tempfile::TempDir>}
 fn inspect_snapshot(source:&Path,s:&Snapshot)->Result<Review>{
     let m=s.metadata()?;
     let screenshot=m.screenshot.or_else(||["preview.png","screenshot.png","preview.jpg","screenshot.jpg","preview.webp"]
@@ -110,7 +110,7 @@ fn inspect_snapshot(source:&Path,s:&Snapshot)->Result<Review>{
     };
     let name=m.name.unwrap_or_else(||source.file_name().and_then(|s|s.to_str()).unwrap_or("Theme").chars().filter(|c|!c.is_control()).take(128).collect());
     Ok(Review{info:Inspection{source:source.into(),name,fingerprint:s.fingerprint(),bytes:s.total,
-        files:s.files.keys().cloned().collect(),main:m.main,screenshot,preview_status},preview})
+        files:s.files.keys().cloned().collect(),main:m.main,screenshot,preview_status},preview,_temporary_source:None})
 }
 /// Validate the declared local QML entry point without decoding any raster.
 /// Used by the administrator selection review only after ownership checks.
@@ -130,6 +130,7 @@ fn root()->Result<PathBuf>{
     Ok(data.join("atelier-manager/sddm-staged"))
 }
 impl Review{
+    pub(super) fn retain_source(mut self,source:tempfile::TempDir)->Self{self._temporary_source=Some(source);self}
     pub(super) fn phrase(&self)->String{format!("prepare {}",&self.info.fingerprint[..12])}
     pub(super) fn detail(&self)->Result<String>{
         Ok(format!("{}\n\nFiles will be copied to a private user-local staging directory only. No QML execution, system installation or login changes.",serde_json::to_string_pretty(&self.info)?))
@@ -162,12 +163,13 @@ impl Review{
     }
 }
 pub(super) fn run(args:&[String])->Result<()>{
+    if let [action,id]=args{if action=="pack-prepare"{return crate::login_packs::prepare(id);}}
     if args.first().is_some_and(|a|matches!(a.as_str(),"selection-plan"|"select"|"rollback-selection")){
         return crate::login_selection::run(args);
     }
     let (prepare,path)=match args{
         [action,flag,path] if flag=="--from"&&matches!(action.as_str(),"inspect"|"prepare")=>(action=="prepare",path),
-        _=>bail!("use login-theme inspect --from DIR | prepare --from DIR"),
+        _=>bail!("use login-theme inspect --from DIR | prepare --from DIR | pack-prepare ID"),
     };
     let review=inspect(Path::new(path))?;
     println!("{}",review.detail()?);

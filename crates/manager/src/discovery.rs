@@ -52,11 +52,14 @@ fn trusted_tool(path: &str) -> Result<()> {
     Ok(())
 }
 fn request(endpoint: &str, binary: bool, limit: u64, output: &mut impl Write) -> Result<u64> {
+    request_media(endpoint,binary,limit,output,if binary{Some("application/octet-stream")}else{None})
+}
+fn request_media(endpoint:&str,binary:bool,limit:u64,output:&mut impl Write,accept:Option<&str>)->Result<u64>{
     if nix::unistd::Uid::effective().is_root() { bail!("run release requests as your desktop user, not root"); }
     for path in [GH, TIMEOUT] { trusted_tool(path)?; }
     let mut command = Command::new(TIMEOUT);
     command.args(["--kill-after=2s", if binary { "180s" } else { "25s" }, GH, "api", "--hostname", "github.com", "--method", "GET"]);
-    if binary { command.args(["-H", "Accept: application/octet-stream"]); }
+    if let Some(media)=accept { command.args(["-H",&format!("Accept: {media}")]); }
     let mut child = command.arg(endpoint)
         .env("GH_PROMPT_DISABLED", "1").env("GH_PAGER", "cat").env_remove("GH_DEBUG")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
@@ -88,6 +91,12 @@ pub(super) fn search_repositories(query:&str)->Result<Vec<u8>>{
     let mut bytes=Vec::new();
     request(&format!("search/repositories?q={encoded}&sort=stars&order=desc&per_page=20"),false,MAX_RESPONSE,&mut bytes)?;
     Ok(bytes)
+}
+pub(super) fn theme_tree(repo:&str,revision:&str)->Result<Vec<u8>>{
+    let mut bytes=Vec::new();request(&format!("repos/{repo}/git/trees/{revision}?recursive=1"),false,MAX_RESPONSE,&mut bytes)?;Ok(bytes)
+}
+pub(super) fn theme_blob(repo:&str,sha:&str,size:u64)->Result<Vec<u8>>{
+    let mut bytes=Vec::new();request_media(&format!("repos/{repo}/git/blobs/{sha}"),true,size,&mut bytes,Some("application/vnd.github.raw+json"))?;Ok(bytes)
 }
 fn fetch(repo: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();

@@ -23,6 +23,13 @@ pub(super) fn build()->gtk::Box{
     }
     {let path=path.downgrade();installed.connect_changed(move|p|{if let (Some(path),Some(id))=(path.upgrade(),p.active_id()){path.set_text(&id);}});}
     form.append(&installed);
+    form.append(&label("Upstream packs: download selected theme for static inspection only. Code and media licensing and QML trust remain separate checks.","dim-label"));
+    let packs=gtk::ComboBoxText::new();
+    for item in crate::login_packs::items().into_iter().filter(|i|i.category=="login"){
+        packs.append(Some(&item.id),&format!("{} · {}",item.name,item.readiness));
+    }
+    packs.set_active(Some(0));form.append(&packs);
+    let fetch=gtk::Button::with_label("Download selected upstream theme for review");form.append(&fetch);
     let review_button=gtk::Button::with_label("Inspect theme and screenshot");form.append(&review_button);
     let image=gtk::Picture::new();image.set_can_shrink(true);image.set_size_request(320,180);outer.append(&image);
     let detail=label("","body");detail.set_selectable(true);
@@ -45,11 +52,11 @@ pub(super) fn build()->gtk::Box{
     {
         let (form,path,image,detail,confirm,prepare,status)=(form.downgrade(),path.downgrade(),image.downgrade(),detail.downgrade(),confirm.downgrade(),prepare.downgrade(),status.downgrade());
         let state=state.clone();
-        review_button.connect_clicked(move|_|{
+        let inspect=Rc::new(move|pack:Option<String>|{
             let (Some(f),Some(p),Some(s))=(form.upgrade(),path.upgrade(),status.upgrade())else{return;};
-            let path=PathBuf::from(p.text().trim());invalidate();f.set_sensitive(false);s.set_text("Inspecting bounded local theme files…");
+            let path=PathBuf::from(p.text().trim());invalidate();f.set_sensitive(false);s.set_text(if pack.is_some(){"Downloading pinned upstream files for inspection…"}else{"Inspecting bounded local theme files…"});
             let (form,image,detail,confirm,prepare,status,state)=(form.clone(),image.clone(),detail.clone(),confirm.clone(),prepare.clone(),status.clone(),state.clone());
-            background(move||{let review=login_theme::inspect(&path)?;let text=review.detail()?;Ok((review,text))},move|result|{
+            background(move||{let review=match pack{Some(id)=>crate::login_packs::fetch_review(&id)?,None=>login_theme::inspect(&path)?};let text=review.detail()?;Ok((review,text))},move|result|{
                 if let (Some(i),Some(d),Some(c),Some(p),Some(s))=(image.upgrade(),detail.upgrade(),confirm.upgrade(),prepare.upgrade(),status.upgrade()){
                     match result{
                         Ok((mut review,text))=>{
@@ -66,6 +73,10 @@ pub(super) fn build()->gtk::Box{
                 }
                 if let Some(f)=form.upgrade(){f.set_sensitive(true);}
             });
+        });
+        {let inspect=inspect.clone();review_button.connect_clicked(move |_|inspect(None));}
+        let packs=packs.downgrade();fetch.connect_clicked(move |_|{
+            if let Some(id)=packs.upgrade().and_then(|p|p.active_id()){inspect(Some(id.to_string()));}
         });
     }
     {
