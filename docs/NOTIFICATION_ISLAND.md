@@ -20,7 +20,7 @@ Use a replacement ID only within the same daemon lifetime. Legacy non-action not
 
 - Render compact, stacked and expanded cards in the layer-shell panel with smooth bounded transitions, progress bars and action controls. Preserve standard inbox fallback.
 - Add explicit pause, missed-card handling, lock-aware suppression and output placement.
-- Add a persistent script-friendly client for command tracking, safe action selection, presets and opt-in coding-agent hooks. Do not use notifications for privileged or security-sensitive approvals.
+- Add a persistent script-friendly client for command tracking, safe action selection and presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Expose layout, position, animation and color options in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
 
 No new daemon, automatic hooks, default shell changes or compositor lock integration are introduced by this foundation. CI must verify the changes before merge.
