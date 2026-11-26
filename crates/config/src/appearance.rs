@@ -397,6 +397,9 @@ impl Appearance{
             .atelier-inbox .atelier-inbox-critical {{ border: 2px solid currentColor; }} \
             .atelier-inbox .atelier-inbox-actions button {{ min-height: 36px; border-radius: {}px; }} \
             .atelier-inbox .atelier-inbox-group > title {{ padding: 8px; font-weight: 700; }}",self.notifications.radius,self.button_radius));
+        css.push_str(&format!(" .atelier-panel .atelier-panel-group {{ background-color: {container}; color: {fg}; padding: 2px 6px; border-radius: {}px; }} \
+            .atelier-panel.atelier-panel-compact button {{ padding: 3px 6px; }} \
+            .atelier-panel.atelier-panel-compact .atelier-workspace-button {{ min-width: 20px; padding: 3px 4px; }}",self.button_radius));
         Ok(css)
     }
 }
