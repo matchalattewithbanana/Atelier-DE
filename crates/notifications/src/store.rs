@@ -74,6 +74,7 @@ pub struct PopupSnapshot<'a> {
     schema: u32,
     instance: &'a str,
     last_id: u32,
+    latest_revision: u64,
     dnd: bool,
     notice: Option<&'a Notice>,
     cards: Vec<&'a Notice>,
@@ -152,7 +153,7 @@ impl Store {
         eligible.sort_unstable_by_key(|n| std::cmp::Reverse(n.revision));
         let queued = eligible.len().saturating_sub(MAX_POPUPS);
         eligible.truncate(MAX_POPUPS);
-        PopupSnapshot { schema: 1, instance: &self.instance, last_id: self.next_id, dnd: self.dnd, notice, cards: eligible, queued }
+        PopupSnapshot { schema: 1, instance: &self.instance, last_id: self.next_id, latest_revision: self.revision, dnd: self.dnd, notice, cards: eligible, queued }
     }
     pub fn matches_instance(&self, instance: &str) -> bool { self.instance == instance }
     pub fn clear_history(&mut self) { self.history.clear(); }
