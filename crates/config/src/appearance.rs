@@ -374,6 +374,14 @@ impl Appearance{
             .atelier-control-window scale.atelier-expressive-slider highlight {{ border-radius: 8px; background-color: {primary}; }} \
             .atelier-control-window scale.atelier-expressive-slider slider {{ min-width: 4px; min-height: 40px; border-radius: 4px; background-image: none; background-color: {primary}; }} \
             .atelier-control-window button:disabled, .atelier-control-window scale:disabled {{ opacity: 0.55; }}"));
+        css.push_str(&format!(" .atelier-launcher .atelier-launcher-heading {{ font-size: 28px; font-weight: 500; }} \
+            .atelier-launcher .atelier-launcher-search {{ border-radius: 24px; padding: 8px 12px; }} \
+            .atelier-launcher .atelier-launcher-results {{ background-color: {container}; border-radius: 28px; padding: 6px; }} \
+            .atelier-launcher .atelier-launcher-results row {{ border-radius: {}px; }} \
+            .atelier-launcher .atelier-launcher-results row:selected {{ background-color: {primary}; color: {on_primary}; }} \
+            .atelier-launcher .atelier-launcher-results row:selected .dim-label {{ color: {on_primary}; opacity: 1; }} \
+            .atelier-launcher .atelier-launcher-app {{ padding: 10px 12px; }} \
+            .atelier-launcher .atelier-launcher-app-name {{ font-size: 16px; font-weight: 500; }}",self.button_radius));
         Ok(css)
     }
 }
