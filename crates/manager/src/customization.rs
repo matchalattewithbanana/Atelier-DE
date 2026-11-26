@@ -80,6 +80,7 @@ pub fn catalog()->Vec<Item>{
             readiness:if c.binary.is_none(){"Inspect installed files"}else if found{"Executable detected"}else{"Not detected"}.into(),
             detail:format!("Package candidate: {}. {}",c.package,c.detail)});
     }
+    items.extend(crate::login_packs::items());
     for name in login_themes(Path::new("/usr/share/sddm/themes")){
         items.push(Item{id:format!("sddm-theme:{name}"),category:"login",name:format!("SDDM theme: {name}"),source:"https://github.com/sddm/sddm/wiki/Theming".into(),declared_targets:vec![],scope:"system",
             install:"existing local files; no installation",activation:"not implemented; trusted greeter test and reviewed system config required",
