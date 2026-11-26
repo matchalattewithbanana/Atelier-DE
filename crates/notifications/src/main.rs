@@ -57,6 +57,9 @@ impl Notifications {
 struct History { state: Shared }
 #[interface(name = "org.atelier.Notifications1")]
 impl History {
+    #[zbus(signal)]
+    async fn changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
     fn list(&self) -> fdo::Result<String> {
         serde_json::to_string(&lock(&self.state)?.snapshot()).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
@@ -117,6 +120,7 @@ fn daemon() -> Result<()> {
         .build().context("acquire notification name without replacing existing daemon")?;
     println!("Atelier notification inbox ready (presentation is optional)");
     let mut next_reload=Instant::now();
+    let mut last_token=state.lock().map_err(|_|anyhow::anyhow!("notification state unavailable"))?.change_token(Instant::now());
     loop {
         std::thread::sleep(Duration::from_millis(200));
         if Instant::now()>=next_reload{
@@ -127,7 +131,17 @@ fn daemon() -> Result<()> {
                 Err(error)=>eprintln!("Retaining last valid notification preferences: {error:#}"),
             }
         }
-        let expired = state.lock().map_err(|_| anyhow::anyhow!("notification state unavailable"))?.expire(Instant::now());
+        let (expired,token)={
+            let mut state=state.lock().map_err(|_|anyhow::anyhow!("notification state unavailable"))?;
+            let now=Instant::now();let expired=state.expire(now);
+            (expired,state.change_token(now))
+        };
+        if token!=last_token{
+            // Payload-free, coalesced invalidation. Clients fetch authoritative
+            // snapshots; never broadcast notification text in this signal.
+            connection.emit_signal(None::<&str>,HISTORY_PATH,HISTORY_INTERFACE,"Changed",&())?;
+            last_token=token;
+        }
         for id in expired {
             connection.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(id, 1u32))?;
         }
