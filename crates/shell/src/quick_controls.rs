@@ -22,7 +22,8 @@ fn card(title:&str)->gtk::Box{
 fn row()->gtk::Box{gtk::Box::new(gtk::Orientation::Horizontal,8)}
 fn settings_button(page:&'static str)->gtk::Button{
     let b=button("Open settings");
-    b.connect_clicked(move |_|{
+    b.connect_clicked(move |button|{
+        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>(){popover.popdown();}
         match component("atelier-settings").args(["--page",page]).spawn(){
             Ok(mut child)=>{std::thread::spawn(move||{let _=child.wait();});}
             Err(e)=>eprintln!("Atelier settings launch failed: {e}"),
@@ -50,37 +51,43 @@ fn worker<S:Send+'static,A:Send+'static>(
         }
     });
     let busy=Rc::new(Cell::new(false));
+    let updates=Rc::new(updates);
+    let display=Rc::new(display);
     let (weak_card,weak_status)=(card.downgrade(),status.downgrade());
-    let request:Rc<dyn Fn(Request<A>)>={
-        let busy=busy.clone();let (card,status)=(weak_card.clone(),weak_status.clone());
-        Rc::new(move|action|{
-            let (Some(card),Some(status))=(card.upgrade(),status.upgrade())else{return;};
-            if busy.get(){return;}
-            if tx.try_send(action).is_ok(){
-                busy.set(true);card.set_sensitive(false);status.set_text("Updating…");
-            }else{status.set_text("Service unavailable; refresh or reopen controls.");}
-        })
-    };
-    // Do not retain the card in the polling closure. Display callbacks
-    // retain only weak widget references or plain snapshot state.
-    glib::timeout_add_local(Duration::from_millis(100),move||{
-        let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return glib::ControlFlow::Break;};
-        match updates.try_recv(){
-            Ok(reply)=>{
-                busy.set(false);card.set_sensitive(true);
-                match reply.snapshot{
-                    Ok(snapshot)=>{display(Some(snapshot));status.set_text(reply.action_error.as_deref().unwrap_or("Up to date · Refresh to check external changes."));}
-                    Err(e)=>{display(None);status.set_text(&format!("Unavailable: {}{e}",reply.action_error.map(|e|format!("{e}; ")).unwrap_or_default()));}
+    let request:Rc<dyn Fn(Request<A>)>=Rc::new(move|action|{
+        let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return;};
+        if busy.get(){return;}
+        if tx.try_send(action).is_err(){
+            status.set_text("Service unavailable; reopen controls.");return;
+        }
+        busy.set(true);card.set_sensitive(false);status.set_text("Updating…");
+        // Poll only for an outstanding request; hidden, idle cards cause
+        // neither provider work nor recurring main-loop wakeups.
+        let (weak_card,weak_status)=(weak_card.clone(),weak_status.clone());
+        let (busy,updates,display)=(busy.clone(),updates.clone(),display.clone());
+        glib::timeout_add_local(Duration::from_millis(100),move||{
+            let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return glib::ControlFlow::Break;};
+            match updates.try_recv(){
+                Ok(reply)=>{
+                    busy.set(false);card.set_sensitive(true);
+                    match reply.snapshot{
+                        Ok(snapshot)=>{display(Some(snapshot));status.set_text(reply.action_error.as_deref().unwrap_or("Up to date"));}
+                        Err(e)=>{display(None);status.set_text(&format!("Unavailable: {}{e}",reply.action_error.map(|e|format!("{e}; ")).unwrap_or_default()));}
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty)=>return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected)=>{
+                    busy.set(false);display(None);card.set_sensitive(true);status.set_text("Service worker stopped.");
                 }
             }
-            Err(mpsc::TryRecvError::Empty)=>{}
-            Err(mpsc::TryRecvError::Disconnected)=>{
-                busy.set(false);display(None);card.set_sensitive(true);status.set_text("Service worker stopped.");return glib::ControlFlow::Break;
-            }
-        }
-        glib::ControlFlow::Continue
+            glib::ControlFlow::Break
+        });
     });
-    request(None);request
+    // Reopening a popover or switching to a hidden page establishes a
+    // fresh inventory. One outstanding action remains serialized.
+    let refresh=request.clone();
+    card.connect_map(move |_|refresh(None));
+    request
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -198,7 +205,9 @@ impl AudioWidgets{
 fn audio_card()->gtk::Box{
     let card=card("Audio");
     let output=AudioWidgets::new("Output");let input=AudioWidgets::new("Input");
-    card.append(&output.section);card.append(&input.section);
+    card.append(&output.section);
+    let input_expander=gtk::Expander::new(Some("Microphone and input devices"));
+    input_expander.set_child(Some(&input.section));card.append(&input_expander);
     let footer=row();let refresh=button("Refresh");footer.append(&refresh);footer.append(&settings_button("audio"));card.append(&footer);
     let status=label("Checking audio…","dim-label");card.append(&status);
     let out_state=Rc::new(RefCell::new(None));let in_state=Rc::new(RefCell::new(None));
@@ -239,21 +248,35 @@ fn radio_card<S:Send+'static,A:Send+'static>(
     let send=request.clone();toggle.connect_clicked(move |_|{if let Some(value)=state.get(){send(Some(command(!value)));}});
     refresh.connect_clicked(move |_|request(None));card
 }
+/// Same view for the panel popover and standalone launcher. Stack pages
+/// map independently; audio is not queried until its page is visible.
+pub fn content(app:&gtk::Application)->gtk::Box{
+    let root=gtk::Box::new(gtk::Orientation::Vertical,10);root.add_css_class("atelier-control-window");
+    root.set_margin_top(12);root.set_margin_bottom(12);root.set_margin_start(12);root.set_margin_end(12);
+    root.append(&label("Quick controls","atelier-control-heading"));
+    let pages=gtk::Stack::new();pages.set_transition_type(gtk::StackTransitionType::Crossfade);
+    pages.set_hhomogeneous(false);pages.set_vhomogeneous(false);
+    let switcher=gtk::StackSwitcher::new();switcher.set_stack(Some(&pages));switcher.set_halign(gtk::Align::Center);
+    switcher.add_css_class("atelier-control-tabs");root.append(&switcher);
+    let connectivity=gtk::Box::new(gtk::Orientation::Vertical,8);
+    connectivity.append(&radio_card("Wi-Fi","network",network_snapshot,network_action,
+        |s:NetworkSnapshot|(s.wifi_enabled,match s.wifi_enabled{Some(true)=>"Wi-Fi enabled",Some(false)=>"Wi-Fi disabled",None=>"Wi-Fi state unknown"}.into()),NetworkAction::Wifi));
+    connectivity.append(&radio_card("Bluetooth","bluetooth",bluetooth_snapshot,bluetooth_action,
+        |s:BluetoothSnapshot|(s.powered,match s.powered{Some(true)=>"Bluetooth enabled",Some(false)=>"Bluetooth disabled",None=>"Bluetooth state unknown"}.into()),BluetoothAction::Power));
+    pages.add_titled(&connectivity,Some("connectivity"),"Connectivity");
+    pages.add_titled(&audio_card(),Some("audio"),"Audio");
+    root.append(&pages);
+    let media=button("Open media controls");let app=app.downgrade();media.connect_clicked(move |button|{
+        if let Some(popover)=button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>(){popover.popdown();}
+        if let Some(app)=app.upgrade(){crate::media_controls::show(&app);}
+    });root.append(&media);
+    root
+}
 pub fn show(app:&gtk::Application){
     if let Some(window)=app.windows().into_iter().find(|w|w.widget_name()=="atelier-quick-controls"){window.present();return;}
-    let window=gtk::ApplicationWindow::builder().application(app).title("Atelier · Quick controls").default_width(480).default_height(680).build();
+    let window=gtk::ApplicationWindow::builder().application(app).title("Atelier · Quick controls").default_width(480).default_height(580).build();
     window.set_widget_name("atelier-quick-controls");
-    let content=gtk::Box::new(gtk::Orientation::Vertical,12);content.add_css_class("atelier-control-window");
-    content.set_margin_top(16);content.set_margin_bottom(16);content.set_margin_start(16);content.set_margin_end(16);
-    content.append(&label("Quick controls","atelier-control-heading"));
-    content.append(&label("Controls affect current system devices. Atelier does not request elevated privileges.","dim-label"));
-    content.append(&radio_card("Wi-Fi","network",network_snapshot,network_action,
-        |s:NetworkSnapshot|(s.wifi_enabled,match s.wifi_enabled{Some(true)=>"Wi-Fi enabled",Some(false)=>"Wi-Fi disabled",None=>"Wi-Fi state unknown"}.into()),NetworkAction::Wifi));
-    content.append(&radio_card("Bluetooth","bluetooth",bluetooth_snapshot,bluetooth_action,
-        |s:BluetoothSnapshot|(s.powered,match s.powered{Some(true)=>"Bluetooth enabled",Some(false)=>"Bluetooth disabled",None=>"Bluetooth state unknown"}.into()),BluetoothAction::Power));
-    content.append(&audio_card());
-    let media=button("Media controls");let app=app.downgrade();media.connect_clicked(move |_|{if let Some(app)=app.upgrade(){crate::media_controls::show(&app);}});content.append(&media);
-    let scroll=gtk::ScrolledWindow::builder().child(&content).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let scroll=gtk::ScrolledWindow::builder().child(&content(app)).hscrollbar_policy(gtk::PolicyType::Never).build();
     window.set_child(Some(&scroll));window.present();
 }
 #[cfg(test)]
