@@ -1,5 +1,6 @@
 //! Optional layer-shell notification cards. No daemon ownership or replay.
 use crate::notification_bus::{self,Request};
+use crate::notification_privacy::{Guard,Gate};
 use atelier_config::{Appearance, NotificationAppearance, NotificationPosition, NotificationStyle};
 use gtk::{gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -267,6 +268,7 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     let mut next_output_check=Instant::now();
     let (requests,receive,watch)=notification_bus::start("Popup",snapshot);
     let panel = panel.downgrade(); let mut cursor = Cursor::default();
+    let mut privacy=Guard::default();let mut gate=Gate::default();
     let mut rendered = Vec::new(); let mut rendered_instance = None; let mut rendered_queued = 0;
     glib::timeout_add_local(Duration::from_millis(100), move || {
         let Some(panel)=panel.upgrade()else{window.close();return glib::ControlFlow::Break;};
@@ -287,12 +289,21 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
         let prefs=&applied.notifications;
         let style=prefs.style_for_launch(island);
         let card_limit=limit(prefs,island);
+        let permitted=privacy.permits(prefs.hide_when_session_unavailable,now);
+        if gate.update(permitted,now){
+            cursor=Cursor::default();
+            // Privacy changes hide immediately, never animate old content
+            // out. Resume establishes a fresh no-replay watermark.
+            revealer.set_reveal_child(false);window.set_visible(false);
+            if permitted{let _=requests.try_send(Request::Refresh);}
+        }
         let mut action_reply = None;
         match receive.try_recv() {
-            Ok(reply) => match reply.snapshot {
+            Ok(reply) if gate.accepts(reply.started) => match reply.snapshot {
                 Ok(state)=>{cursor.observe(&state,now,card_limit,Duration::from_secs(u64::from(prefs.timeout_seconds)));action_reply=reply.action_error;}
                 Err(_)=>cursor=Cursor::default(),
             },
+            Ok(_) => {},
             Err(mpsc::TryRecvError::Disconnected) => { window.close(); return glib::ControlFlow::Break; }
             Err(mpsc::TryRecvError::Empty) => {}
         }
