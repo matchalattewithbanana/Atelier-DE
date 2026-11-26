@@ -50,8 +50,8 @@ fn list_row(entry:&Entry,i:usize,size:u32)->(gtk::ListBoxRow,PinMark){
     let text=gtk::Box::new(gtk::Orientation::Vertical,3);text.set_hexpand(true);
     let name=title(&entry.name);name.add_css_class("atelier-launcher-app-name");text.append(&name);
     if !entry.description.is_empty(){let desc=title(&entry.description);desc.add_css_class("dim-label");text.append(&desc);}
-    item.append(&text);if entry.pinned{item.append(&pin_icon());}
-    row.set_child(Some(&item));row
+    item.append(&text);let pin=pin_icon();pin.set_visible(entry.pinned.get());item.append(&pin);
+    row.set_child(Some(&item));let mark=PinMark::new(&row,&pin);(row,mark)
 }
 fn grid_tile(entry:&Entry,i:usize,size:u32)->(gtk::FlowBoxChild,PinMark){
     let child=gtk::FlowBoxChild::new();identify(&child,entry,i);
@@ -59,9 +59,7 @@ fn grid_tile(entry:&Entry,i:usize,size:u32)->(gtk::FlowBoxChild,PinMark){
     tile.set_size_request(96,96);tile.set_halign(gtk::Align::Fill);
     let art=gtk::Overlay::new();art.set_halign(gtk::Align::Center);
     let icon=app_icon(entry,size);art.set_child(Some(&icon));
-    if entry.pinned{
-        let pin=pin_icon();pin.set_halign(gtk::Align::End);pin.set_valign(gtk::Align::Start);art.add_overlay(&pin);
-    }
+    let pin=pin_icon();pin.set_halign(gtk::Align::End);pin.set_valign(gtk::Align::Start);pin.set_visible(entry.pinned.get());art.add_overlay(&pin);
     tile.append(&art);
     let name=title(&entry.name);name.set_xalign(0.5);name.set_max_width_chars(14);name.set_wrap(true);name.set_lines(2);name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     tile.append(&name);child.set_child(Some(&tile));let mark=PinMark::new(&child,&pin);(child,mark)
@@ -216,7 +214,7 @@ pub fn browser(window:&gtk::ApplicationWindow,appearance:&atelier_config::Appear
 fn save_pin(id:&str,desired:bool,expected:&[String])->(Option<Appearance>,String){
     let path=match appearance_path(){Ok(path)=>path,Err(e)=>return (None,format!("Cannot locate appearance settings: {e}"))};
     let mut review=match AppearanceReview::load(&path){Ok(review)=>review,Err(e)=>return (None,format!("Cannot read appearance settings: {e}"))};
-    if review.value.dock_pins!=expected{
+    if review.value.dock_pins.as_slice()!=expected{
         return (Some(review.value),"Dock pins changed elsewhere. Updated the launcher; select the application again to confirm.".into());
     }
     match review.set_dock_pin(id,desired){
