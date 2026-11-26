@@ -13,12 +13,18 @@ struct Action { key: String, label: String }
 struct Notice {
     id: u32, app: String, summary: String, body: String,
     #[serde(default)] revision: u64,
+    #[serde(default)] icon: String,
+    #[serde(default="normal_urgency")] urgency: u8,
     #[serde(default)] progress: Option<u8>,
     #[serde(default)] actions: Vec<Action>,
 }
+fn normal_urgency()->u8{1}
+fn safe_icon(icon:&str)->&str{
+    if !icon.is_empty() && icon.len()<=128 && icon.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_')){icon}else{"dialog-information-symbolic"}
+}
 impl Notice {
     fn sequence(&self) -> u64 { if self.revision == 0 { self.id as u64 } else { self.revision } }
-    fn persistent(&self) -> bool { self.progress.is_some_and(|p| p < 100) || !self.actions.is_empty() }
+    fn persistent(&self) -> bool { self.progress.is_some_and(|p| p < 100) || !self.actions.is_empty() || self.urgency==2 }
 }
 #[derive(Debug, Deserialize)]
 struct Popup {
@@ -108,6 +114,7 @@ fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requ
         if compact {card.add_css_class("atelier-notification-compact");card.set_spacing(3);}
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let app_name = label(&notice.app, "dim-label", 80); app_name.set_hexpand(true);
+        let icon=gtk::Image::from_icon_name(safe_icon(&notice.icon));icon.set_pixel_size(18);header.append(&icon);
         header.append(&app_name);
         let close = gtk::Button::from_icon_name("window-close-symbolic"); close.add_css_class("flat");
         close.set_tooltip_text(Some("Dismiss notification"));
@@ -166,7 +173,7 @@ fn expansion_state(root:&gtk::Box)->HashMap<u32,bool>{
 fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
     if previous.len()!=next.len() || next.is_empty(){return false;}
     if !previous.iter().zip(next).all(|(a,b)|a==b ||
-        (a.id==b.id && a.app==b.app && a.summary==b.summary && a.body==b.body &&
+        (a.id==b.id && a.app==b.app && a.summary==b.summary && a.body==b.body && a.icon==b.icon && a.urgency==b.urgency &&
         a.actions.is_empty() && b.actions.is_empty() && a.progress.is_some() && b.progress.is_some())){return false;}
     let mut bars=Vec::new();
     for (a,b) in previous.iter().zip(next){
@@ -278,10 +285,15 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
 mod tests {
     use super::*;
     fn notice(id:u32, revision:u64, progress:Option<u8>) -> Notice {
-        Notice { id, revision, progress, actions:vec![], app:"app".into(),summary:"title".into(),body:"".into() }
+        Notice { id, revision, progress, icon:String::new(),urgency:1,actions:vec![], app:"app".into(),summary:"title".into(),body:"".into() }
     }
     fn state(instance:&str,revision:u64,dnd:bool,cards:Vec<Notice>) -> Popup {
         Popup {schema:1,instance:instance.into(),last_id:10,dnd,notice:None,latest_revision:revision,cards,queued:0}
+    }
+    #[test]
+    fn icon_names_are_not_file_paths(){
+        assert_eq!(safe_icon("emblem-ok-symbolic"),"emblem-ok-symbolic");
+        for invalid in ["","/tmp/image.png","../image","file:icon"]{assert_eq!(safe_icon(invalid),"dialog-information-symbolic");}
     }
     #[test]
     fn no_replay_and_live_replacement() {
