@@ -42,7 +42,7 @@ impl Fields {
                 Some("top-left") => NotificationPosition::TopLeft, Some("top-center") => NotificationPosition::TopCenter,
                 Some("top-right") => NotificationPosition::TopRight, _ => NotificationPosition::Automatic,
             },
-            output:self.output.active_id().filter(|id|id.as_str()!="panel").map(|id|id.to_string()).unwrap_or_default(),
+            output:self.output.active_id().and_then(|id|id.strip_prefix("output:").map(str::to_owned)).unwrap_or_default(),
             width:self.width.value_as_int() as u32, max_cards:self.cards.value_as_int() as u32,
             timeout_seconds:self.timeout.value_as_int() as u32, animation_ms:self.animation.value_as_int() as u32,
             radius:self.radius.value_as_int() as u32, opacity:self.opacity.value_as_int() as u32,
@@ -65,14 +65,14 @@ fn refill_outputs(picker:&gtk::ComboBoxText,selected:&str){
         for index in 0..monitors.n_items(){
             let Some(monitor)=monitors.item(index).and_downcast::<gtk::gdk::Monitor>()else{continue;};
             let Some(connector)=monitor.connector()else{continue;};
-            if connector.as_str()=="panel"{continue;}
             let geometry=monitor.geometry();
-            picker.append(Some(connector.as_str()),&format!("{} · {} × {}",connector,geometry.width(),geometry.height()));
+            picker.append(Some(&format!("output:{connector}")),&format!("{} · {} × {}",connector,geometry.width(),geometry.height()));
             found|=connector.as_str()==selected;
         }
     }
-    if !found{picker.append(Some(selected),&format!("{selected} (not connected)"));}
-    picker.set_active_id(Some(if selected.is_empty(){"panel"}else{selected}));
+    if !found{picker.append(Some(&format!("output:{selected}")),&format!("{selected} (not connected)"));}
+    let id=if selected.is_empty(){"panel".into()}else{format!("output:{selected}")};
+    picker.set_active_id(Some(&id));
 }
 fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64,step:f64)->gtk::SpinButton{
     let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
