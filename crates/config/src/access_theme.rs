@@ -75,7 +75,8 @@ impl Layout{
         let rect=|x,y,w,h|Rect{x,y,w,h};
         if compact{return Geometry{auth:rect(80,390,840,480),clock:rect(80,100,840,230)};}
         match self{
-            Self::Centered|Self::Dashboard=>Geometry{auth:rect(320,390,360,450),clock:rect(320,100,360,240)},
+            Self::Centered=>Geometry{auth:rect(320,390,360,450),clock:rect(320,100,360,240)},
+            Self::Dashboard=>Geometry{auth:rect(340,390,320,450),clock:rect(340,100,320,240)},
             Self::Split=>Geometry{auth:rect(570,200,360,600),clock:rect(70,200,450,600)},
             Self::Editorial=>Geometry{auth:rect(620,410,320,420),clock:rect(60,120,510,600)},
             Self::Immersive=>Geometry{auth:rect(340,650,320,310),clock:rect(320,70,360,350)},
@@ -109,16 +110,23 @@ impl Theme{
         if self.layout!=Layout::Dashboard||compact||greeter{return Vec::new();}
         let w=self.dashboard;
         let left=[(Widget::Weather,w.weather),(Widget::System,w.system),(Widget::Media,w.media)];
-        let right=[(Widget::Resources,w.resources),(Widget::Notifications,w.notifications)];
-        let groups=[(50,left.as_slice()),(720,right.as_slice())];
         let mut tiles=Vec::new();
-        for (x,items) in groups{
-            let count=items.iter().filter(|(_,show)|*show).count() as u32;
-            if count==0{continue;}
+        let count=left.iter().filter(|(_,show)|*show).count() as u32;
+        if count>0{
             let height=(840-(count-1)*24)/count;
-            for (i,(widget,_)) in items.iter().filter(|(_,show)|*show).enumerate(){
-                tiles.push(Tile{widget:*widget,rect:Rect{x,y:80+i as u32*(height+24),w:230,h:height}});
+            for (i,(widget,_)) in left.iter().filter(|(_,show)|*show).enumerate(){
+                tiles.push(Tile{widget:*widget,rect:Rect{x:40,y:80+i as u32*(height+24),w:270,h:height}});
             }
+        }
+        // The resource row has intrinsic, near-square meter cells. Do not
+        // stretch it vertically into the space vacated by notifications.
+        let mut y=80;
+        if w.resources{
+            tiles.push(Tile{widget:Widget::Resources,rect:Rect{x:690,y,w:270,h:260}});
+            y+=284;
+        }
+        if w.notifications{
+            tiles.push(Tile{widget:Widget::Notifications,rect:Rect{x:690,y,w:270,h:920-y}});
         }
         tiles
     }
@@ -204,6 +212,17 @@ mod tests{
         assert_eq!(Theme::parse(&old.to_string()).unwrap().dashboard,DashboardWidgets::default());
         old["dashboard"]=serde_json::json!({"notifications":true,"reveal_contents":true});
         assert!(Theme::parse(&old.to_string()).is_err());
+    }
+    #[test]
+    fn resource_row_keeps_intrinsic_height_when_notifications_are_hidden(){
+        let mut theme=preset("classic").unwrap();
+        let resource=|theme:&Theme|theme.dashboard_tiles(false,false).into_iter().find(|t|t.widget==Widget::Resources).unwrap().rect;
+        let before=resource(&theme);
+        assert_eq!(before.h,260);
+        theme.dashboard.notifications=true;
+        assert_eq!(resource(&theme),before);
+        let notification=theme.dashboard_tiles(false,false).into_iter().find(|t|t.widget==Widget::Notifications).unwrap().rect;
+        assert_eq!(notification.y,before.y+before.h+24);
     }
     #[test]
     fn rejects_executable_fields_paths_unreadable_colors_and_unknown_versions(){
