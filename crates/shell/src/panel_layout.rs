@@ -51,9 +51,9 @@ impl Layout{
             self.backend_label.set_visible(!compact);
             if compact{self.bar.add_css_class("atelier-panel-compact");}else{self.bar.remove_css_class("atelier-panel-compact");}
             if let Some(menu)=self.quick.downcast_ref::<gtk::MenuButton>(){
-                if compact{menu.set_icon_name("preferences-system-symbolic");}else{menu.set_label("Quick controls");}
+                if compact{menu.set_icon_name("network-wireless-symbolic");}else{menu.set_label("Quick controls");}
             }else if let Some(button)=self.quick.downcast_ref::<gtk::Button>(){
-                if compact{button.set_icon_name("preferences-system-symbolic");}else{button.set_label("Quick controls");}
+                if compact{button.set_icon_name("network-wireless-symbolic");}else{button.set_label("Quick controls");}
             }
         }
         compact
