@@ -12,12 +12,15 @@ use std::{cell::Cell,io::IsTerminal,rc::Rc,time::{Duration, Instant}};
 /// ownership assumptions cannot be re-established by an Enable event alone.
 /// This latch deliberately survives a Pause + Activate in one dispatch.
 #[derive(Default)]
-pub(crate) struct SeatContinuity{interrupted:Cell<bool>}
+pub(crate) struct SeatContinuity{pauses:Cell<u64>}
 impl SeatContinuity{
     fn observe(&self,event:&SessionEvent){
-        if matches!(event,SessionEvent::PauseSession){self.interrupted.set(true);}
+        if matches!(event,SessionEvent::PauseSession){self.pauses.set(self.pauses.get().saturating_add(1));}
     }
-    pub(crate) fn usable(&self,active:bool)->bool{active&&!self.interrupted.get()}
+    pub(crate) fn usable(&self,active:bool)->bool{active&&self.pauses.get()==0}
+    /// Recovery may inspect a new active epoch but must never clear the latch.
+    #[cfg(feature = "native-session")]
+    pub(crate) fn recovery_epoch(&self,active:bool)->Option<u64>{active.then(||self.pauses.get())}
     #[cfg(feature = "native-session")]
     pub(crate) fn ensure(&self,active:bool)->Result<()>{
         if !self.usable(active){bail!("native seat ownership interrupted; recovery requires a verified new route");}

@@ -500,6 +500,84 @@ fn recover_scanout(card:&Card<'_>,route:&Route,original:u64,owned:&[u64],seat_ac
     Ok(())
 }
 
+// A protected recovery never resumes normal dispatch. The old renderer,
+// queue, input device state and frame acknowledgments are untrusted.
+#[cfg(feature = "native-session")]
+#[derive(Default)]
+struct BlackRecovery{
+    attempted:Option<u64>,
+    attempts:u8,
+}
+#[cfg(feature = "native-session")]
+impl BlackRecovery{
+    /// Bound the number of new kernel allocations retained until fd release.
+    /// A new attempt requires a fresh active epoch, not repeated polling.
+    fn begin(&mut self,epoch:Option<u64>)->bool{
+        let Some(epoch)=epoch else{return false;};
+        if self.attempted==Some(epoch)||self.attempts>=8{return false;}
+        self.attempted=Some(epoch);self.attempts+=1;true
+    }
+}
+
+#[cfg(feature = "native-session")]
+fn present_recovery_black(card:&Card<'_>,route:&Route,owned:&[u64])->Result<u64>{
+    use smithay::backend::allocator::Fourcc;
+    let (actual,current)=active_route(card)?;
+    if !same_route(&actual,route)||!owned.contains(&current){
+        bail!("recovery refuses a changed route or externally owned framebuffer");
+    }
+    protected_route(card,route,current)?;
+    let (w,h)=route.mode.size();
+    // Fresh CPU-initialized scanout; do not reuse the old GBM renderer,
+    // its fences, damage history or potentially outstanding slots.
+    let mut buffer=card.create_dumb_buffer((u32::from(w),u32::from(h)),Fourcc::Xrgb8888,32)
+        .context("allocate emergency black buffer")?;
+    // No explicit removal of an ambiguously submitted FB. Kernel handles
+    // remain owned by the seat descriptor until its release.
+    {
+        let mut mapping=card.map_dumb_buffer(&mut buffer).context("map emergency black buffer")?;
+        mapping.as_mut().fill(0);
+    }
+    let fb=card.add_framebuffer(&buffer,24,32).context("register emergency black framebuffer")?;
+    let id=u64::from(u32::from(fb));
+    commit_framebuffer(card,route.plane,id,true).context("test emergency black framebuffer")?;
+    protected_route(card,route,current)?;
+    // Blocking commit, no page-flip event from this recovery request.
+    // An old pending flip may cause failure; never force a modeset.
+    commit_framebuffer(card,route.plane,id,false).context("present emergency black framebuffer")?;
+    protected_route(card,route,id)?;
+    Ok(id)
+}
+
+#[cfg(feature = "native-session")]
+fn quarantine_protected(
+    card:&Card<'_>,route:&Route,mut owned:Vec<u64>,
+    session:&smithay::backend::session::libseat::LibSeatSession,
+    continuity:&crate::seat::SeatContinuity,
+    event_loop:&mut smithay::reexports::calloop::EventLoop<'_,()>,
+    running:&std::sync::atomic::AtomicBool,
+)->Result<()>{
+    use smithay::backend::session::Session;
+    use std::{sync::atomic::Ordering,time::Duration};
+    let mut recovery=BlackRecovery::default();
+    tracing::error!("protected session quarantined; no Wayland dispatch or input; explicit termination required");
+    while running.load(Ordering::SeqCst){
+        event_loop.dispatch(Duration::from_millis(100),&mut ())
+            .map_err(|e|anyhow::anyhow!("dispatch quarantined seat events: {e}"))?;
+        if !running.load(Ordering::SeqCst){break;}
+        let epoch=continuity.recovery_epoch(session.is_active());
+        if !recovery.begin(epoch){continue;}
+        match present_recovery_black(card,route,&owned){
+            Ok(id)=>{
+                owned.push(id);
+                tracing::warn!("emergency black framebuffer verified; session remains quarantined");
+            }
+            Err(error)=>tracing::error!(?error,"emergency black presentation failed; session remains quarantined"),
+        }
+    }
+    bail!("protected session terminated from quarantine; seat release remains unverified")
+}
+
 // Experimental continuous native session. One outstanding nonblocking page flip keeps
 // the displayed and pending buffers out of the renderer.
 #[cfg(feature = "native-session")]
@@ -566,6 +644,9 @@ pub fn run_native(
     let mut shaders=crate::scene::SceneShaders::default();
     let mut cursor_theme=crate::native_cursor::CursorTheme::load(&mut renderer);
 
+    let running = Arc::new(AtomicBool::new(true));
+    let signal = Arc::clone(&running);
+    ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
     let outcome = (|| -> Result<()> {
         for _ in 0..2 {
             let buffer = allocator.create_buffer(u32::from(width), u32::from(height), Fourcc::Xrgb8888, &[Modifier::Linear])
@@ -586,9 +667,6 @@ pub fn run_native(
         }
         commit_framebuffer(&card, route.plane, original, true).context("preflight original framebuffer")?;
 
-        let running = Arc::new(AtomicBool::new(true));
-        let signal = Arc::clone(&running);
-        ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
         let input_state = Rc::clone(&state);
         let input_dirty = Rc::new(Cell::new(InputDamage::None));
         let event_dirty = Rc::clone(&input_dirty);
@@ -748,7 +826,10 @@ pub fn run_native(
     // lock. Descriptor/seat release is NOT a verified secure recovery path.
     if !state.borrow().desktop_visible(){
         if let Err(cause)=&outcome{eprintln!("Native protected session error: {cause:#}");}
-        bail!("protected session ended; refusing original framebuffer restoration; secure seat recovery not implemented");
+        let owned=slots.iter().map(|(_,fb,_)|u64::from(u32::from(*fb))).collect();
+        // Input source was removed above. No client dispatch or old flip
+        // completion handling in quarantine; no automatic unlock/resume.
+        return quarantine_protected(&card,&route,owned,session,&continuity,event_loop,&running);
     }
     // Even if the seat is currently active again, an observed pause
     // invalidates all old route/FB assumptions. Never restore or explicitly
@@ -794,6 +875,15 @@ mod recovery_tests {
         assert_eq!(cursor_extent((1920,1080),(1900,1060),64),Some((20,20)));
         assert_eq!(cursor_extent((1920,1080),(1920,0),64),None);
         assert_eq!(cursor_extent((0,0),(0,0),64),None);
+    }
+    #[test]
+    fn black_recovery_attempts_once_per_active_epoch_and_is_bounded(){
+        let mut r=BlackRecovery::default();
+        assert!(!r.begin(None));
+        assert!(r.begin(Some(0)));assert!(!r.begin(Some(0)));
+        assert!(!r.begin(None));assert!(r.begin(Some(1)));
+        for epoch in 2..8{assert!(r.begin(Some(epoch)));}
+        assert!(!r.begin(Some(8)));assert!(!r.begin(None));
     }
     #[test]
     fn recovery_restores_only_owned_framebuffers_on_verified_route(){
