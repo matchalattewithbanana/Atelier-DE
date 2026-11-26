@@ -78,7 +78,9 @@ impl Ui{
     fn request(&self,request:Request){
         if self.busy.get(){return;}
         let Some(revision)=self.revision.get().checked_add(1)else{return;};
+        let switching=matches!(&request,Request::Select(_));
         if self.requests.try_send((revision,request)).is_ok(){
+            if switching{self.set_art(None);}
             self.revision.set(revision);self.busy.set(true);self.draft.set(false);
             self.choice.set_sensitive(false);self.artwork_enabled.set_sensitive(false);
             self.wave.update(None,false,None);
@@ -227,7 +229,8 @@ pub fn show(app:&gtk::Application){
         }
         glib::ControlFlow::Continue
     });
-    window.set_child(Some(&content));window.present();
+    let scroll=gtk::ScrolledWindow::builder().child(&content).hscrollbar_policy(gtk::PolicyType::Never).build();
+    window.set_child(Some(&scroll));window.present();
 }
 #[cfg(test)]
 mod tests{
