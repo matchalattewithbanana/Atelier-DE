@@ -4,7 +4,7 @@
 use anyhow::{bail,Context,Result};
 use gtk::{gio,glib};
 use glib::variant::{ToVariant,ObjectPath};
-use std::collections::HashMap;
+use std::{collections::HashMap,cell::{Cell,RefCell},rc::Rc};
 
 const PREFIX:&str="org.mpris.MediaPlayer2.";
 const PATH:&str="/org/mpris/MediaPlayer2";
@@ -83,10 +83,31 @@ fn action_call(state:&Details,action:Action)->Result<(&'static str,&'static str,
 
     Ok((PLAYER,method,args))
 }
-pub struct Bus{connection:gio::DBusConnection}
+/// Signals are invalidations, never authoritative state or permission.
+#[derive(Default)]
+struct Changes{dirty:Cell<bool>,owner:RefCell<Option<String>>}
+impl Changes{
+    fn name(&self,name:&str){if name.starts_with(PREFIX)&&name.len()>PREFIX.len(){self.dirty.set(true);}}
+    fn player(&self,sender:&str){if self.owner.borrow().as_deref()==Some(sender){self.dirty.set(true);}}
+}
+pub struct Bus{connection:gio::DBusConnection,changes:Rc<Changes>,subscriptions:Vec<gio::SignalSubscriptionId>}
+impl Drop for Bus{
+    fn drop(&mut self){for id in self.subscriptions.drain(..){self.connection.signal_unsubscribe(id);}}
+}
 impl Bus{
     pub fn connect()->Result<Self>{
-        Ok(Self{connection:gio::bus_get_sync(gio::BusType::Session,None::<&gio::Cancellable>)?})
+        let connection=gio::bus_get_sync(gio::BusType::Session,None::<&gio::Cancellable>)?;
+        let changes=Rc::new(Changes::default());
+        let mut subscriptions=Vec::new();
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(Some(DBUS),Some(DBUS),Some("NameOwnerChanged"),Some("/org/freedesktop/DBus"),Some("org.mpris.MediaPlayer2"),gio::DBusSignalFlags::MATCH_ARG0_NAMESPACE,move|_,_,_,_,_,args|{
+            if let Some((name,_,_))=args.get::<(String,String,String)>(){state.name(&name);}
+        }));
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(None,Some("org.freedesktop.DBus.Properties"),Some("PropertiesChanged"),Some(PATH),Some(PLAYER),gio::DBusSignalFlags::NONE,move|_,sender,_,_,_,_|state.player(sender)));
+        let state=changes.clone();
+        subscriptions.push(connection.signal_subscribe(None,Some(PLAYER),Some("Seeked"),Some(PATH),None,gio::DBusSignalFlags::NONE,move|_,sender,_,_,_,_|state.player(sender)));
+        Ok(Self{connection,changes,subscriptions})
     }
     fn call(&self,name:&str,path:&str,interface:&str,method:&str,args:Option<&glib::Variant>)->Result<glib::Variant>{
         Ok(self.connection.call_sync(Some(name),path,interface,method,args,None,gio::DBusCallFlags::NO_AUTO_START,TIMEOUT,None::<&gio::Cancellable>)?)
@@ -109,7 +130,14 @@ impl Bus{
         let (props,)=reply.get::<(Properties,)>().context("invalid MPRIS properties")?;
         Ok(details(identity,&props))
     }
-    pub fn selected(&self,name:&str)->Result<Details>{self.read(self.identity(name)?)}
+    pub fn selected(&self,name:&str)->Result<Details>{
+        let identity=self.identity(name)?;
+        *self.changes.owner.borrow_mut()=Some(identity.owner.clone());
+        self.read(identity)
+    }
+    pub fn clear_selection(&self){self.changes.owner.borrow_mut().take();}
+    pub fn take_change(&self)->bool{self.changes.dirty.replace(false)}
+    pub fn has_change(&self)->bool{self.changes.dirty.get()}
     pub fn action(&self,expected:&Identity,action:Action)->Result<()>{
         let current=self.identity(&expected.name)?;
         if &current!=expected{bail!("player instance changed; refresh and retry");}
@@ -126,6 +154,15 @@ impl Bus{
 mod tests{
     use super::*;
     fn identity()->Identity{Identity{name:format!("{PREFIX}test"),owner:":1.2".into()}}
+    #[test]
+    fn invalidation_filters_owner_and_namespace_and_coalesces(){
+        let c=Changes::default();
+        c.name("org.example.Other");c.player(":1.2");assert!(!c.dirty.get());
+        c.name("org.mpris.MediaPlayer2.test");assert!(c.dirty.replace(false));
+        *c.owner.borrow_mut()=Some(":1.2".into());
+        c.player(":1.3");assert!(!c.dirty.get());
+        c.player(":1.2");c.player(":1.2");assert!(c.dirty.replace(false));assert!(!c.dirty.get());
+    }
     #[test]
     fn unknown_capabilities_are_disabled(){
         let state=details(identity(),&Properties::new());
