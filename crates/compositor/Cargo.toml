@@ -27,3 +27,6 @@ tracing-subscriber.workspace = true
 ctrlc = { version = "3.4", features = ["termination"] }
 
 tempfile.workspace = true
+
+[dev-dependencies]
+atelier-recovery-locker = { path = "../recovery-locker" }
