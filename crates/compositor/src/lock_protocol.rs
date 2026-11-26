@@ -3,7 +3,8 @@
 use super::Atelier;
 use smithay::{
     backend::renderer::utils::RendererSurfaceStateUserData,
-    input::pointer::{CursorImageStatus,MotionEvent},
+    input::{keyboard::FilterResult,pointer::{ButtonEvent,CursorImageStatus,MotionEvent}},
+    backend::input::{KeyState,ButtonState},
     utils::SERIAL_COUNTER,
     wayland::{
         compositor::{self,with_states,SurfaceAttributes,BufferAssignment},
@@ -47,6 +48,8 @@ struct AcceptedSurface{
 pub(super) struct Protocol{
     owner:Option<ExtSessionLockV1>,
     surface:Option<AcceptedSurface>,
+    recovery_client:Option<ClientId>,
+    recovering:bool,
 }
 
 impl Atelier{
@@ -54,7 +57,7 @@ impl Atelier{
         if self.session_lock.protected_frame()!=Some(frame){return;}
         let Some(owner)=self.lock_protocol.owner.clone()else{return;};
         if !owner.is_alive(){self.lock_owner_lost(&owner.id());return;}
-        if self.session_lock.presented(frame){owner.locked();self.scene_dirty=true;}
+        if self.session_lock.presented(frame){self.lock_protocol.recovering=false;owner.locked();self.scene_dirty=true;}
     }
     // Lock admission refuses existing grabs; at the other boundary only
     // lock-era click grabs can remain (data-device start_drag is guarded).
@@ -78,7 +81,48 @@ impl Atelier{
         self.cursor_status=CursorImageStatus::default_named();
         self.scene_dirty=true;
     }
+    /// Revoke the old lock authority and neutralize logical seat state
+    /// before entering hardware quarantine. No focus can be restored here.
+    pub(crate) fn prepare_protected_recovery(&mut self){
+        if self.desktop_visible(){return;}
+        if let Some(owner)=self.lock_protocol.owner.as_ref(){self.session_lock.disconnected(&owner.id());}
+        self.lock_protocol=Protocol::default();
+        self.isolate_input(0);
+        let (keys,buttons)=self.input_gate.reset_after_loss();
+        let serial=SERIAL_COUNTER.next_serial();
+        if let Some(keyboard)=self.seat.get_keyboard(){
+            for key in keys{
+                keyboard.input(self,key,KeyState::Released,serial,0,|_,_,_|FilterResult::<()>::Forward);
+            }
+        }
+        if let Some(pointer)=self.seat.get_pointer(){
+            for button in buttons{
+                pointer.button(self,&ButtonEvent{button,state:ButtonState::Released,serial,time:0});
+            }
+            if pointer.is_grabbed(){pointer.unset_grab(self,serial,0);}
+            pointer.frame(self);
+        }
+        clear_data_device_selection(&self.display,&self.seat);
+        self.scene_dirty=true;
+    }
+    /// A trusted internal supervisor may pass this private socket endpoint
+    /// directly to its replacement locker. Never expose it via workspace IPC,
+    /// a filename, PID/UID matching or an untrusted client request.
+    /// No production caller exists until hardware recovery and locker launch
+    /// are validated. Authentication remains the replacement locker's job.
+    #[allow(dead_code)]
+    pub(crate) fn recovery_connection(&mut self)->anyhow::Result<std::os::unix::net::UnixStream>{
+        if !self.session_lock.orphaned()||self.lock_protocol.recovery_client.is_some(){
+            anyhow::bail!("recovery requires an orphaned lock without an outstanding grant");
+        }
+        let (server,endpoint)=std::os::unix::net::UnixStream::pair()?;
+        let client=self.display.insert_client(server,std::sync::Arc::new(super::ClientState::default()))?;
+        self.lock_protocol.recovery_client=Some(client.id());
+        Ok(endpoint)
+    }
+    pub(super) fn recovery_input_ready(&self)->bool{!self.lock_protocol.recovering}
     pub(super) fn sync_lock_input(&mut self,time:u32){
+        if !self.recovery_input_ready(){return;}
         if self.desktop_visible(){
             if self.restore_input&&!self.input_gate.waiting(){
                 self.restore_input=false;
@@ -192,6 +236,18 @@ impl Atelier{
         Some(&s.root)
     }
     fn accept_lock(&mut self,owner:ExtSessionLockV1){
+        // A new ordinary client is never recovery authority. Only the exact
+        // server-created private connection may replace an orphaned owner.
+        if self.session_lock.orphaned(){
+            let granted=owner.client().is_some_and(|c|self.lock_protocol.recovery_client.as_ref()==Some(&c.id()));
+            if !granted||!self.session_lock.recover(owner.id()){owner.finished();return;}
+            self.lock_protocol.recovery_client=None;
+            self.lock_protocol.recovering=true;
+            self.lock_protocol.owner=Some(owner);
+            self.isolate_input(0);
+            clear_data_device_selection(&self.display,&self.seat);
+            return;
+        }
         if !self.desktop_input_ready()||self.seat.get_pointer().is_some_and(|p|p.is_grabbed())||
             self.seat.get_keyboard().is_some_and(|k|k.is_grabbed())||!self.session_lock.begin(owner.id()){
             owner.finished();return;

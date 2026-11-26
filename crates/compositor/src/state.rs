@@ -164,6 +164,7 @@ impl Atelier {
         if self.input_gate.waiting()||self.restore_input{return None;}
         #[cfg(feature = "native-session")]
         if !self.desktop_visible(){
+            if !self.recovery_input_ready(){return None;}
             let root=self.lock_surface()?;
             return smithay::desktop::utils::under_from_surface_tree(root,self.pointer_position,
                 (0,0),WindowSurfaceType::TOPLEVEL|WindowSurfaceType::SUBSURFACE)
