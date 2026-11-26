@@ -519,8 +519,67 @@ impl BlackRecovery{
     }
 }
 
+// A graphics generation owns both its renderer and allocations. Its
+// framebuffer IDs are tracked separately until DRM ownership is resolved.
 #[cfg(feature = "native-session")]
-fn present_recovery_black(card:&Card<'_>,route:&Route,owned:&[u64])->Result<u64>{
+type NativeSlot=(
+    smithay::backend::allocator::gbm::GbmBuffer,
+    control::framebuffer::Handle,
+    smithay::backend::allocator::dmabuf::Dmabuf,
+);
+#[cfg(feature = "native-session")]
+fn native_graphics(fd:&OwnedFd)->Result<(
+    smithay::backend::renderer::gles::GlesRenderer,
+    smithay::backend::allocator::gbm::GbmAllocator<smithay::utils::DeviceFd>,
+)>{
+    use smithay::{backend::{
+        allocator::gbm::{GbmAllocator,GbmBufferFlags,GbmDevice},
+        egl::{EGLContext,EGLDisplay},renderer::gles::GlesRenderer,
+    },utils::DeviceFd};
+    let device=GbmDevice::new(DeviceFd::from(fd.try_clone()?))
+        .map_err(|e|anyhow::anyhow!("create native GBM device: {e}"))?;
+    // SAFETY: EGL retains an owned GBM device; all context use is on this thread.
+    let egl=unsafe{EGLDisplay::new(device.clone())}
+        .map_err(|e|anyhow::anyhow!("initialize native EGL: {e}"))?;
+    let context=EGLContext::new(&egl).map_err(|e|anyhow::anyhow!("create native context: {e}"))?;
+    // SAFETY: this context is new and never shared across threads.
+    let renderer=unsafe{GlesRenderer::new(context)}
+        .map_err(|e|anyhow::anyhow!("initialize native GLES: {e}"))?;
+    let allocator=GbmAllocator::new(device,GbmBufferFlags::SCANOUT|GbmBufferFlags::RENDERING);
+    Ok((renderer,allocator))
+}
+#[cfg(feature = "native-session")]
+fn allocate_native_slot(card:&Card<'_>,route:&Route,
+    renderer:&mut smithay::backend::renderer::gles::GlesRenderer,
+    allocator:&mut smithay::backend::allocator::gbm::GbmAllocator<smithay::utils::DeviceFd>,
+)->Result<NativeSlot>{
+    use drm::buffer::PlanarBuffer;
+    use smithay::backend::{
+        allocator::{Allocator,Fourcc,Modifier,dmabuf::AsDmabuf},
+        renderer::{Bind,Color32F,Frame,Renderer},
+    };
+    use smithay::utils::{Rectangle,Transform};
+    let (w,h)=route.mode.size();
+    let buffer=allocator.create_buffer(u32::from(w),u32::from(h),Fourcc::Xrgb8888,&[Modifier::Linear])
+        .map_err(|e|anyhow::anyhow!("allocate native scanout buffer: {e}"))?;
+    let mut dmabuf=buffer.export().map_err(|e|anyhow::anyhow!("export native scanout buffer: {e}"))?;
+    // Initialize the entire allocation before it can become eligible for
+    // scanout, including when preparing an ordinary startup generation.
+    {
+        let mut target=renderer.bind(&mut dmabuf).map_err(|e|anyhow::anyhow!("bind native scanout buffer: {e}"))?;
+        let size=(i32::from(w),i32::from(h)).into();
+        let mut frame=renderer.render(&mut target,size,Transform::Normal)
+            .map_err(|e|anyhow::anyhow!("initialize native scanout buffer: {e}"))?;
+        frame.clear(Color32F::new(0.0,0.0,0.0,1.0),&[Rectangle::from_size(size)])?;
+        frame.finish()?.wait().map_err(|e|anyhow::anyhow!("initialize native scanout fence: {e:?}"))?;
+    }
+    let flags=if PlanarBuffer::modifier(&*buffer).is_some(){control::FbCmd2Flags::MODIFIERS}else{control::FbCmd2Flags::empty()};
+    let fb=card.add_planar_framebuffer(&*buffer,flags).context("register initialized native framebuffer")?;
+    Ok((buffer,fb,dmabuf))
+}
+
+#[cfg(feature = "native-session")]
+fn present_recovery_black(card:&Card<'_>,route:&Route,owned:&mut Vec<u64>)->Result<u64>{
     use smithay::backend::allocator::Fourcc;
     let (actual,current)=active_route(card)?;
     if !same_route(&actual,route)||!owned.contains(&current){
@@ -540,11 +599,43 @@ fn present_recovery_black(card:&Card<'_>,route:&Route,owned:&[u64])->Result<u64>
     }
     let fb=card.add_framebuffer(&buffer,24,32).context("register emergency black framebuffer")?;
     let id=u64::from(u32::from(fb));
+    // Record ownership before TEST_ONLY or commit. A failed readback can
+    // follow a successful submission; never forget an allocated FB ID.
+    owned.push(id);
     commit_framebuffer(card,route.plane,id,true).context("test emergency black framebuffer")?;
     protected_route(card,route,current)?;
     // Blocking commit, no page-flip event from this recovery request.
     // An old pending flip may cause failure; never force a modeset.
     commit_framebuffer(card,route.plane,id,false).context("present emergency black framebuffer")?;
+    protected_route(card,route,id)?;
+    Ok(id)
+}
+
+#[cfg(feature = "native-session")]
+struct RebuiltGraphics{
+    // Retain all allocations even after an ambiguous test/commit result.
+    // Only the seat descriptor release retires quarantined generations.
+    _renderer:smithay::backend::renderer::gles::GlesRenderer,
+    _allocator:smithay::backend::allocator::gbm::GbmAllocator<smithay::utils::DeviceFd>,
+    slots:Vec<NativeSlot>,
+}
+#[cfg(feature = "native-session")]
+fn rebuild_protected_graphics(card:&Card<'_>,route:&Route,black:u64,owned:&mut Vec<u64>,
+    retained:&mut Vec<RebuiltGraphics>)->Result<u64>{
+    protected_route(card,route,black)?;
+    let (renderer,allocator)=native_graphics(card.0)?;
+    retained.push(RebuiltGraphics{_renderer:renderer,_allocator:allocator,slots:Vec::with_capacity(2)});
+    let generation=retained.last_mut().expect("just inserted graphics generation");
+    for _ in 0..2{
+        let slot=allocate_native_slot(card,route,&mut generation._renderer,&mut generation._allocator)?;
+        let id=u64::from(u32::from(slot.1));
+        owned.push(id);
+        generation.slots.push(slot);
+        commit_framebuffer(card,route.plane,id,true).context("test reconstructed graphics slot")?;
+    }
+    let id=u64::from(u32::from(generation.slots[0].1));
+    protected_route(card,route,black)?;
+    commit_framebuffer(card,route.plane,id,false).context("present reconstructed black graphics slot")?;
     protected_route(card,route,id)?;
     Ok(id)
 }
@@ -560,17 +651,43 @@ fn quarantine_protected(
     use smithay::backend::session::Session;
     use std::{sync::atomic::Ordering,time::Duration};
     let mut recovery=BlackRecovery::default();
+    let mut retained=Vec::new();
+    let mut verified:Option<(u64,u64)>=None;
+    let mut last_check=std::time::Instant::now();
     tracing::error!("protected session quarantined; no Wayland dispatch or input; explicit termination required");
     while running.load(Ordering::SeqCst){
         event_loop.dispatch(Duration::from_millis(100),&mut ())
             .map_err(|e|anyhow::anyhow!("dispatch quarantined seat events: {e}"))?;
         if !running.load(Ordering::SeqCst){break;}
         let epoch=continuity.recovery_epoch(session.is_active());
+        if verified.is_some_and(|(e,_)|Some(e)!=epoch){verified=None;}
+        // A verification is an observation, not permanent ownership.
+        // Recheck while idle, without overwriting an external framebuffer.
+        if last_check.elapsed()>=Duration::from_millis(500){
+            if let Some((_,id))=verified{
+                if let Err(error)=protected_route(card,route,id){
+                    verified=None;
+                    tracing::error!(?error,"quarantined black scanout no longer verified");
+                }
+            }
+            last_check=std::time::Instant::now();
+        }
         if !recovery.begin(epoch){continue;}
-        match present_recovery_black(card,route,&owned){
-            Ok(id)=>{
-                owned.push(id);
-                tracing::warn!("emergency black framebuffer verified; session remains quarantined");
+        let active_epoch=epoch.expect("recovery requires active epoch");
+        match present_recovery_black(card,route,&mut owned){
+            Ok(black)=>{
+                verified=Some((active_epoch,black));
+                tracing::warn!("emergency CPU black framebuffer verified");
+                match rebuild_protected_graphics(card,route,black,&mut owned,&mut retained){
+                    Ok(id)=>{
+                        verified=Some((active_epoch,id));
+                        tracing::warn!("fresh graphics generation and black scanout verified; session remains quarantined");
+                    }
+                    Err(error)=>{
+                        if protected_route(card,route,black).is_err(){verified=None;}
+                        tracing::error!(?error,"graphics reconstruction incomplete; session remains quarantined");
+                    }
+                }
             }
             Err(error)=>tracing::error!(?error,"emergency black presentation failed; session remains quarantined"),
         }
@@ -591,17 +708,13 @@ pub fn run_native(
 ) -> Result<()> {
     use crate::{state::{Atelier, ClientState}, input_router::handle_input, frame_queue::{FrameQueue,InputDamage}};
     use drm::{Device as _, ClientCapability};
-    use drm::buffer::PlanarBuffer;
-    use control::FbCmd2Flags;
     use smithay::{
         backend::{
-            allocator::{dmabuf::AsDmabuf, gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}, Allocator, Fourcc, Modifier},
-            egl::{EGLContext, EGLDisplay},
-            renderer::{gles::GlesRenderer, utils::draw_render_elements, Bind, Color32F, Frame, Renderer},
+            renderer::{utils::draw_render_elements, Bind, Color32F, Frame, Renderer},
             session::Session,
         },
         reexports::wayland_server::{Display, ListeningSocket},
-        utils::{DeviceFd, Rectangle, Transform},
+        utils::{Rectangle, Transform},
     };
     use std::{cell::{Cell, RefCell}, collections::HashSet, rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 
@@ -628,16 +741,7 @@ pub fn run_native(
     let listener = ListeningSocket::bind(socket).context("bind native Wayland socket")?;
     let mut workspace_control = crate::workspace_control::WorkspaceControl::bind(socket)?;
 
-    let device = GbmDevice::new(DeviceFd::from(fd.try_clone()?))
-        .map_err(|error| anyhow::anyhow!("create native GBM device: {error}"))?;
-    // SAFETY: EGL retains an owned native device and all context use is on this thread.
-    let egl = unsafe { EGLDisplay::new(device.clone()) }
-        .map_err(|error| anyhow::anyhow!("initialize native EGL: {error}"))?;
-    let context = EGLContext::new(&egl).map_err(|error| anyhow::anyhow!("create native context: {error}"))?;
-    // SAFETY: newly created context is never shared with another thread.
-    let mut renderer = unsafe { GlesRenderer::new(context) }
-        .map_err(|error| anyhow::anyhow!("initialize native GLES: {error}"))?;
-    let mut allocator = GbmAllocator::new(device, GbmBufferFlags::SCANOUT | GbmBufferFlags::RENDERING);
+    let (mut renderer,mut allocator)=native_graphics(fd)?;
     let mut slots = Vec::new();
     let mut queue = FrameQueue::default();
     let mut client_damage=crate::client_damage::ClientDamage::new();
@@ -649,21 +753,10 @@ pub fn run_native(
     ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
     let outcome = (|| -> Result<()> {
         for _ in 0..2 {
-            let buffer = allocator.create_buffer(u32::from(width), u32::from(height), Fourcc::Xrgb8888, &[Modifier::Linear])
-                .map_err(|error| anyhow::anyhow!("allocate native scanout buffer: {error}"))?;
-            // Keep the same exported object for the lifetime of this slot.
-            // Validate EGL import before registering the DRM framebuffer.
-            let mut dmabuf = buffer.export().map_err(|error| anyhow::anyhow!("export native scanout buffer: {error}"))?;
-            {
-                let _target = renderer.bind(&mut dmabuf).map_err(|error| anyhow::anyhow!("preflight native render target: {error}"))?;
-            }
-            let flags = if PlanarBuffer::modifier(&*buffer).is_some() { FbCmd2Flags::MODIFIERS } else { FbCmd2Flags::empty() };
-            let fb = card.add_planar_framebuffer(&*buffer, flags).context("register native framebuffer")?;
-            // Retain both the GBM allocation and the exported DMA-BUF; the
-            // framebuffer handle remains registered until guarded cleanup.
-            slots.push((buffer, fb, dmabuf));
-            commit_framebuffer(&card, route.plane, u64::from(u32::from(fb)), true)
-                .context("preflight native framebuffer")?;
+            let slot=allocate_native_slot(&card,&route,&mut renderer,&mut allocator)?;
+            let id=u64::from(u32::from(slot.1));
+            slots.push(slot);
+            commit_framebuffer(&card,route.plane,id,true).context("preflight initialized native framebuffer")?;
         }
         commit_framebuffer(&card, route.plane, original, true).context("preflight original framebuffer")?;
 
