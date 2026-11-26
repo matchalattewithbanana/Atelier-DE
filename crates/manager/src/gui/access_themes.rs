@@ -1,9 +1,10 @@
 //! Offline native login/lock theme draft editor. Never connects to a greeter
 //! or collects real credentials. The drawing uses the shared layout contract.
-use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,PRESETS};
+use atelier_config::access_theme::{self,Theme,Rect,Typography,Layout,Palette,Backdrop,GradientDirection,ImageFit,PRESETS};
 use gtk::prelude::*;
+use atelier_config::{access_bundle::{self,Bundle},wallpaper::Raster};
 use std::{cell::{Cell,RefCell},path::PathBuf,rc::Rc};
-use super::label;
+use super::{label,background};
 
 fn color(cr:&gtk::cairo::Context,value:&str){
     let n=u32::from_str_radix(&value[1..],16).expect("validated theme color");
@@ -32,12 +33,52 @@ fn text(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),line:&str,relative_y:f64,
         let _=cr.show_text(line);
     }
 }
-fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,compact:bool,login:bool){
+#[derive(Clone)]
+struct Wallpaper{raster:Rc<Raster>,surface:gtk::cairo::ImageSurface}
+impl Wallpaper{
+    fn new(raster:Raster)->anyhow::Result<Self>{
+        let (w,h)=(raster.width as i32,raster.height as i32);
+        let mut pixels=Vec::with_capacity(raster.rgba.len());
+        for p in raster.rgba.chunks_exact(4){
+            let a=u32::from(p[3]);let premultiply=|c:u8|(u32::from(c)*a+127)/255;
+            let argb=(a<<24)|(premultiply(p[0])<<16)|(premultiply(p[1])<<8)|premultiply(p[2]);
+            pixels.extend_from_slice(&argb.to_ne_bytes());
+        }
+        let surface=gtk::cairo::ImageSurface::create_for_data(pixels,gtk::cairo::Format::ARgb32,w,h,w*4)?;
+        Ok(Self{raster:Rc::new(raster),surface})
+    }
+}
+fn backdrop(cr:&gtk::cairo::Context,w:f64,h:f64,theme:&Theme,image:Option<&Wallpaper>){
+    color(cr,&theme.palette.background);let _=cr.paint();
+    match &theme.backdrop{
+        Backdrop::Solid=>{},
+        Backdrop::Gradient{end,direction}=>{
+            let (x,y)=match direction{GradientDirection::Horizontal=>(w,0.0),GradientDirection::Vertical=>(0.0,h),GradientDirection::Diagonal=>(w,h)};
+            let pattern=gtk::cairo::LinearGradient::new(0.0,0.0,x,y);
+            for (offset,value) in [(0.0,&theme.palette.background),(1.0,end)]{
+                let n=u32::from_str_radix(&value[1..],16).expect("validated gradient");
+                pattern.add_color_stop_rgb(offset,f64::from((n>>16)&255)/255.0,f64::from((n>>8)&255)/255.0,f64::from(n&255)/255.0);
+            }
+            if cr.set_source(&pattern).is_ok(){let _=cr.paint();}
+        }
+        Backdrop::Wallpaper{fit,dim}=>{
+            if let Some(image)=image{
+                let iw=f64::from(image.raster.width);let ih=f64::from(image.raster.height);
+                let (sx,sy)=match fit{ImageFit::Stretch=>(w/iw,h/ih),ImageFit::Cover=>{let s=(w/iw).max(h/ih);(s,s)},ImageFit::Contain=>{let s=(w/iw).min(h/ih);(s,s)}};
+                let _=cr.save();cr.translate((w-iw*sx)/2.0,(h-ih*sy)/2.0);cr.scale(sx,sy);
+                if cr.set_source_surface(&image.surface,0.0,0.0).is_ok(){let _=cr.paint();}
+                let _=cr.restore();
+                cr.set_source_rgba(0.0,0.0,0.0,f64::from(*dim)/100.0);let _=cr.paint();
+            }
+        }
+    }
+}
+fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper>,compact:bool,login:bool){
     let (w,h)=(f64::from(w.max(1)),f64::from(h.max(1)));
     let (w,offset)=if compact{let narrow=w.min(h*0.82);(narrow,(w-narrow)/2.0)}else{(w,0.0)};
     let _=cr.save();cr.translate(offset,0.0);
     cr.rectangle(0.0,0.0,w,h);cr.clip();
-    color(cr,&theme.palette.background);let _=cr.paint();
+    backdrop(cr,w,h,theme,image);
     let geometry=theme.layout.geometry(compact||w<h*1.1);
     let family=match theme.typography{Typography::Sans=>"sans-serif",Typography::Monospace=>"monospace",Typography::Display=>"serif"};
     cr.select_font_face(family,gtk::cairo::FontSlant::Normal,gtk::cairo::FontWeight::Bold);
@@ -66,6 +107,8 @@ struct Fields{
     name:gtk::Entry,layout:gtk::ComboBoxText,typography:gtk::ComboBoxText,
     colors:[gtk::ColorButton;5],radius:gtk::SpinButton,motion:gtk::SpinButton,
     clock:gtk::CheckButton,date:gtk::CheckButton,
+    background:gtk::ComboBoxText,gradient_end:gtk::ColorButton,direction:gtk::ComboBoxText,
+    fit:gtk::ComboBoxText,dim:gtk::SpinButton,
 }
 fn row(parent:&gtk::Box,title:&str,control:&impl IsA<gtk::Widget>){
     let row=gtk::Box::new(gtk::Orientation::Horizontal,12);
@@ -92,11 +135,17 @@ impl Fields{
         let colors=["Background","Authentication panel","Primary text","Secondary text","Accent"].map(|title|{
             let button=gtk::ColorButton::new();button.set_use_alpha(false);button.set_title(title);row(parent,title,&button);button
         });
+        parent.append(&label("Background","title-3"));
+        let background=choice(parent,"Background type",&[("solid","Solid"),("gradient","Gradient"),("wallpaper","Wallpaper")]);
+        let gradient_end=gtk::ColorButton::new();gradient_end.set_use_alpha(false);gradient_end.set_title("Gradient end");row(parent,"Gradient end",&gradient_end);
+        let direction=choice(parent,"Gradient direction",&[("horizontal","Horizontal"),("vertical","Vertical"),("diagonal","Diagonal")]);
+        let fit=choice(parent,"Image fit",&[("cover","Cover"),("contain","Contain"),("stretch","Stretch")]);
+        let dim=spin(parent,"Wallpaper dim (%)",80.0,1.0);
         parent.append(&label("Geometry and widgets","title-3"));
         let radius=spin(parent,"Corner radius",48.0,1.0);let motion=spin(parent,"Motion duration (ms)",400.0,10.0);
         let clock=gtk::CheckButton::with_label("Show clock");let date=gtk::CheckButton::with_label("Show date");
         parent.append(&clock);parent.append(&date);
-        Self{name,layout,typography,colors,radius,motion,clock,date}
+        Self{name,layout,typography,colors,radius,motion,clock,date,background,gradient_end,direction,fit,dim}
     }
     fn populate(&self,theme:&Theme){
         self.name.set_text(&theme.name);
@@ -104,6 +153,20 @@ impl Fields{
         self.typography.set_active_id(Some(match theme.typography{Typography::Sans=>"sans",Typography::Monospace=>"monospace",Typography::Display=>"display"}));
         for (button,value) in self.colors.iter().zip([&theme.palette.background,&theme.palette.panel,&theme.palette.text,&theme.palette.muted,&theme.palette.accent]){
             button.set_rgba(&gtk::gdk::RGBA::parse(value).expect("validated palette"));
+        }
+        self.background.set_active_id(Some("solid"));
+        self.gradient_end.set_rgba(&gtk::gdk::RGBA::parse("#334455").unwrap());
+        self.direction.set_active_id(Some("diagonal"));self.fit.set_active_id(Some("cover"));self.dim.set_value(25.0);
+        match &theme.backdrop{
+            Backdrop::Solid=>{},
+            Backdrop::Gradient{end,direction}=>{
+                self.background.set_active_id(Some("gradient"));self.gradient_end.set_rgba(&gtk::gdk::RGBA::parse(end).unwrap());
+                self.direction.set_active_id(Some(match direction{GradientDirection::Horizontal=>"horizontal",GradientDirection::Vertical=>"vertical",GradientDirection::Diagonal=>"diagonal"}));
+            }
+            Backdrop::Wallpaper{fit,dim}=>{
+                self.background.set_active_id(Some("wallpaper"));
+                self.fit.set_active_id(Some(match fit{ImageFit::Cover=>"cover",ImageFit::Contain=>"contain",ImageFit::Stretch=>"stretch"}));self.dim.set_value(f64::from(*dim));
+            }
         }
         self.radius.set_value(f64::from(theme.corner_radius));self.motion.set_value(f64::from(theme.motion_ms));
         self.clock.set_active(theme.clock);self.date.set_active(theme.date);
@@ -118,16 +181,26 @@ impl Fields{
             _=>anyhow::bail!("select typography"),
         };
         let [background,panel,text,muted,accent]=self.colors.each_ref().map(|button|hex(button.rgba()));
+        let backdrop=match self.background.active_id().as_deref(){
+            Some("solid")=>Backdrop::Solid,
+            Some("gradient")=>Backdrop::Gradient{end:hex(self.gradient_end.rgba()),direction:match self.direction.active_id().as_deref(){
+                Some("horizontal")=>GradientDirection::Horizontal,Some("vertical")=>GradientDirection::Vertical,_=>GradientDirection::Diagonal,
+            }},
+            Some("wallpaper")=>Backdrop::Wallpaper{fit:match self.fit.active_id().as_deref(){
+                Some("contain")=>ImageFit::Contain,Some("stretch")=>ImageFit::Stretch,_=>ImageFit::Cover,
+            },dim:self.dim.value_as_int() as u32},
+            _=>anyhow::bail!("select a background type"),
+        };
         let theme=Theme{format:"atelier-access-theme".into(),version:1,name:self.name.text().to_string(),layout,typography,
             palette:Palette{background,panel,text,muted,accent},corner_radius:self.radius.value_as_int() as u32,
-            motion_ms:self.motion.value_as_int() as u32,clock:self.clock.is_active(),date:self.date.is_active()};
+            motion_ms:self.motion.value_as_int() as u32,clock:self.clock.is_active(),date:self.date.is_active(),backdrop};
         theme.validate()?;Ok(theme)
     }
     fn connect_changes(&self,refresh:Rc<dyn Fn()>){
         {let refresh=refresh.clone();self.name.connect_changed(move |_|refresh());}
-        for combo in [&self.layout,&self.typography]{let refresh=refresh.clone();combo.connect_changed(move |_|refresh());}
-        for color in &self.colors{let refresh=refresh.clone();color.connect_rgba_notify(move |_|refresh());}
-        for spin in [&self.radius,&self.motion]{let refresh=refresh.clone();spin.connect_value_changed(move |_|refresh());}
+        for combo in [&self.layout,&self.typography,&self.background,&self.direction,&self.fit]{let refresh=refresh.clone();combo.connect_changed(move |_|refresh());}
+        for color in self.colors.iter().chain(std::iter::once(&self.gradient_end)){let refresh=refresh.clone();color.connect_rgba_notify(move |_|refresh());}
+        for spin in [&self.radius,&self.motion,&self.dim]{let refresh=refresh.clone();spin.connect_value_changed(move |_|refresh());}
         for check in [&self.clock,&self.date]{let refresh=refresh.clone();check.connect_toggled(move |_|refresh());}
     }
 }
@@ -135,7 +208,7 @@ pub(super) fn build()->gtk::Box{
     let outer=gtk::Box::new(gtk::Orientation::Vertical,12);
     outer.set_margin_top(24);outer.set_margin_bottom(24);outer.set_margin_start(24);outer.set_margin_end(24);
     outer.append(&label("Native access theme Studio","title-1"));
-    outer.append(&label("Offline login and lock appearance drafts. No live session, authentication, wallpaper assets or external QML are loaded.","dim-label"));
+    outer.append(&label("Offline login and lock appearance drafts. No live session, authentication or external QML are loaded. Only explicitly chosen static wallpapers are decoded.","dim-label"));
     let form=gtk::Box::new(gtk::Orientation::Vertical,12);
     let preset=gtk::ComboBoxText::new();for (id,name) in PRESETS{preset.append(Some(id),name);}preset.set_active_id(Some("classic"));
     row(&form,"Built-in preset",&preset);
@@ -146,58 +219,118 @@ pub(super) fn build()->gtk::Box{
     let preview=gtk::DrawingArea::new();preview.set_content_height(300);preview.set_hexpand(true);form.append(&preview);
     let status=label("Valid Classic draft. No settings changed.","dim-label");status.set_selectable(true);form.append(&status);
     let fields=Rc::new(Fields::build(&form));fields.populate(&initial);
-    let path=gtk::Entry::new();path.set_placeholder_text(Some("Absolute .json file path"));form.append(&path);
+    let image_path=gtk::Entry::new();image_path.set_placeholder_text(Some("Absolute PNG, JPEG or WebP path"));form.append(&image_path);
+    let choose_image=gtk::Button::with_label("Load static wallpaper");form.append(&choose_image);
+    let asset_status=label("No wallpaper loaded.","dim-label");form.append(&asset_status);
+    let path=gtk::Entry::new();path.set_placeholder_text(Some("Absolute .json file or .atelier-access bundle path"));form.append(&path);
     let actions=gtk::Box::new(gtk::Orientation::Horizontal,8);
     let import=gtk::Button::with_label("Import draft");let export=gtk::Button::with_label("Export new file");
     actions.append(&import);actions.append(&export);form.append(&actions);
-    let current=Rc::new(RefCell::new(initial));
+    let selected_image=Rc::new(RefCell::new(None::<Wallpaper>));
+    let current=Rc::new(RefCell::new((initial,None::<Wallpaper>)));
     {
         let (current,compact,login)=(current.clone(),compact.downgrade(),login.downgrade());
-        preview.set_draw_func(move|_,cr,w,h|draw(cr,w,h,&current.borrow(),compact.upgrade().is_some_and(|c|c.is_active()),login.upgrade().is_some_and(|c|c.is_active())));
+        preview.set_draw_func(move|_,cr,w,h|{let current=current.borrow();draw(cr,w,h,&current.0,current.1.as_ref(),compact.upgrade().is_some_and(|c|c.is_active()),login.upgrade().is_some_and(|c|c.is_active()));});
     }
     for button in [&compact,&login]{let preview=preview.downgrade();button.connect_toggled(move|_|{if let Some(p)=preview.upgrade(){p.queue_draw();}});}
     let populating=Rc::new(Cell::new(false));
     let refresh:Rc<dyn Fn()>={
         let (fields,preview,status,export)=(Rc::downgrade(&fields),preview.downgrade(),status.downgrade(),export.downgrade());
-        let populating=populating.clone();
+        let populating=populating.clone();let selected_image=selected_image.clone();
         Rc::new(move||{
             if populating.get(){return;}
             let (Some(fields),Some(preview),Some(status),Some(export))=(fields.upgrade(),preview.upgrade(),status.upgrade(),export.upgrade())else{return;};
             match fields.read(){
-                Ok(theme)=>{*current.borrow_mut()=theme;preview.queue_draw();status.set_text("Valid draft. No settings changed.");export.set_sensitive(true);}
+                Ok(theme) if !theme.backdrop.needs_image()||selected_image.borrow().is_some()=>{
+                    let image=if theme.backdrop.needs_image(){selected_image.borrow().clone()}else{None};
+                    *current.borrow_mut()=(theme,image);preview.queue_draw();status.set_text("Valid draft. No settings changed.");export.set_sensitive(true);
+                }
+                Ok(_)=>{status.set_text("Load a wallpaper to preview or export this draft. Previous preview retained.");export.set_sensitive(false);}
                 Err(e)=>{status.set_text(&format!("Invalid draft: {e:#}. Last valid preview retained."));export.set_sensitive(false);}
             }
         })
     };
     fields.connect_changes(refresh.clone());
-    let populate:Rc<dyn Fn(Theme)>={
-        let fields=fields.clone();let refresh=refresh.clone();
-        Rc::new(move|theme|{populating.set(true);fields.populate(&theme);populating.set(false);refresh();})
+    let populate:Rc<dyn Fn(Theme,Option<Wallpaper>)>={
+        let fields=fields.clone();let refresh=refresh.clone();let selected_image=selected_image.clone();let asset_status=asset_status.downgrade();
+        let populating=populating.clone();
+        Rc::new(move|theme,image|{
+            if let Some(status)=asset_status.upgrade(){status.set_text(if image.is_some(){"Wallpaper loaded from bundle."}else{"No wallpaper loaded."});}
+            *selected_image.borrow_mut()=image;
+            populating.set(true);fields.populate(&theme);populating.set(false);refresh();
+        })
     };
     {
         let (preset,status)=(preset.downgrade(),status.downgrade());let populate=populate.clone();
         load.connect_clicked(move|_|{
             let (Some(id),Some(status))=(preset.upgrade().and_then(|p|p.active_id()),status.upgrade())else{return;};
-            match access_theme::preset(&id){Ok(theme)=>populate(theme),Err(e)=>status.set_text(&format!("{e:#}"))}
+            match access_theme::preset(&id){Ok(theme)=>populate(theme,None),Err(e)=>status.set_text(&format!("{e:#}"))}
         });
     }
     {
-        let (path,status)=(path.downgrade(),status.downgrade());
+        let (form,image_path,status,asset_status)=(form.downgrade(),image_path.downgrade(),status.downgrade(),asset_status.downgrade());
+        let fields=fields.clone();let refresh=refresh.clone();let selected_image=selected_image.clone();
+        choose_image.connect_clicked(move|_|{
+            let (Some(form),Some(path),Some(status))=(form.upgrade(),image_path.upgrade(),status.upgrade())else{return;};
+            let path=PathBuf::from(path.text().as_str());form.set_sensitive(false);status.set_text("Decoding bounded local wallpaper…");
+            let (form,status,asset_status)=(form.downgrade(),status.downgrade(),asset_status.clone());
+            let (fields,refresh,selected_image)=(fields.clone(),refresh.clone(),selected_image.clone());
+            background(move||access_bundle::load_wallpaper(&path),move|result|{
+                if let Some(form)=form.upgrade(){form.set_sensitive(true);}
+                let Some(status)=status.upgrade()else{return;};
+                match result.and_then(Wallpaper::new){
+                    Ok(image)=>{
+                        *selected_image.borrow_mut()=Some(image);
+                        if let Some(label)=asset_status.upgrade(){label.set_text("Static wallpaper loaded into draft.");}
+                        fields.background.set_active_id(Some("wallpaper"));refresh();
+                    }
+                    Err(e)=>status.set_text(&format!("Wallpaper not changed: {e:#}")),
+                }
+            });
+        });
+    }
+    {
+        let (form,path,status)=(form.downgrade(),path.downgrade(),status.downgrade());
         import.connect_clicked(move|_|{
-            let (Some(path),Some(status))=(path.upgrade(),status.upgrade())else{return;};
-            match Theme::import(&PathBuf::from(path.text().as_str())){
-                Ok(theme)=>populate(theme),Err(e)=>status.set_text(&format!("Import failed: {e:#}")),
-            }
+            let (Some(form),Some(path),Some(status))=(form.upgrade(),path.upgrade(),status.upgrade())else{return;};
+            let path=PathBuf::from(path.text().as_str());form.set_sensitive(false);status.set_text("Reading theme draft…");
+            let (form,status)=(form.downgrade(),status.downgrade());let populate=populate.clone();
+            background(move||{
+                if path.extension().and_then(|v|v.to_str())==Some("atelier-access"){
+                    let bundle=Bundle::import(&path)?;Ok((bundle.theme,Some(bundle.wallpaper)))
+                }else{
+                    let theme=Theme::import(&path)?;
+                    if theme.backdrop.needs_image(){anyhow::bail!("wallpaper themes require an .atelier-access bundle");}
+                    Ok((theme,None))
+                }
+            },move|result|{
+                if let Some(form)=form.upgrade(){form.set_sensitive(true);}
+                let Some(status)=status.upgrade()else{return;};
+                match result.and_then(|(theme,image)|Ok((theme,image.map(Wallpaper::new).transpose()?))){
+                    Ok((theme,image))=>populate(theme,image),Err(e)=>status.set_text(&format!("Import failed: {e:#}")),
+                }
+            });
         });
     }
     {
-        let (path,status)=(path.downgrade(),status.downgrade());
+        let (form,path,status)=(form.downgrade(),path.downgrade(),status.downgrade());
         export.connect_clicked(move|_|{
-            let (Some(path),Some(status))=(path.upgrade(),status.upgrade())else{return;};
-            match fields.read().and_then(|t|t.export(&PathBuf::from(path.text().as_str()))){
-                Ok(())=>status.set_text("Exported validated theme to a new file. No settings changed."),
-                Err(e)=>status.set_text(&format!("Export failed: {e:#}")),
-            }
+            let (Some(form),Some(path),Some(status))=(form.upgrade(),path.upgrade(),status.upgrade())else{return;};
+            let theme=match fields.read(){Ok(theme)=>theme,Err(e)=>{status.set_text(&format!("{e:#}"));return;}};
+            let image=if theme.backdrop.needs_image(){
+                let selected=selected_image.borrow();
+                let Some(image)=selected.as_ref()else{status.set_text("Load a wallpaper first.");return;};
+                Some(Raster{width:image.raster.width,height:image.raster.height,rgba:image.raster.rgba.clone()})
+            }else{None};
+            let path=PathBuf::from(path.text().as_str());form.set_sensitive(false);status.set_text("Exporting validated draft…");
+            let (form,status)=(form.downgrade(),status.downgrade());
+            background(move||match image{Some(image)=>Bundle::export(&theme,&image,&path),None=>theme.export(&path)},move|result|{
+                if let Some(form)=form.upgrade(){form.set_sensitive(true);}
+                if let Some(status)=status.upgrade(){match result{
+                    Ok(())=>status.set_text("Exported a new theme file or bundle. No settings changed."),
+                    Err(e)=>status.set_text(&format!("Export failed: {e:#}")),
+                }}
+            });
         });
     }
     outer.append(&gtk::ScrolledWindow::builder().vexpand(true).child(&form).build());outer
