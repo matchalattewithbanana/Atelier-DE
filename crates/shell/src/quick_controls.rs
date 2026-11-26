@@ -359,6 +359,21 @@ mod tests{
         assert!(inventory_changed(Some(&old),None,Direction::Output));
     }
     #[test]
+    fn connectivity_summary_does_not_infer_unknown_or_inactive_connections(){
+        use atelier_services::{network,bluetooth};
+        let wifi=|state:&str,name:&str|network::Device{name:name.into(),kind:"wifi".into(),state:state.into(),connection:Some(name.into())};
+        let result=network_summary(NetworkSnapshot{schema:1,wifi_enabled:Some(true),devices:vec![wifi("connected","Home"),wifi("disconnected","Old"),wifi("connected","Home")],profiles:vec![]});
+        assert_eq!(result,(Some(true),"Wi-Fi enabled · Connected: Home".into()));
+        let result=network_summary(NetworkSnapshot{schema:1,wifi_enabled:None,devices:vec![wifi("connected","Home")],profiles:vec![]});
+        assert_eq!(result,(None,"Wi-Fi state unknown".into()));
+        let adapter=||bluetooth::Controller{address:"00:11:22:33:44:55".into(),name:"Adapter".into()};
+        let device=|connected|bluetooth::Device{address:"AA:BB:CC:DD:EE:FF".into(),name:"Device".into(),connected};
+        let result=bluetooth_summary(BluetoothSnapshot{schema:1,controllers:vec![adapter()],powered:Some(true),paired_devices:vec![device(Some(true)),device(None)]});
+        assert_eq!(result,(Some(true),"Bluetooth enabled · 2 paired · 1 connected · 1 connection states unknown".into()));
+        let result=bluetooth_summary(BluetoothSnapshot{schema:1,controllers:vec![adapter(),adapter()],powered:None,paired_devices:vec![]});
+        assert_eq!(result,(None,"Bluetooth state unknown · 2 controllers detected".into()));
+    }
+    #[test]
     fn missing_default_never_guesses_device(){
         let s=AudioSnapshot{schema:1,outputs:vec![],inputs:vec![],default_output:Some("missing".into()),default_input:None};
         assert!(default_device(&s,Direction::Output).is_none());assert!(default_device(&s,Direction::Input).is_none());
