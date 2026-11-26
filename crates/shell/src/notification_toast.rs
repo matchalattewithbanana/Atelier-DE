@@ -151,17 +151,20 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     revealer.set_transition_duration(160); revealer.set_child(Some(&root)); window.set_child(Some(&revealer));
     let (send, receive) = mpsc::sync_channel(1);
     let (requests, incoming) = mpsc::sync_channel::<Request>(1);
-    std::thread::spawn(move || loop {
-        if send.send(snapshot()).is_err() { break; }
+    std::thread::spawn(move || {
+        let mut action_result = None;
+        loop {
+        if send.send((snapshot(), action_result.take())).is_err() { break; }
         match incoming.recv_timeout(Duration::from_millis(500)) {
             Ok(Request::Invoke(instance,id,revision,key)) => {
-                let _ = crate::notification_centre::call(&["invoke",&instance,&id.to_string(),&revision.to_string(),&key]);
+                action_result = Some(crate::notification_centre::call(&["invoke",&instance,&id.to_string(),&revision.to_string(),&key]).map(|_| ()));
             }
             Ok(Request::Dismiss(instance,id)) => {
-                let _ = crate::notification_centre::call(&["dismiss",&instance,&id.to_string()]);
+                action_result = Some(crate::notification_centre::call(&["dismiss",&instance,&id.to_string()]).map(|_| ()));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
         }
     });
     let panel = panel.downgrade(); let mut cursor = Cursor::default();
@@ -169,16 +172,20 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     glib::timeout_add_local(Duration::from_millis(100), move || {
         if panel.upgrade().is_none() { window.close(); return glib::ControlFlow::Break; }
         let now = Instant::now();
+        let mut action_reply = None;
         match receive.try_recv() {
-            Ok(Ok(state)) => cursor.observe(&state,now,if island {3} else {1}),
-            Ok(Err(_)) => cursor = Cursor::default(),
+            Ok((Ok(state), reply)) => { cursor.observe(&state,now,if island {3} else {1}); action_reply = reply; }
+            Ok((Err(_), _)) => cursor = Cursor::default(),
             Err(mpsc::TryRecvError::Disconnected) => { window.close(); return glib::ControlFlow::Break; }
             Err(mpsc::TryRecvError::Empty) => {}
         }
         cursor.expire(now);
         let cards = cursor.cards();
-        if rendered != cards || rendered_instance != cursor.instance || rendered_queued != cursor.queued {
+        if rendered != cards || rendered_instance != cursor.instance || rendered_queued != cursor.queued || action_reply.is_some() {
             render(&root,&cards,cursor.instance.as_deref().unwrap_or(""),cursor.queued,&requests,island);
+            if matches!(action_reply, Some(Err(_))) && !cards.is_empty() {
+                root.append(&label("Action unavailable. Refreshing notification state.", "dim-label", 80));
+            }
             rendered = cards; rendered_instance = cursor.instance.clone(); rendered_queued = cursor.queued;
             if rendered.is_empty() { revealer.set_reveal_child(false); window.set_visible(false); }
             else if !window.is_visible() { window.present(); revealer.set_reveal_child(true); }
