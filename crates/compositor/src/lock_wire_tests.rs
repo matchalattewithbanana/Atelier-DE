@@ -346,7 +346,9 @@ fn cancelled_recovery_grant_cannot_claim_a_later_generation(){
     let (first,endpoint)=h.state.recovery_connection().unwrap();
     endpoint.set_nonblocking(true).unwrap();
     let mut abandoned=h.wire(endpoint);
+    assert!(h.state.recovery_pending(&first));
     h.state.revoke_recovery(&first);
+    assert!(!h.state.recovery_pending(&first));
     let (second,endpoint)=h.state.recovery_connection().unwrap();
     endpoint.set_nonblocking(true).unwrap();
     let mut replacement=h.wire(endpoint);
@@ -356,12 +358,45 @@ fn cancelled_recovery_grant_cannot_claim_a_later_generation(){
     let m=replacement.bind("ext_session_lock_manager_v1",1);
     let owner=replacement.lock(m);replacement.roundtrip(&mut h);
     assert!(!h.state.recovery_confirmed(&second));
+    assert!(h.state.recovery_pending(&second));
+    assert!(!h.state.recovery_pending(&first));
     h.confirm();replacement.roundtrip(&mut h);
     assert!(h.state.recovery_confirmed(&second));
+    assert!(!h.state.recovery_pending(&second));
     h.state.revoke_recovery(&first);
     assert!(h.state.recovery_confirmed(&second));
     h.state.revoke_recovery(&second);
+    assert!(!h.state.recovery_pending(&second));
+    assert!(!h.state.recovery_confirmed(&second));
     assert!(!h.state.desktop_visible());assert!(h.state.session_lock.orphaned());
     replacement.words(owner,2,&[]);replacement.error(&mut h,owner,1);
     assert!(!h.state.desktop_visible());
+}
+
+#[test]
+fn recovery_authority_ends_after_unlock_or_owner_loss(){
+    for unlock in [true,false]{
+        let mut h=Harness::new();let (mut old,m,_,_)=setup(&mut h);
+        old.lock(m);old.roundtrip(&mut h);
+        h.state.prepare_protected_recovery();
+        let (id,endpoint)=h.state.recovery_connection().unwrap();
+        endpoint.set_nonblocking(true).unwrap();
+        let mut w=h.wire(endpoint);
+        let m=w.bind("ext_session_lock_manager_v1",1);
+        let owner=w.lock(m);w.roundtrip(&mut h);
+        assert!(h.state.recovery_pending(&id));
+        h.confirm();w.roundtrip(&mut h);
+        assert!(h.state.recovery_confirmed(&id));
+        if unlock{
+            w.words(owner,2,&[]);w.roundtrip(&mut h);
+        }else{
+            drop(w);
+            let until=Instant::now()+Duration::from_secs(2);
+            while h.state.recovery_confirmed(&id)&&Instant::now()<until{h.step();}
+            h.step();
+        }
+        assert!(!h.state.recovery_pending(&id));
+        assert!(!h.state.recovery_confirmed(&id));
+        assert_eq!(h.state.desktop_visible(),unlock);
+    }
 }
