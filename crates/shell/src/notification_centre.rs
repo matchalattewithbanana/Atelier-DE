@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc, process::Command, sync::mpsc, time::Duration};
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Notice { id: u32, app: String, summary: String, body: String }
+struct Notice { id: u32, app: String, summary: String, body: String, #[serde(default)] progress: Option<u8> }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct Snapshot { schema: u32, instance: String, dnd: bool, active: Vec<Notice>, history: Vec<Notice> }
 enum Request { Dismiss(String, u32), Clear(String), Dnd(String, bool), Refresh }
@@ -28,7 +28,10 @@ fn snapshot() -> Result<Snapshot, String> {
 
 fn format_notices(notices: &[Notice]) -> String {
     if notices.is_empty() { return "None".into(); }
-    notices.iter().map(|notice| format!("{} · {}\n{}\n{}", notice.id, notice.app, notice.summary, notice.body))
+    notices.iter().map(|notice| {
+        let progress = notice.progress.filter(|v| *v <= 100).map(|v| format!(" · {v}%")).unwrap_or_default();
+        format!("{} · {}{progress}\n{}\n{}", notice.id, notice.app, notice.summary, notice.body)
+    })
         .collect::<Vec<_>>().join("\n\n")
 }
 
@@ -134,8 +137,10 @@ mod tests {
     use super::*;
     #[test]
     fn body_is_plain_text_and_history_empty_is_explicit() {
-        let notice = Notice { id: 1, app: "Test".into(), summary: "<b>title</b>".into(), body: "text".into() };
-        assert!(format_notices(&[notice]).contains("<b>title</b>"));
+        let notice = Notice { id: 1, app: "Test".into(), summary: "<b>title</b>".into(), body: "text".into(), progress: Some(72) };
+        let rendered = format_notices(&[notice]);
+        assert!(rendered.contains("<b>title</b>"));
+        assert!(rendered.contains("72%"));
         assert_eq!(format_notices(&[]), "None");
     }
 }
