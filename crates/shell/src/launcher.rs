@@ -30,7 +30,7 @@ fn identify(widget:&impl IsA<gtk::Widget>,entry:&Entry,i:usize){
     widget.set_widget_name(&format!("app-row-{i}"));
     let accessible=if entry.pinned{format!("{} · Pinned · {}",entry.name,entry.description)}else{format!("{} · {}",entry.name,entry.description)};
     widget.set_tooltip_text(Some(&accessible));
-    widget.update_property(&[gtk::accessible::Property::Label(&accessible)]);
+    widget.as_ref().update_property(&[gtk::accessible::Property::Label(&accessible)]);
 }
 fn list_row(entry:&Entry,i:usize,size:u32)->gtk::ListBoxRow{
     let row=gtk::ListBoxRow::new();identify(&row,entry,i);
@@ -130,8 +130,8 @@ pub fn browser(window:&gtk::ApplicationWindow,appearance:&atelier_config::Appear
         search.connect_activate(move|entry|{
             refresh();if entry.text().trim().is_empty(){return;}
             let Some(switch)=switch.upgrade()else{return;};
-            let selected=if switch.is_active(){grid.upgrade().and_then(|g|g.selected_children().first().and_then(index))}
-                else{list.upgrade().and_then(|l|l.selected_row().as_ref().and_then(index))};
+            let selected=if switch.is_active(){grid.upgrade().and_then(|g|g.selected_children().first().and_then(|child|index(child)))}
+                else{list.upgrade().and_then(|l|l.selected_row().as_ref().and_then(|row|index(row)))};
             if let Some(i)=selected{launch(i);}
         });
     }
