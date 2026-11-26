@@ -336,6 +336,32 @@ impl Appearance{
         }
         let notification_bg=format!("alpha({color}, {:.2})",self.notifications.opacity as f64/100.0);
         css.push_str(&format!(" window.atelier-notification-layer {{ background: transparent; }} .atelier-notification-card {{ background: {notification_bg}; border-radius: {}px; padding: 12px; }} .atelier-notification-pill {{ background: {notification_bg}; border-radius: 24px; padding: 6px 20px; font-weight: bold; }} .atelier-notification-card button {{ border-radius: {}px; }} .atelier-notification-compact {{ padding: 6px 10px; }}", self.notifications.radius, self.button_radius));
+        // Scoped expressive surfaces: shared palette roles, not global GTK overrides.
+        let (surface,container,fg,muted,primary,on_primary,secondary,on_secondary)=if let Some(p)=&self.shell_palette{
+            let accent=if self.accent.is_empty(){&p.text}else{&self.accent};
+            let r=crate::design::Roles::from_palette(&p.surface,&p.elevated,&p.text,&p.muted,accent)?;
+            (r.surface.fill.hex(),r.surface_container.fill.hex(),r.surface.on.hex(),r.muted.hex(),
+                r.primary.primary.fill.hex(),r.primary.primary.on.hex(),r.secondary.container.fill.hex(),r.secondary.container.on.hex())
+        }else{
+            ("@theme_bg_color".into(),"@theme_base_color".into(),"@theme_fg_color".into(),"@theme_fg_color".into(),
+                if self.accent.is_empty(){"@theme_selected_bg_color".into()}else{self.accent.clone()},
+                if self.accent.is_empty(){"@theme_selected_fg_color".into()}else{crate::design::Color::parse(&self.accent)?.contrasting_text().hex()},
+                "@theme_bg_color".into(),"@theme_fg_color".into())
+        };
+        css.push_str(&format!(" .atelier-control-window {{ background-color: {surface}; color: {fg}; }} \
+            .atelier-control-card {{ background-color: {container}; color: {fg}; border-radius: 28px; padding: 16px; }} \
+            .atelier-control-window .atelier-control-heading {{ font-size: 28px; font-weight: 500; }} \
+            .atelier-control-window .atelier-control-title {{ font-size: 22px; font-weight: 500; }} \
+            .atelier-control-window .atelier-control-subtitle {{ font-size: 16px; font-weight: 700; }} \
+            .atelier-control-window .dim-label {{ color: {muted}; }} \
+            .atelier-control-window button.atelier-control-active, .atelier-control-window button.suggested-action {{ background-image: none; background-color: {primary}; color: {on_primary}; }} \
+            .atelier-control-window button.atelier-control-tonal {{ background-image: none; background-color: {secondary}; color: {on_secondary}; }} \
+            .atelier-control-window button.atelier-control-active, .atelier-control-window button.atelier-control-tonal {{ border-radius: 24px; }} \
+            .atelier-control-window button.atelier-control-active:active, .atelier-control-window button.atelier-control-tonal:active {{ border-radius: 12px; }} \
+            .atelier-control-window scale.atelier-expressive-slider trough {{ min-height: 16px; border-radius: 8px; background-color: {secondary}; }} \
+            .atelier-control-window scale.atelier-expressive-slider highlight {{ border-radius: 8px; background-color: {primary}; }} \
+            .atelier-control-window scale.atelier-expressive-slider slider {{ min-width: 4px; min-height: 40px; border-radius: 4px; background-image: none; background-color: {primary}; }} \
+            .atelier-control-window button:disabled, .atelier-control-window scale:disabled {{ opacity: 0.55; }}"));
         Ok(css)
     }
 }
