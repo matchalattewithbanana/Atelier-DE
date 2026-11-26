@@ -14,7 +14,7 @@ impl Visibility{
         if let Some(window)=self.reveal.take(){window.destroy();}
     }
 }
-pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefCell<Option<TaskSnapshot>>>,auto_hide:bool,hide_fullscreen:bool)->Visibility{
+pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefCell<Option<TaskSnapshot>>>,auto_hide:bool,hide_fullscreen:bool,open_menus:Rc<Cell<usize>>)->Visibility{
     let hover=Rc::new(Cell::new(false));
     let deadline=Rc::new(Cell::new(Instant::now()));
     let reveal=if auto_hide{
@@ -48,6 +48,7 @@ pub fn start(app:&gtk::Application,dock:&gtk::ApplicationWindow,snapshot:Rc<RefC
             suppressed=false;
             if let Some(strip)=&reveal{strip.set_visible(true);}else{dock.set_visible(true);}
         }else if let Some(strip)=&reveal{
+            if open_menus.get()>0{deadline.set(Instant::now()+Duration::from_millis(450));return glib::ControlFlow::Continue;}
             if dock.is_visible()&&!hover.get()&&Instant::now()>=deadline.get(){dock.set_visible(false);strip.set_visible(true);}
         }
         glib::ControlFlow::Continue
