@@ -141,6 +141,21 @@ fn main() -> Result<()> {
             let _: () = proxy.call("Dismiss", &(instance.as_str(), id))?;
             Ok(())
         }
+        [mode, id, progress, summary, body] if mode == "progress" => {
+            let id: u32 = id.parse().context("invalid replacement ID; use 0 for a new card")?;
+            let progress: i32 = progress.parse().context("invalid progress percentage")?;
+            if !(0..=100).contains(&progress) { bail!("progress must be between 0 and 100"); }
+            let connection = Connection::session()?;
+            // Require Atelier's own extension before publishing; do not
+            // silently send these commands to another notification daemon.
+            let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
+            let _: String = proxy.call("List", &())?;
+            let target = Proxy::new(&connection, NAME, PATH, NAME)?;
+            let hints = HashMap::from([("value", OwnedValue::from(progress))]);
+            let id: u32 = target.call("Notify", &("Atelier CLI", id, "system-software-install", summary.as_str(), body.as_str(), Vec::<String>::new(), hints, if progress == 100 { 5000i32 } else { 0i32 }))?;
+            println!("{id}");
+            Ok(())
+        }
         [mode, instance, id, revision, key] if mode == "invoke" => {
             let id: u32 = id.parse().context("invalid notification ID")?;
             let revision: u64 = revision.parse().context("invalid notification revision")?;
@@ -156,7 +171,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | progress ID PERCENT SUMMARY BODY | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),
