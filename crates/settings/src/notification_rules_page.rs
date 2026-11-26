@@ -11,13 +11,6 @@ struct Fields{
     presets:gtk::ComboBoxText,name:gtk::Entry,icon:gtk::Entry,urgency:gtk::ComboBoxText,timeout:gtk::SpinButton,
 }
 impl Fields{
-    fn show_app(&self,name:&str,rule:AppRule){
-        self.app.set_text(name);self.popups.set_active(rule.popups);self.history.set_active(rule.history);
-    }
-    fn show_preset(&self,name:&str,preset:&Preset){
-        self.name.set_text(name);self.icon.set_text(&preset.icon);
-        self.urgency.set_active(Some(u32::from(preset.urgency)));self.timeout.set_value(f64::from(preset.timeout_ms));
-    }
     fn refill(&self,value:&Preferences){
         let selected_app=self.apps.active_id();let selected_preset=self.presets.active_id();
         self.apps.remove_all();self.apps.append(Some(""),"New application rule");
@@ -32,14 +25,14 @@ fn entry(parent:&gtk::Box,title:&str,placeholder:&str)->gtk::Entry{
     parent.append(&description(title));let field=gtk::Entry::new();field.set_placeholder_text(Some(placeholder));parent.append(&field);field
 }
 fn button(parent:&gtk::Box,title:&str)->gtk::Button{let b=gtk::Button::with_label(title);parent.append(&b);b}
-fn update_draft(state:&Rc<RefCell<Option<Draft>>>,fields:&Fields,status:&gtk::Label,change:impl FnOnce(&mut Preferences)){
+fn update_draft(state:&Rc<RefCell<Option<Draft>>>,fields:&Fields,status:&gtk::Label,change:impl FnOnce(&mut Preferences))->bool{
     let next={
-        let state=state.borrow();let Some(draft)=state.as_ref()else{status.set_text("Load preferences first.");return;};
+        let state=state.borrow();let Some(draft)=state.as_ref()else{status.set_text("Load preferences first.");return false;};
         let mut next=draft.value.clone();change(&mut next);next
     };
-    if let Err(error)=next.validate(){status.set_text(&format!("Invalid draft: {error:#}"));return;}
+    if let Err(error)=next.validate(){status.set_text(&format!("Invalid draft: {error:#}"));return false;}
     if let Some(draft)=state.borrow_mut().as_mut(){draft.value=next.clone();}
-    fields.refill(&next);status.set_text("Draft updated. Save to apply.");
+    fields.refill(&next);status.set_text("Draft updated. Save to apply.");true
 }
 pub fn build(parent:&gtk::Box){
     let path=match notification_preferences::path(){Ok(path)=>path,Err(error)=>{parent.append(&description(&format!("{error:#}")));return;}};
@@ -73,28 +66,30 @@ pub fn build(parent:&gtk::Box){
     let enable={let buttons:Vec<_>=editing.iter().map(|b|b.downgrade()).collect();Rc::new(move|enabled|for b in &buttons{if let Some(b)=b.upgrade(){b.set_sensitive(enabled);}})};
     enable(false);
     {
-        let (state,fields)=(state.clone(),fields.clone());
-        let picker=fields.apps.clone();
-        picker.connect_changed(move|p|{
+        let state=state.clone();
+        let (app,popups,history)=(fields.app.downgrade(),fields.popups.downgrade(),fields.history.downgrade());
+        fields.apps.connect_changed(move|p|{
             let Some(id)=p.active_id()else{return;};
+            let (Some(app),Some(popups),Some(history))=(app.upgrade(),popups.upgrade(),history.upgrade())else{return;};
             let rule=state.borrow().as_ref().map_or(AppRule::default(),|d|d.value.app(&id));
-            fields.show_app(&id,rule);
+            app.set_text(&id);popups.set_active(rule.popups);history.set_active(rule.history);
         });
     }
     {
-        let (state,fields)=(state.clone(),fields.clone());
-        let picker=fields.presets.clone();
-        picker.connect_changed(move|p|{
+        let state=state.clone();
+        let (name,icon,urgency,timeout)=(fields.name.downgrade(),fields.icon.downgrade(),fields.urgency.downgrade(),fields.timeout.downgrade());
+        fields.presets.connect_changed(move|p|{
             let Some(id)=p.active_id()else{return;};
+            let (Some(name),Some(icon),Some(urgency),Some(timeout))=(name.upgrade(),icon.upgrade(),urgency.upgrade(),timeout.upgrade())else{return;};
             let preset=state.borrow().as_ref().and_then(|d|d.value.custom_presets().get(id.as_str()).cloned()).unwrap_or_default();
-            fields.show_preset(&id,&preset);
+            name.set_text(&id);icon.set_text(&preset.icon);urgency.set_active(Some(u32::from(preset.urgency)));timeout.set_value(f64::from(preset.timeout_ms));
         });
     }
     {
         let (state,fields,status)=(state.clone(),fields.clone(),status.clone());
         add_app.connect_clicked(move |_|{
             let name=fields.app.text().to_string();let rule=AppRule{popups:fields.popups.is_active(),history:fields.history.is_active()};
-            update_draft(&state,&fields,&status,|p|p.set_app(name,rule));
+            if update_draft(&state,&fields,&status,|p|p.set_app(name.clone(),rule)){fields.apps.set_active_id(Some(&name));}
         });
     }
     {
@@ -109,7 +104,7 @@ pub fn build(parent:&gtk::Box){
         add_preset.connect_clicked(move |_|{
             let name=fields.name.text().trim().to_owned();
             let preset=Preset{icon:fields.icon.text().trim().to_owned(),urgency:fields.urgency.active().unwrap_or(1) as u8,timeout_ms:fields.timeout.value_as_int()};
-            update_draft(&state,&fields,&status,|p|p.set_preset(name,preset));
+            if update_draft(&state,&fields,&status,|p|p.set_preset(name.clone(),preset)){fields.presets.set_active_id(Some(&name));}
         });
     }
     {
@@ -141,7 +136,7 @@ pub fn build(parent:&gtk::Box){
     }
     {
         let (state,fields,status)=(state.clone(),fields.clone(),status.clone());
-        reset.connect_clicked(move |_|update_draft(&state,&fields,&status,|p|*p=Preferences::default()));
+        reset.connect_clicked(move |_|{update_draft(&state,&fields,&status,|p|*p=Preferences::default());});
     }
     save.connect_clicked(move |_|{
         let mut state=state.borrow_mut();let Some(draft)=state.as_mut()else{return;};
