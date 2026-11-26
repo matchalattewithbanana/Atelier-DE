@@ -396,3 +396,5 @@ The native session-lock adapter now tracks exact lock/role/root resources, valid
 Native-session tests now exercise the actual lock protocol dispatcher through private Wayland socket pairs, including unauthorized requests, role replacement and disconnection. Test-only global registration is absent from normal sessions. Physical security acceptance remains outstanding.
 
 Native seat continuity now latches pause events across reactivation; stale flip acknowledgments and framebuffer restoration are refused. Protected scanout also checks exact framebuffer ownership and refuses other active CRTCs or bound planes. Automatic seat/VT resume is still not supported; native locking remains disabled pending physical recovery and multi-output coverage.
+
+Protected native failures now enter an experimental seat-only quarantine and attempt a fresh black scanout on an unchanged owned route after activation. No client/input dispatch, stale flip acknowledgment or automatic unlock is allowed in quarantine. This is not secure suspend/VT resume and remains unreachable in shipped sessions because the lock global is disabled.
