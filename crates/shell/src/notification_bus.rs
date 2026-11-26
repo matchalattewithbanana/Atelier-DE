@@ -10,7 +10,7 @@ const INTERFACE:&str="org.atelier.Notifications1";
 const TIMEOUT_MS:i32=3000;
 
 pub enum Request{
-    Dismiss(String,u32),Invoke(String,u32,u64,String),Clear(String),Dnd(String,bool),
+    Dismiss(String,u32,u64),Invoke(String,u32,u64,String),Clear(String,Vec<(u32,u64)>),Dnd(String,bool),
     Pause(String,u32),Refresh,
     // Only the transport's coalesced signal callback constructs this.
     Invalidate,
@@ -26,9 +26,9 @@ fn call(method:&str,args:Option<&glib::Variant>)->Result<glib::Variant,String>{
 }
 fn execute(request:Request)->Result<(),String>{
     let (method,args)=match request{
-        Request::Dismiss(instance,id)=>("Dismiss",(instance,id).to_variant()),
+        Request::Dismiss(instance,id,revision)=>("DismissRevision",(instance,id,revision).to_variant()),
         Request::Invoke(instance,id,revision,key)=>("Invoke",(instance,id,revision,key).to_variant()),
-        Request::Clear(instance)=>("ClearHistoryFor",(instance,).to_variant()),
+        Request::Clear(instance,entries)=>("ClearReviewedHistory",(instance,entries).to_variant()),
         Request::Dnd(instance,enabled)=>("SetDnd",(instance,enabled).to_variant()),
         Request::Pause(instance,seconds)=>("Pause",(instance,seconds).to_variant()),
         Request::Refresh|Request::Invalidate=>return Ok(()),
