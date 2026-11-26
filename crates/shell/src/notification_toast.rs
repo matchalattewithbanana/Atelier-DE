@@ -5,7 +5,7 @@ use atelier_config::{Appearance, NotificationAppearance, NotificationPosition, N
 use gtk::{gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use serde::Deserialize;
-use std::{cell::RefCell, rc::Rc, collections::HashMap, sync::mpsc, time::{Duration, Instant}};
+use std::{cell::{Cell,RefCell}, rc::Rc, collections::HashMap, sync::mpsc, time::{Duration, Instant}};
 
 #[cfg(test)]
 const LIFETIME: Duration = Duration::from_secs(5);
@@ -99,7 +99,8 @@ fn label(text: &str, class: &str, limit: usize) -> gtk::Label {
     if !class.is_empty() { label.add_css_class(class); }
     label
 }
-fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requests: &mpsc::SyncSender<Request>, style: NotificationStyle, expansions: &HashMap<u32,bool>) {
+fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requests: &mpsc::SyncSender<Request>, style: NotificationStyle, expansions: &HashMap<u32,bool>,dismissals:&mut HashMap<u32,Rc<Cell<u64>>>) {
+    dismissals.clear();
     let island = style == NotificationStyle::Island;
     let compact = style == NotificationStyle::Compact;
     while let Some(child) = root.first_child() { root.remove(&child); }
@@ -120,9 +121,10 @@ fn render(root: &gtk::Box, cards: &[Notice], instance: &str, queued: usize, requ
         let close = gtk::Button::from_icon_name("window-close-symbolic"); close.add_css_class("flat");
         close.set_tooltip_text(Some("Dismiss notification"));
         let sender = requests.clone(); let instance = instance.to_owned(); let id = notice.id;
-        let dismiss_instance = instance.clone();
+        let dismiss_instance = instance.clone();let dismiss_revision=Rc::new(Cell::new(notice.revision));
+        close.set_sensitive(notice.revision!=0);dismissals.insert(id,dismiss_revision.clone());
         close.connect_clicked(move |button| {
-            if sender.try_send(Request::Dismiss(dismiss_instance.clone(),id)).is_ok() { button.set_sensitive(false); }
+            if sender.try_send(Request::Dismiss(dismiss_instance.clone(),id,dismiss_revision.get())).is_ok() { button.set_sensitive(false); }
         });
         header.append(&close); card.append(&header);
         card.append(&label(&notice.summary, "heading", 120));
@@ -172,10 +174,10 @@ fn expansion_state(root:&gtk::Box)->HashMap<u32,bool>{
 // The common progress-only replacement need not recreate a card, disturb
 // its focus/expansion, or recreate its buttons. Action-bearing replacements
 // are rebuilt because their callbacks must carry the current revision.
-fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
+fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice],dismissals:&HashMap<u32,Rc<Cell<u64>>>)->bool{
     if previous.len()!=next.len() || next.is_empty(){return false;}
     if !previous.iter().zip(next).all(|(a,b)|a==b ||
-        (a.id==b.id && a.app==b.app && a.summary==b.summary && a.body==b.body && a.icon==b.icon && a.urgency==b.urgency &&
+        (a.id==b.id && a.revision!=0 && b.revision!=0 && a.app==b.app && a.summary==b.summary && a.body==b.body && a.icon==b.icon && a.urgency==b.urgency &&
         a.actions.is_empty() && b.actions.is_empty() && a.progress.is_some() && b.progress.is_some())){return false;}
     let mut bars=Vec::new();
     for (a,b) in previous.iter().zip(next){
@@ -192,9 +194,10 @@ fn patch_progress(root:&gtk::Box,previous:&[Notice],next:&[Notice])->bool{
             break;
         }
         let Some(bar)=found else{return false;};
-        bars.push((bar,b.progress.unwrap()));
+        let Some(revision)=dismissals.get(&b.id)else{return false;};
+        bars.push((bar,b.progress.unwrap(),revision.clone(),b.revision));
     }
-    for (bar,progress) in bars{bar.set_fraction(f64::from(progress)/100.0);bar.set_text(Some(&format!("{progress}%")));}
+    for (bar,progress,revision,next) in bars{bar.set_fraction(f64::from(progress)/100.0);bar.set_text(Some(&format!("{progress}%")));revision.set(next);}
     true
 }
 
@@ -269,6 +272,7 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
     let (requests,receive,watch)=notification_bus::start("Popup",snapshot);
     let panel = panel.downgrade(); let mut cursor = Cursor::default();
     let mut privacy=Guard::default();let mut gate=Gate::default();
+    let mut dismissals=HashMap::new();
     let mut rendered = Vec::new(); let mut rendered_instance = None; let mut rendered_queued = 0;
     glib::timeout_add_local(Duration::from_millis(100), move || {
         let Some(panel)=panel.upgrade()else{window.close();return glib::ControlFlow::Break;};
@@ -312,10 +316,10 @@ pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: boo
         let cards = cursor.cards();
         if rendered != cards || rendered_instance != cursor.instance || rendered_queued != cursor.queued || action_reply.is_some() || layout_changed {
             let same_instance=rendered_instance==cursor.instance;
-            let patched=same_instance && !layout_changed && action_reply.is_none() && rendered_queued==cursor.queued && patch_progress(&root,&rendered,&cards);
+            let patched=same_instance && !layout_changed && action_reply.is_none() && rendered_queued==cursor.queued && patch_progress(&root,&rendered,&cards,&dismissals);
             if !patched{
                 let expansions=if same_instance{expansion_state(&root)}else{HashMap::new()};
-                render(&root,&cards,cursor.instance.as_deref().unwrap_or(""),cursor.queued,&requests,style,&expansions);
+                render(&root,&cards,cursor.instance.as_deref().unwrap_or(""),cursor.queued,&requests,style,&expansions,&mut dismissals);
             }
             if action_reply.is_some() && !cards.is_empty() {
                 root.append(&label("Action unavailable. Refreshing notification state.", "dim-label", 80));
