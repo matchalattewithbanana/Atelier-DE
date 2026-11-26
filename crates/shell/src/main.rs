@@ -5,6 +5,7 @@ use gtk::{gio, glib, prelude::*};
 use std::process::Command;
 mod media_controls;
 mod notification_centre;
+mod notification_bus;
 #[cfg(feature = "layer-panel")]
 mod panel;
 #[cfg(feature = "layer-panel")]
