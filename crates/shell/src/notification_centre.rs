@@ -1,8 +1,8 @@
 //! Optional notification inbox. Never starts or replaces a notification daemon.
-use atelier_config::component;
+use crate::notification_bus::{self,Request};
 use gtk::{glib,prelude::*};
 use serde::Deserialize;
-use std::{cell::RefCell,collections::{BTreeMap,BTreeSet},rc::Rc,process::Command,sync::mpsc,time::Duration};
+use std::{cell::RefCell,collections::{BTreeMap,BTreeSet},rc::Rc,sync::mpsc,time::Duration};
 
 #[derive(Clone,Debug,Deserialize,PartialEq,Eq)]
 struct Action { key:String,label:String }
@@ -22,17 +22,8 @@ struct Snapshot {
     #[serde(default)] pause_remaining_seconds:Option<u32>,
     active:Vec<Notice>,history:Vec<Notice>,
 }
-enum Request { Dismiss(String,u32),Invoke(String,u32,u64,String),Clear(String),Dnd(String,bool),Pause(String,String),Refresh }
-struct Reply { snapshot:Result<Snapshot,String>,action_error:Option<String> }
-
-pub(crate) fn call(args:&[&str])->Result<String,String>{
-    let helper=component("atelier-notifications");
-    let output=Command::new("timeout").args(["--kill-after=1s","3s"]).arg(helper.get_program()).args(args).output().map_err(|e|e.to_string())?;
-    if !output.status.success(){return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());}
-    String::from_utf8(output.stdout).map_err(|e|e.to_string())
-}
-fn snapshot()->Result<Snapshot,String>{
-    let state:Snapshot=serde_json::from_str(&call(&["list"])?).map_err(|e|e.to_string())?;
+fn snapshot(json:&str)->Result<Snapshot,String>{
+    let state:Snapshot=serde_json::from_str(json).map_err(|e|e.to_string())?;
     if state.schema!=1||state.instance.is_empty()||state.active.len()>128||state.history.len()>100||
         state.active.iter().chain(&state.history).any(|n|n.actions.len()>8||n.progress.is_some_and(|p|p>100)){
         return Err("Unsupported notification snapshot".into());
@@ -166,8 +157,8 @@ pub fn show(app:&gtk::Application){
     controls.append(&dnd);controls.append(&refresh);controls.append(&clear);root.append(&controls);
     let pause_row=gtk::Box::new(gtk::Orientation::Horizontal,8);
     let pause_choice=gtk::ComboBoxText::new();
-    for (id,label) in [("15m","15 minutes"),("30m","30 minutes"),("1h","1 hour"),("2h","2 hours"),("8h","8 hours")]{pause_choice.append(Some(id),label);}
-    pause_choice.set_active_id(Some("30m"));
+    for (id,label) in [("900","15 minutes"),("1800","30 minutes"),("3600","1 hour"),("7200","2 hours"),("28800","8 hours")]{pause_choice.append(Some(id),label);}
+    pause_choice.set_active_id(Some("1800"));
     let pause=gtk::Button::with_label("Pause popups");pause.set_sensitive(false);
     let resume=gtk::Button::with_label("End pause");resume.set_sensitive(false);
     pause_row.append(&pause_choice);pause_row.append(&pause);pause_row.append(&resume);root.append(&pause_row);
@@ -180,24 +171,7 @@ pub fn show(app:&gtk::Application){
     filters.append(&missed);filters.append(&grouped);root.append(&filters);
     let mut inbox=Inbox::new();
     let scroll=gtk::ScrolledWindow::builder().vexpand(true).child(&inbox.root).build();root.append(&scroll);
-    let (requests,incoming)=mpsc::sync_channel::<Request>(1);
-    let (outgoing,replies)=mpsc::sync_channel::<Reply>(2);
-    std::thread::spawn(move||{
-        let mut action_error=None;
-        loop{
-            if outgoing.send(Reply{snapshot:snapshot(),action_error:action_error.take()}).is_err(){break;}
-            let result=match incoming.recv_timeout(Duration::from_secs(3)){
-                Ok(Request::Dismiss(instance,id))=>call(&["dismiss",&instance,&id.to_string()]),
-                Ok(Request::Invoke(instance,id,revision,key))=>call(&["invoke",&instance,&id.to_string(),&revision.to_string(),&key]),
-                Ok(Request::Clear(instance))=>call(&["clear-history",&instance]),
-                Ok(Request::Dnd(instance,enabled))=>call(&["dnd",&instance,if enabled{"on"}else{"off"}]),
-                Ok(Request::Pause(instance,duration))=>call(&["pause",&instance,&duration]),
-                Ok(Request::Refresh)|Err(mpsc::RecvTimeoutError::Timeout)=>continue,
-                Err(mpsc::RecvTimeoutError::Disconnected)=>break,
-            };
-            action_error=result.err();
-        }
-    });
+    let (requests,replies,watch)=notification_bus::start("List",snapshot);
     let state=Rc::new(RefCell::new(None::<Snapshot>));
     {let (state,sender,status)=(state.clone(),requests.clone(),status.clone());clear.connect_clicked(move |_|{
         if let Some(s)=state.borrow().as_ref(){enqueue(&sender,Request::Clear(s.instance.clone()),&status);}
@@ -208,7 +182,7 @@ pub fn show(app:&gtk::Application){
     for (button,cancel) in [(&pause,false),(&resume,true)]{
         let (state,sender,status,choice)=(state.clone(),requests.clone(),status.clone(),pause_choice.clone());
         button.connect_clicked(move |_|{
-            let duration=if cancel{"off".into()}else{let Some(id)=choice.active_id()else{return;};id.to_string()};
+            let duration=if cancel{0}else{let Some(seconds)=choice.active_id().and_then(|id|id.parse::<u32>().ok())else{return;};seconds};
             if let Some(s)=state.borrow().as_ref(){enqueue(&sender,Request::Pause(s.instance.clone(),duration),&status);}
         });
     }
@@ -217,6 +191,7 @@ pub fn show(app:&gtk::Application){
     let mut last_filter=Filter::default();
     glib::timeout_add_local(Duration::from_millis(100),move||{
         if weak.upgrade().is_none(){return glib::ControlFlow::Break;}
+        let _=&watch;
         let filter=read_filter(&search,&picker,&missed,&grouped);
         if filter!=last_filter{
             if let Some(s)=state.borrow().as_ref(){inbox.render(s,&filter,&requests,&status,true);}
