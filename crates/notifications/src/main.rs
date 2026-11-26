@@ -88,6 +88,16 @@ impl History {
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         Ok(())
     }
+    async fn dismiss_revision(&self,instance:String,id:u32,revision:u64,#[zbus(connection)] connection:&zbus::Connection)->fdo::Result<()>{
+        if !lock(&self.state)?.close_revision(&instance,id,revision){return Err(fdo::Error::Failed("Notification changed; refresh before dismissing".into()));}
+        connection.emit_signal(None::<&str>,PATH,NAME,"NotificationClosed",&(id,2u32)).await
+            .map_err(|e|fdo::Error::Failed(e.to_string()))?;
+        Ok(())
+    }
+    fn clear_reviewed_history(&self,instance:String,entries:Vec<(u32,u64)>)->fdo::Result<()>{
+        if entries.len()>100||!lock(&self.state)?.clear_reviewed(&instance,&entries){return Err(fdo::Error::Failed("History changed; review it again before clearing".into()));}
+        Ok(())
+    }
     async fn invoke(&self, instance: String, id: u32, revision: u64, key: String,
                     #[zbus(connection)] connection: &zbus::Connection) -> fdo::Result<()> {
         let owner = lock(&self.state)?.invoke(&instance, id, revision, &key, Instant::now())
