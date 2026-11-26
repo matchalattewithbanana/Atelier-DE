@@ -2,7 +2,7 @@
 mod store;
 use anyhow::{bail, Context, Result};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
-use store::Store;
+use store::{Details, Store};
 use zbus::{blocking::{connection::Builder, Connection, Proxy}, fdo, interface, object_server::SignalEmitter, zvariant::OwnedValue};
 
 const NAME: &str = "org.freedesktop.Notifications";
@@ -26,19 +26,26 @@ impl Notifications {
         ("Atelier Notifications".into(), "Atelier".into(), env!("CARGO_PKG_VERSION").into(), "1.2".into())
     }
 
-    fn notify(&self, app_name: String, replaces_id: u32, _app_icon: String, summary: String, body: String,
-              _actions: Vec<String>, hints: HashMap<String, OwnedValue>, expire_timeout: i32) -> fdo::Result<u32> {
+    fn notify(&self, app_name: String, replaces_id: u32, app_icon: String, summary: String, body: String,
+              actions: Vec<String>, hints: HashMap<String, OwnedValue>, expire_timeout: i32,
+              #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<u32> {
         let transient = hints.get("transient").and_then(|value| bool::try_from(value).ok()).unwrap_or(false);
-        lock(&self.state)?.notify(replaces_id, app_name, summary, body, transient, expire_timeout, Instant::now())
+        let progress = hints.get("value").and_then(|value| i32::try_from(value).ok());
+        let owner = header.sender().map(|name| name.as_str().to_owned());
+        let details = Details::parse(actions, progress, app_icon, owner);
+        lock(&self.state)?.notify_with(replaces_id, app_name, summary, body, transient, expire_timeout, Instant::now(), details)
             .map_err(|error| fdo::Error::LimitsExceeded(error.into()))
     }
 
-    async fn close_notification(&self, id: u32, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> fdo::Result<()> {
-        let closed = lock(&self.state)?.close(id, 3);
+    async fn close_notification(&self, id: u32, #[zbus(header)] header: zbus::message::Header<'_>, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> fdo::Result<()> {
+        let closed = lock(&self.state)?.close_from(id, header.sender().map(|name| name.as_str()));
         if !closed { return Err(fdo::Error::Failed("Unknown notification ID".into())); }
         Self::notification_closed(&emitter, id, 3).await.map_err(|error| fdo::Error::Failed(error.to_string()))?;
         Ok(())
     }
+
+    #[zbus(signal)]
+    async fn action_invoked(emitter: &SignalEmitter<'_>, id: u32, action_key: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn notification_closed(emitter: &SignalEmitter<'_>, id: u32, reason: u32) -> zbus::Result<()>;
@@ -66,6 +73,16 @@ impl History {
             }
         }
         connection.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(id, 2u32)).await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        Ok(())
+    }
+    async fn invoke(&self, instance: String, id: u32, revision: u64, key: String,
+                    #[zbus(connection)] connection: &zbus::Connection) -> fdo::Result<()> {
+        let owner = lock(&self.state)?.invoke(&instance, id, revision, &key, Instant::now())
+            .ok_or_else(|| fdo::Error::Failed("Notification action changed or is unavailable".into()))?;
+        // Send the opaque action key only to the originating bus connection.
+        // Never execute notification-provided commands in the daemon.
+        connection.emit_signal(Some(owner.as_str()), PATH, NAME, "ActionInvoked", &(id, key)).await
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         Ok(())
     }
@@ -124,6 +141,14 @@ fn main() -> Result<()> {
             let _: () = proxy.call("Dismiss", &(instance.as_str(), id))?;
             Ok(())
         }
+        [mode, instance, id, revision, key] if mode == "invoke" => {
+            let id: u32 = id.parse().context("invalid notification ID")?;
+            let revision: u64 = revision.parse().context("invalid notification revision")?;
+            let connection = Connection::session()?;
+            let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
+            let _: () = proxy.call("Invoke", &(instance.as_str(), id, revision, key.as_str()))?;
+            Ok(())
+        }
         [mode, instance] if mode == "clear-history" => {
             let connection = Connection::session()?;
             let proxy = Proxy::new(&connection, NAME, HISTORY_PATH, HISTORY_INTERFACE)?;
@@ -131,7 +156,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         [mode] if mode == "--help" || mode == "-h" => {
-            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
+            println!("atelier-notifications daemon | list | popup | clear-history [INSTANCE] | dismiss INSTANCE ID | invoke INSTANCE ID REVISION KEY | dnd INSTANCE on|off\nExperimental, explicit opt-in notification inbox. Does not replace another daemon.");
             Ok(())
         }
         _ => bail!("usage: atelier-notifications --help"),
