@@ -40,3 +40,7 @@ The native adapter now owns ext-session-lock manager, lock and surface dispatch 
 ## Protocol wire regression tests
 
 The native-session unit-test build registers the lock global only inside an in-process private Wayland display connected by Unix socket pairs. Raw version-1 protocol requests exercise the production dispatch implementation, not a simulated lock handler. Tests cover the locked event after a synthetic protected-frame completion, valid unlock, rejected same-client unlock, foreign rejected surface construction, exact role replacement and stale root destruction, invalid configure serial, commit before acknowledgment, premature unlock and owner disconnect before/after confirmation. The tests do not use DRM, actual presentation, PAM, live input devices or a desktop socket. The ordinary native and nested backends still do not advertise the global. Real buffer attachment, input events, data offers and actual recovery remain to be tested.
+
+## Actual shared-memory buffer tests
+
+Private wire tests now create wl_shm pools using real file descriptors passed through SCM_RIGHTS, attach ARGB8888 buffers, and verify that a configured output-sized lock root maps and receives only its own keyboard/pointer focus. Invalid dimensions, null-buffer commits, preexisting attached buffers and role replacement are checked against actual Smithay buffer processing. The tests still simulate protected-frame completion rather than drive a GPU or physical seat. No production global is exposed.
