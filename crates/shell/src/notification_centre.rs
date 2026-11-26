@@ -5,10 +5,10 @@ use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc, process::Command, sync::mpsc, time::Duration};
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Notice { id: u32, app: String, summary: String, body: String, #[serde(default)] progress: Option<u8> }
+struct Notice { id: u32, app: String, summary: String, body: String, #[serde(default)] progress: Option<u8>, #[serde(default)] missed: bool }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Snapshot { schema: u32, instance: String, dnd: bool, active: Vec<Notice>, history: Vec<Notice> }
-enum Request { Dismiss(String, u32), Clear(String), Dnd(String, bool), Refresh }
+struct Snapshot { schema: u32, instance: String, dnd: bool, #[serde(default)] manual_dnd: Option<bool>, #[serde(default)] pause_remaining_seconds: Option<u32>, active: Vec<Notice>, history: Vec<Notice> }
+enum Request { Dismiss(String, u32), Clear(String), Dnd(String, bool), Pause(String,String), Refresh }
 struct Reply { snapshot: Result<Snapshot, String>, action_error: Option<String> }
 
 pub(crate) fn call(args: &[&str]) -> Result<String, String> {
@@ -26,13 +26,24 @@ fn snapshot() -> Result<Snapshot, String> {
     Ok(state)
 }
 
-fn format_notices(notices: &[Notice]) -> String {
-    if notices.is_empty() { return "None".into(); }
-    notices.iter().map(|notice| {
+fn format_notices<'a>(notices: impl IntoIterator<Item=&'a Notice>) -> String {
+    let rendered=notices.into_iter().map(|notice| {
         let progress = notice.progress.filter(|v| *v <= 100).map(|v| format!(" · {v}%")).unwrap_or_default();
-        format!("{} · {}{progress}\n{}\n{}", notice.id, notice.app, notice.summary, notice.body)
+        let missed=if notice.missed{" · Missed"}else{""};
+        format!("{} · {}{progress}{missed}\n{}\n{}", notice.id, notice.app, notice.summary, notice.body)
     })
-        .collect::<Vec<_>>().join("\n\n")
+        .collect::<Vec<_>>().join("\n\n");
+    if rendered.is_empty(){"None".into()}else{rendered}
+}
+
+fn show_history(text:&gtk::TextView,snapshot:&Snapshot,missed_only:bool){
+    if missed_only{
+        let active:Vec<_>=snapshot.active.iter().filter(|n|n.missed).collect();
+        let history:Vec<_>=snapshot.history.iter().filter(|n|n.missed).collect();
+        text.buffer().set_text(&format!("MISSED ACTIVE ({})\n{}\n\nMISSED HISTORY ({})\n{}",active.len(),format_notices(active),history.len(),format_notices(history)));
+    }else{
+        text.buffer().set_text(&format!("ACTIVE ({})\n{}\n\nCLOSED HISTORY ({})\n{}",snapshot.active.len(),format_notices(&snapshot.active),snapshot.history.len(),format_notices(&snapshot.history)));
+    }
 }
 
 pub fn show(app: &gtk::Application) {
@@ -54,6 +65,15 @@ pub fn show(app: &gtk::Application) {
     let refresh = gtk::Button::with_label("Refresh");
     let dnd = gtk::Button::with_label("Do Not Disturb"); dnd.set_sensitive(false);
     actions.append(&clear); actions.append(&refresh); actions.append(&dnd); root.append(&actions);
+    let pause_row=gtk::Box::new(gtk::Orientation::Horizontal,8);
+    let pause_choice=gtk::ComboBoxText::new();
+    for (id,label) in [("15m","15 minutes"),("30m","30 minutes"),("1h","1 hour"),("2h","2 hours"),("8h","8 hours")]{pause_choice.append(Some(id),label);}
+    pause_choice.set_active_id(Some("30m"));
+    let pause=gtk::Button::with_label("Pause popups");pause.set_sensitive(false);
+    let resume=gtk::Button::with_label("End pause");resume.set_sensitive(false);
+    let pause_status=gtk::Label::new(None);pause_status.set_xalign(0.0);
+    pause_row.append(&pause_choice);pause_row.append(&pause);pause_row.append(&resume);root.append(&pause_row);root.append(&pause_status);
+    let missed_only=gtk::CheckButton::with_label("Show missed notifications only");root.append(&missed_only);
     let text = gtk::TextView::new(); text.set_editable(false); text.set_cursor_visible(false); text.set_wrap_mode(gtk::WrapMode::WordChar);
     text.buffer().set_text("Active notifications and closed history appear here.");
     let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&text).build(); root.append(&scroll);
@@ -68,6 +88,7 @@ pub fn show(app: &gtk::Application) {
                 Ok(Request::Dismiss(instance, id)) => call(&["dismiss", &instance, &id.to_string()]),
                 Ok(Request::Clear(instance)) => call(&["clear-history", &instance]),
                 Ok(Request::Dnd(instance, enabled)) => call(&["dnd", &instance, if enabled { "on" } else { "off" }]),
+                Ok(Request::Pause(instance,duration)) => call(&["pause",&instance,&duration]),
                 Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
@@ -91,16 +112,31 @@ pub fn show(app: &gtk::Application) {
     let current = Rc::clone(&state); let sender = requests.clone(); let message = status.clone();
     dnd.connect_clicked(move |_| {
         if let Some(snapshot) = current.borrow().as_ref() {
-            if sender.try_send(Request::Dnd(snapshot.instance.clone(), !snapshot.dnd)).is_err() { message.set_text("Notification service busy."); }
+            if sender.try_send(Request::Dnd(snapshot.instance.clone(), !snapshot.manual_dnd.unwrap_or(snapshot.dnd))).is_err() { message.set_text("Notification service busy."); }
         }
     });
+    for (button,cancel) in [(&pause,false),(&resume,true)]{
+        let current=state.clone();let sender=requests.clone();let choice=pause_choice.clone();let message=status.clone();
+        button.connect_clicked(move |_|{
+            let Some(duration)= (if cancel {Some("off".to_owned())}else{choice.active_id().map(|v|v.to_string())}) else{return;};
+            if let Some(snapshot)=current.borrow().as_ref(){
+                if sender.try_send(Request::Pause(snapshot.instance.clone(),duration)).is_err(){message.set_text("Notification service busy.");}
+            }
+        });
+    }
     let sender = requests.clone();
     refresh.connect_clicked(move |_| { let _ = sender.try_send(Request::Refresh); });
 
     let weak = window.downgrade();
+    let mut last_filter=false;
     glib::timeout_add_local(Duration::from_millis(150), move || {
         if weak.upgrade().is_none() { return glib::ControlFlow::Break; }
         let _ = &requests;
+        let filter=missed_only.is_active();
+        if filter!=last_filter{
+            if let Some(snapshot)=state.borrow().as_ref(){show_history(&text,snapshot,filter);}
+            last_filter=filter;
+        }
         while let Ok(reply) = replies.try_recv() {
             match reply.snapshot {
                 Ok(snapshot) => {
@@ -112,16 +148,20 @@ pub fn show(app: &gtk::Application) {
                             choice.append(Some(&notice.id.to_string()), &format!("{} · {label}", notice.id));
                         }
                         if !old_id.as_ref().is_some_and(|id| choice.set_active_id(Some(id.as_str()))) && !snapshot.active.is_empty() { choice.set_active(Some(0)); }
-                        text.buffer().set_text(&format!("ACTIVE ({})\n{}\n\nCLOSED HISTORY ({})\n{}", snapshot.active.len(), format_notices(&snapshot.active), snapshot.history.len(), format_notices(&snapshot.history)));
+                        show_history(&text,&snapshot,filter);
                         dismiss.set_sensitive(!snapshot.active.is_empty()); clear.set_sensitive(!snapshot.history.is_empty());
-                        dnd.set_sensitive(true); dnd.set_label(if snapshot.dnd { "Do Not Disturb: On" } else { "Do Not Disturb: Off" });
+                        dnd.set_sensitive(true); dnd.set_label(if snapshot.manual_dnd.unwrap_or(snapshot.dnd) { "Do Not Disturb: On" } else { "Do Not Disturb: Off" });
+                        pause.set_sensitive(snapshot.pause_remaining_seconds.is_some());
+                        let remaining=snapshot.pause_remaining_seconds.unwrap_or(0);
+                        resume.set_sensitive(remaining>0);
+                        pause_status.set_text(&if remaining>0{format!("Temporary pause: {}m {:02}s remaining",remaining/60,remaining%60)}else{"No temporary pause".into()});
                         *state.borrow_mut() = Some(snapshot);
                     }
                     status.set_text(reply.action_error.as_deref().unwrap_or("Atelier inbox · content stays in session memory"));
                 }
                 Err(error) => {
                     *state.borrow_mut() = None;
-                    choice.remove_all(); dismiss.set_sensitive(false); clear.set_sensitive(false); dnd.set_sensitive(false);
+                    choice.remove_all(); dismiss.set_sensitive(false); clear.set_sensitive(false); dnd.set_sensitive(false);pause.set_sensitive(false);resume.set_sensitive(false);pause_status.set_text("");
                     text.buffer().set_text("No Atelier inbox available. Your existing notification service is untouched.");
                     status.set_text(&format!("Atelier notification service unavailable: {error}"));
                 }
@@ -137,10 +177,10 @@ mod tests {
     use super::*;
     #[test]
     fn body_is_plain_text_and_history_empty_is_explicit() {
-        let notice = Notice { id: 1, app: "Test".into(), summary: "<b>title</b>".into(), body: "text".into(), progress: Some(72) };
+        let notice = Notice { id: 1, app: "Test".into(), summary: "<b>title</b>".into(), body: "text".into(), progress: Some(72), missed:true };
         let rendered = format_notices(&[notice]);
         assert!(rendered.contains("<b>title</b>"));
-        assert!(rendered.contains("72%"));
+        assert!(rendered.contains("72%"));assert!(rendered.contains("Missed"));
         assert_eq!(format_notices(&[]), "None");
     }
 }
