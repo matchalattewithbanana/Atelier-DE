@@ -109,7 +109,7 @@ impl AudioWidgets{
         let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,100.0,1.0);
         scale.add_css_class("atelier-expressive-slider");scale.set_size_request(-1,48);scale.set_draw_value(false);
         scale.set_tooltip_text(Some(&format!("{title} volume draft, apply to confirm")));scale.set_sensitive(false);section.append(&scale);
-        let controls=row();let apply=button("Apply volume");let mute=button("Mute");
+        let controls=row();let apply=button("Apply volume");apply.add_css_class("suggested-action");let mute=button("Mute");mute.add_css_class("atelier-control-tonal");
         apply.set_hexpand(true);mute.set_hexpand(true);apply.set_sensitive(false);mute.set_sensitive(false);
         controls.append(&mute);controls.append(&apply);section.append(&controls);
         Self{section,device,value,scale,apply,mute}
@@ -184,7 +184,7 @@ fn radio_card<S:Send+'static,A:Send+'static>(
 )->gtk::Box{
     let card=card(title);
     let detail=label("Checking service…","body");card.append(&detail);
-    let actions=row();let toggle=button("Unavailable");toggle.set_hexpand(true);toggle.set_sensitive(false);
+    let actions=row();let toggle=button("Unavailable");toggle.add_css_class("atelier-control-tonal");toggle.set_hexpand(true);toggle.set_sensitive(false);
     let refresh=button("Refresh");actions.append(&toggle);actions.append(&refresh);card.append(&actions);card.append(&settings_button(page));
     let status=label("Checking…","dim-label");card.append(&status);
     let state=Rc::new(Cell::new(None::<bool>));
@@ -208,7 +208,7 @@ pub fn show(app:&gtk::Application){
     let content=gtk::Box::new(gtk::Orientation::Vertical,12);content.add_css_class("atelier-control-window");
     content.set_margin_top(16);content.set_margin_bottom(16);content.set_margin_start(16);content.set_margin_end(16);
     content.append(&label("Quick controls","atelier-control-heading"));
-    content.append(&label("Changes apply to this desktop session. No elevated privileges requested.","dim-label"));
+    content.append(&label("Controls affect current system devices. Atelier does not request elevated privileges.","dim-label"));
     content.append(&radio_card("Wi-Fi","network",network_snapshot,network_action,
         |s:NetworkSnapshot|(s.wifi_enabled,match s.wifi_enabled{Some(true)=>"Wi-Fi enabled",Some(false)=>"Wi-Fi disabled",None=>"Wi-Fi state unknown"}.into()),NetworkAction::Wifi));
     content.append(&radio_card("Bluetooth","bluetooth",bluetooth_snapshot,bluetooth_action,
