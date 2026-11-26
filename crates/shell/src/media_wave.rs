@@ -1,5 +1,5 @@
-//! Read-only expressive playback indicator. Native GTK Scale remains
-//! the accessible seek input, and only the explicit Seek action changes playback.
+//! Pointer/touch expressive playback seek surface. The native GTK Scale
+//! remains an accessible alternative; only the explicit Seek action commits.
 use crate::media_artwork::Colors;
 use gtk::{glib,prelude::*};
 use std::{cell::{Cell,RefCell},rc::Rc};
@@ -7,6 +7,12 @@ use std::f64::consts::TAU;
 
 #[derive(Clone,Copy,Default)]
 struct State{progress:Option<f64>,playing:bool,colors:Option<Colors>,phase:f64}
+#[derive(Clone,Copy)]
+pub enum Drag{Begin(f64),Move(f64),End(f64),Cancel}
+fn fraction(x:f64,width:f64)->Option<f64>{
+    if !x.is_finite()||!width.is_finite()||width<16.0{return None;}
+    Some(((x-7.0)/(width-14.0)).clamp(0.0,1.0))
+}
 pub struct Wave{
     pub widget:gtk::DrawingArea,state:Rc<RefCell<State>>,running:Rc<Cell<bool>>,
 }
@@ -47,11 +53,42 @@ fn paint(cr:&gtk::cairo::Context,w:f64,h:f64,state:State,fallback:gtk::gdk::RGBA
 }
 impl Wave{
     pub fn new()->Self{
-        let widget=gtk::DrawingArea::new();widget.set_content_height(32);widget.set_hexpand(true);widget.set_can_target(false);widget.set_visible(false);
+        let widget=gtk::DrawingArea::new();widget.set_content_height(48);widget.set_hexpand(true);widget.set_can_target(false);widget.set_visible(false);widget.set_tooltip_text(Some("Drag to choose playback position, then press Seek"));
         let state=Rc::new(RefCell::new(State::default()));
         let draw=state.clone();
         widget.set_draw_func(move|widget,cr,w,h|paint(cr,f64::from(w),f64::from(h),*draw.borrow(),widget.style_context().color()));
         Self{widget,state,running:Rc::new(Cell::new(false))}
+    }
+    pub fn set_interactive(&self,enabled:bool){
+        self.widget.set_can_target(enabled);
+        self.widget.set_cursor_from_name(if enabled{Some("pointer")}else{None});
+    }
+    pub fn connect_drag(&self,callback:impl Fn(Drag)+'static){
+        let callback=Rc::new(callback);
+        let origin=Rc::new(Cell::new(None::<f64>));
+        let gesture=gtk::GestureDrag::new();gesture.set_button(1);
+        {
+            let (widget,origin,callback)=(self.widget.downgrade(),origin.clone(),callback.clone());
+            gesture.connect_drag_begin(move|_,x,_|{
+                origin.set(Some(x));
+                if let Some(v)=widget.upgrade().and_then(|w|fraction(x,f64::from(w.width()))){callback(Drag::Begin(v));}
+            });
+        }
+        {
+            let (widget,origin,callback)=(self.widget.downgrade(),origin.clone(),callback.clone());
+            gesture.connect_drag_update(move|_,dx,_|{
+                if let Some(v)=origin.get().and_then(|x|widget.upgrade().and_then(|w|fraction(x+dx,f64::from(w.width())))){callback(Drag::Move(v));}
+            });
+        }
+        {
+            let (widget,origin,callback)=(self.widget.downgrade(),origin.clone(),callback.clone());
+            gesture.connect_drag_end(move|_,dx,_|{
+                if let Some(v)=origin.take().and_then(|x|widget.upgrade().and_then(|w|fraction(x+dx,f64::from(w.width())))){callback(Drag::End(v));}
+                else{callback(Drag::Cancel);}
+            });
+        }
+        gesture.connect_cancel(move|_,_|{origin.set(None);callback(Drag::Cancel);});
+        self.widget.add_controller(gesture);
     }
     pub fn update(&self,progress:Option<f64>,playing:bool,colors:Option<Colors>){
         {let mut state=self.state.borrow_mut();state.progress=progress;state.playing=playing;state.colors=colors;if !animations(){state.phase=0.0;}}
@@ -75,6 +112,16 @@ impl Wave{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn pointer_mapping_matches_painted_endpoints(){
+        assert_eq!(fraction(7.0,100.0),Some(0.0));
+        assert_eq!(fraction(50.0,100.0),Some(0.5));
+        assert_eq!(fraction(93.0,100.0),Some(1.0));
+        assert_eq!(fraction(-50.0,100.0),Some(0.0));
+        assert_eq!(fraction(200.0,100.0),Some(1.0));
+        assert_eq!(fraction(0.0,2.0),None);
+        assert_eq!(fraction(f64::NAN,100.0),None);
+    }
     #[test]
     fn wave_draws_at_boundaries_and_tiny_sizes(){
         for (w,h) in [(400,32),(50,24),(2,2)]{
