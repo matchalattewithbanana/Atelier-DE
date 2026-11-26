@@ -282,7 +282,7 @@ fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<Tas
         let state=snapshot.borrow();
         for pin in &pins{pin.update(state.as_ref());}
         let individual=|w:&TaskWindow|!grouping||!grouped(w,pins.iter().map(|p|p.id.as_str()));
-        let wanted:HashSet<_>=state.as_ref().into_iter().flat_map(|s|s.windows.iter().filter(|w|individual(w)).map(move|w|Key::of(s,w))).collect();
+        let wanted:HashSet<_>=state.as_ref().map(|s|s.windows.iter().filter(|w|individual(w)).map(|w|Key::of(s,w)).collect()).unwrap_or_default();
         tiles.retain(|key,tile|{
             if wanted.contains(key){true}else{container.remove(&tile.button);false}
         });
