@@ -327,7 +327,10 @@ impl Appearance{
         css.push_str(&format!(" .atelier-dock button.atelier-dock-tile {{ min-width: 36px; }} \
             .atelier-dock .atelier-dock-mark {{ background-color: currentColor; min-width: 6px; min-height: 4px; border-radius: 2px; transition: min-width {dock_motion}ms ease-out; }} \
             .atelier-dock .atelier-dock-mark.atelier-dock-mark-focused {{ min-width: 22px; }} \
-            .atelier-dock .atelier-dock-count {{ font-size: 10px; font-weight: 700; }}"));
+            .atelier-dock .atelier-dock-count {{ font-size: 10px; font-weight: 700; }} \
+            .atelier-dock .atelier-dock-menu > button {{ padding: 4px; min-width: 20px; }} \
+            .atelier-dock .atelier-dock-split > button {{ border-top-right-radius: 4px; border-bottom-right-radius: 4px; }} \
+            .atelier-dock .atelier-dock-split > menubutton > button {{ border-top-left-radius: 4px; border-bottom-left-radius: 4px; }}"));
         css.push_str(&format!(" .atelier-widget {{ background: @theme_bg_color; border-radius: {}px; padding: 12px; }} .atelier-widget button {{ border-radius: {}px; }}",self.button_radius,self.button_radius));
         if let Some(palette)=&self.shell_palette{css.push_str(&palette.css()?);}
         // Explicit transparent layer roots avoid an opaque GTK window backing.
