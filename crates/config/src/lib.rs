@@ -9,6 +9,8 @@ pub mod wallpaper;
 pub mod tasks;
 pub mod themes;
 pub mod access_theme;
+#[cfg(feature = "wallpaper")]
+pub mod access_bundle;
 pub mod cursor_images;
 pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS, NotificationAppearance, NotificationStyle, NotificationPosition};
 
