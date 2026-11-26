@@ -66,6 +66,7 @@ pub struct Store {
     preferences: Preferences,
     next_id: u32,
     revision: u64,
+    change: u64,
     active: Vec<Notice>,
     history: VecDeque<Notice>,
 }
@@ -98,7 +99,7 @@ pub struct PopupSnapshot<'a> {
 impl Default for Store {
     fn default() -> Self {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, paused_until: None, preferences:Preferences::default(), next_id: 0, revision: 0, active: Vec::new(), history: VecDeque::new() }
+        Self { instance: format!("{}-{stamp}", std::process::id()), dnd: false, paused_until: None, preferences:Preferences::default(), next_id: 0, revision: 0, change:0, active: Vec::new(), history: VecDeque::new() }
     }
 }
 
@@ -125,6 +126,7 @@ impl Store {
             _ => Some(now + Duration::from_secs(5)),
         };
         self.revision = revision;
+        self.changed();
         let notice = Notice { id, revision, actions: details.actions, progress: details.progress, icon: details.icon, urgency:details.urgency, owner: details.owner, app, summary: bounded(summary, 1024), body: bounded(body, 4096), transient, popup_allowed: !suppressed, missed: suppressed, history_allowed:rule.history, closed_reason: None, deadline };
         if let Some(index) = index { self.active[index] = notice; } else { self.active.push(notice); }
         Ok(id)
@@ -132,6 +134,7 @@ impl Store {
     pub fn close(&mut self, id: u32, reason: u32) -> bool {
         let Some(index) = self.active.iter().position(|notice| notice.id == id) else { return false; };
         let mut notice = self.active.remove(index);
+        self.changed();
         notice.closed_reason = Some(reason);
         notice.actions.clear();
         notice.owner = None;
@@ -148,6 +151,7 @@ impl Store {
         let owner = notice.owner.clone()?;
         // Each displayed revision can yield at most one user action.
         notice.actions.clear();
+        self.changed();
         Some(owner)
     }
     pub fn close_from(&mut self, id: u32, owner: Option<&str>) -> bool {
@@ -167,6 +171,7 @@ impl Store {
             if !rule.history {notice.history_allowed=false;}
         }
         self.preferences=next;
+        self.changed();
     }
     fn suppressed(&self, now: Instant) -> bool {
         self.dnd || self.paused_until.is_some_and(|until| now < until)
@@ -184,6 +189,7 @@ impl Store {
         for notice in &mut self.active { notice.popup_allowed = false; }
     }
     pub fn set_dnd(&mut self, enabled: bool) {
+        if self.dnd!=enabled{self.changed();}
         self.dnd = enabled;
         if enabled { self.hide_popups(); }
     }
@@ -194,6 +200,7 @@ impl Store {
             Some(now.checked_add(Duration::from_secs(u64::from(seconds))).ok_or("Pause deadline overflow")?)
         };
         if seconds != 0 { self.hide_popups(); }
+        self.changed();
         Ok(())
     }
     pub fn popup_snapshot(&self) -> PopupSnapshot<'_> { self.popup_at(Instant::now()) }
@@ -208,7 +215,11 @@ impl Store {
             dnd, manual_dnd:self.dnd, pause_remaining_seconds:self.remaining(now), notice, cards:eligible, queued }
     }
     pub fn matches_instance(&self, instance: &str) -> bool { self.instance == instance }
-    pub fn clear_history(&mut self) { self.history.clear(); }
+    pub fn clear_history(&mut self) { if !self.history.is_empty(){self.history.clear();self.changed();} }
+    fn changed(&mut self){self.change=self.change.wrapping_add(1);}
+    /// Invalidation only: the snapshot remains authoritative, including the
+    /// countdown and pause expiration even when no notification changes.
+    pub fn change_token(&self,now:Instant)->(u64,u32){(self.change,self.remaining(now))}
 }
 
 #[cfg(test)]
@@ -334,6 +345,19 @@ mod tests {
         let fresh=add(&mut store,0,false,0,now);
         assert!(store.popup_at(now).cards.iter().any(|n|n.id==fresh));
         assert!(store.close(fresh,2));assert_eq!(store.history.len(),1);
+    }
+    #[test]
+    fn invalidation_tracks_mutations_and_countdown(){
+        let mut store=Store::default();let now=Instant::now();
+        let initial=store.change_token(now);
+        let id=add(&mut store,0,false,0,now);
+        assert_ne!(initial,store.change_token(now));
+        let token=store.change_token(now);
+        assert!(store.close(id,2));assert_ne!(token,store.change_token(now));
+        let token=store.change_token(now);store.clear_history();assert_ne!(token,store.change_token(now));
+        store.pause(2,now).unwrap();
+        assert_eq!(store.change_token(now).1,2);
+        assert_eq!(store.change_token(now+Duration::from_secs(2)).1,0);
     }
     #[test]
     fn rejects_over_capacity_and_unknown_close() {
