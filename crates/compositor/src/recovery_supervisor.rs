@@ -91,7 +91,9 @@ impl Supervisor{
             Ok(None)=>{}
         }
         if state.recovery_confirmed(&self.client){return Ok(Status::Confirmed);}
-        if Instant::now()>=self.deadline{self.stop(state);return Ok(Status::Stopped);}
+        if !state.recovery_pending(&self.client)||Instant::now()>=self.deadline{
+            self.stop(state);return Ok(Status::Stopped);
+        }
         Ok(Status::Pending)
     }
     pub(crate) fn stop(&mut self,state:&mut Atelier){
