@@ -110,7 +110,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
             wl_registry::Event::Global { name, interface, version } => {
-                if interface=="wl_seat" && version<3 {state.fail("unsupported seat protocol version");}
+                if interface=="wl_seat" && version<7 {state.fail("unsupported seat protocol version");}
                 else {state.global(name,&interface);}
             },
             wl_registry::Event::GlobalRemove { name } => state.remove(name),
@@ -183,7 +183,8 @@ delegate_noop!(State: ignore manager::ExtSessionLockManagerV1);
 
 /// Exercise the private protocol with an opaque black surface. Never sends
 /// unlock_and_destroy, accepts password input, or performs authentication.
-/// An optional single seat is bound to validate keyboard protocol routing;
+/// An optional single v7 seat is bound to validate keyboard protocol routing;
+/// Smithay 0.7's legacy keymap path omits the trailing NUL.
 /// entry readiness remains false because this surface has no prompt.
 /// Blocks until disconnection or failure; the supervising compositor must
 /// keep the desktop protected even if this client exits. No runtime caller
@@ -205,7 +206,7 @@ pub fn hold_black(socket: UnixStream) -> Result<()> {
     state.shm = Some(shm);
     state.surface = Some(surface.clone());
     if let Some(name)=state.seat_name{
-        let seat:wl_seat::WlSeat=registry.bind(name,3,&qh,());
+        let seat:wl_seat::WlSeat=registry.bind(name,7,&qh,());
         state.input.bind(seat);
     }
     let lock = manager.lock(&qh, ());
