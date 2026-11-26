@@ -4,14 +4,56 @@ use crate::mpris::{Action,Bus,Details,Identity,Track,Repeat};
 use gtk::{glib,prelude::*};
 use crate::{media_artwork::{Artwork,Cache,Colors},media_wave::{Wave,Drag}};
 use std::sync::Arc;
-use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::Duration};
+use std::{cell::{Cell,RefCell},rc::Rc,sync::mpsc,time::{Duration,Instant}};
 
 enum Request{Select(String),Act(Identity,Action),Artwork(bool)}
 struct Reply{
     revision:u64,names:Vec<String>,selected:Option<String>,
     details:Option<Details>,error:Option<String>,art:Option<Arc<Artwork>>,
 }
-fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
+type Command=(u64,Request);
+/// Requests wake the private worker context, including disconnect on close.
+struct RequestPort{sender:Option<mpsc::SyncSender<Command>>,context:glib::MainContext}
+impl RequestPort{
+    fn send(&self,request:Command)->bool{
+        if !self.sender.as_ref().is_some_and(|sender|sender.try_send(request).is_ok()){return false;}
+        self.context.wakeup();true
+    }
+}
+impl Drop for RequestPort{
+    fn drop(&mut self){drop(self.sender.take());self.context.wakeup();}
+}
+enum Wake{Request(Command),Refresh,Closed}
+/// Keep the main context blocked when idle. The deadline is a compatibility
+/// fallback for players that omit signals, and samples Position while playing.
+fn wait(context:&glib::MainContext,rx:&mpsc::Receiver<Command>,bus:Option<&Bus>,interval:Duration)->Wake{
+    let started=Instant::now();
+    let timer=glib::timeout_source_new(interval,Some("atelier-media-refresh"),glib::Priority::DEFAULT,||glib::ControlFlow::Break);
+    timer.attach(Some(context));
+    // Coalesce a signal burst into at most one refresh per 100ms. A single
+    // extra one-shot wakes the context at the end of the coalescing interval.
+    let mut debounce=None;
+    let result=loop{
+        match rx.try_recv(){
+            Ok(request)=>break Wake::Request(request),
+            Err(mpsc::TryRecvError::Disconnected)=>break Wake::Closed,
+            Err(mpsc::TryRecvError::Empty)=>{}
+        }
+        let elapsed=started.elapsed();
+        if elapsed>=interval{break Wake::Refresh;}
+        if bus.is_some_and(Bus::has_change){
+            if elapsed>=Duration::from_millis(100){break Wake::Refresh;}
+            if debounce.is_none(){
+                let source=glib::timeout_source_new(Duration::from_millis(100).saturating_sub(elapsed).max(Duration::from_millis(1)),Some("atelier-media-coalesce"),glib::Priority::DEFAULT,||glib::ControlFlow::Break);
+                source.attach(Some(context));debounce=Some(source);
+            }
+        }
+        context.iteration(true);
+    };
+    timer.destroy();if let Some(source)=debounce{source.destroy();}
+    result
+}
+fn worker(context:&glib::MainContext,rx:mpsc::Receiver<Command>,tx:mpsc::SyncSender<Reply>){
     let mut bus=None;
     let mut revision=0;
     let mut selected:Option<String>=None;
@@ -21,8 +63,10 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
         let result=(||->anyhow::Result<_>{
             if bus.is_none(){bus=Some(Bus::connect()?);}
             let bus=bus.as_ref().expect("connected");
+            bus.take_change();
             let names=bus.players()?;
             if selected.as_ref().is_none_or(|name|!names.contains(name)){selected=names.first().cloned();}
+            if selected.is_none(){bus.clear_selection();}
             let details=selected.as_ref().map(|name|bus.selected(name));
             Ok((names,details))
         })();
@@ -38,9 +82,10 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
             }
             Err(e)=>{bus=None;artwork.update(false,None);Reply{revision,names:vec![],selected:None,details:None,error:action_error.take().or(Some(e.to_string())),art:None}}
         };
+        let interval=if reply.error.is_some()||reply.details.as_ref().is_some_and(|d|d.status=="Playing"){Duration::from_secs(2)}else{Duration::from_secs(15)};
         if tx.send(reply).is_err(){break;}
-        match rx.recv_timeout(Duration::from_secs(2)){
-            Ok((next,request))=>{
+        match wait(context,&rx,bus.as_ref(),interval){
+            Wake::Request((next,request))=>{
                 revision=next;
                 match request{
                     Request::Select(name)=>selected=Some(name),
@@ -53,8 +98,8 @@ fn worker(rx:mpsc::Receiver<(u64,Request)>,tx:mpsc::SyncSender<Reply>){
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout)=>{}
-            Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+            Wake::Refresh=>{}
+            Wake::Closed=>break,
         }
     }
 }
@@ -72,14 +117,14 @@ struct Ui{
     artwork_enabled:gtk::CheckButton,cover:gtk::Picture,wave:Wave,art:RefCell<Option<Arc<Artwork>>>,
     status:gtk::Label,names:RefCell<Vec<String>>,details:RefCell<Option<Details>>,
     revision:Cell<u64>,busy:Cell<bool>,updating:Cell<bool>,draft:Cell<bool>,drag_track:RefCell<Option<Track>>,
-    requests:mpsc::SyncSender<(u64,Request)>,
+    requests:RequestPort,
 }
 impl Ui{
     fn request(&self,request:Request){
         if self.busy.get(){return;}
         let Some(revision)=self.revision.get().checked_add(1)else{return;};
         let switching=matches!(&request,Request::Select(_));
-        if self.requests.try_send((revision,request)).is_ok(){
+        if self.requests.send((revision,request)){
             if switching{self.set_art(None);}
             self.revision.set(revision);self.busy.set(true);self.draft.set(false);self.drag_track.borrow_mut().take();self.wave.set_interactive(false);
             self.choice.set_sensitive(false);self.artwork_enabled.set_sensitive(false);
@@ -224,7 +269,9 @@ pub fn show(app:&gtk::Application){
     card.append(&modes);
     let status=label("Connecting to session media service…","dim-label");content.append(&status);
     let (requests,rx)=mpsc::sync_channel(1);let (tx,updates)=mpsc::sync_channel(1);
-    std::thread::spawn(move||worker(rx,tx));
+    let context=glib::MainContext::new();let worker_context=context.clone();
+    std::thread::spawn(move||{let _=worker_context.with_thread_default(||worker(&worker_context,rx,tx));});
+    let requests=RequestPort{sender:Some(requests),context};
     let ui=Rc::new(Ui{choice,track,artist,album,playback,scale,position,seek,previous,toggle,next,shuffle,repeat,status,
         artwork_enabled,cover,wave,art:RefCell::new(None),
         names:RefCell::new(vec![]),details:RefCell::new(None),revision:Cell::new(0),busy:Cell::new(false),
@@ -271,6 +318,28 @@ pub fn show(app:&gtk::Application){
 }
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn private_context_handles_request_and_disconnect(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (sender,rx)=mpsc::sync_channel(1);
+        let port=RequestPort{sender:Some(sender),context:context.clone()};
+        assert!(port.send((7,Request::Artwork(true))));
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Request((7,Request::Artwork(true)))));
+            drop(port);
+            assert!(matches!(wait(&context,&rx,None,Duration::from_secs(1)),Wake::Closed));
+        }).unwrap();
+    }
+    #[test]
+    fn private_context_deadline_refreshes_without_signals(){
+        use super::*;
+        let context=glib::MainContext::new();
+        let (_sender,rx)=mpsc::sync_channel(1);
+        context.with_thread_default(||{
+            assert!(matches!(wait(&context,&rx,None,Duration::from_millis(5)),Wake::Refresh));
+        }).unwrap();
+    }
     #[test]
     fn clock_format(){assert_eq!(super::time(65_000_000),"1:05");assert_eq!(super::time(3661_000_000),"1:01:01");}
 }
