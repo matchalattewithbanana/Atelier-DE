@@ -3,7 +3,9 @@
 #![cfg(all(target_os = "linux", feature = "pam"))]
 
 mod worker;
+mod launcher;
 pub use worker::run_inherited_worker;
+pub use launcher::{authenticate_in_worker, prepare_authentication_process};
 
 use libc::{c_char, c_int, c_void};
 use std::{ffi::{CStr, CString}, fs, os::unix::fs::MetadataExt, path::Path, ptr, sync::atomic::{compiler_fence, Ordering}};
