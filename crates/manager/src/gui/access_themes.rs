@@ -5,6 +5,7 @@ use gtk::prelude::*;
 use atelier_config::{access_bundle::{self,Bundle},wallpaper::Raster};
 use std::{cell::{Cell,RefCell},path::PathBuf,rc::Rc};
 use super::{label,background};
+mod resources;
 
 fn color(cr:&gtk::cairo::Context,value:&str){
     let n=u32::from_str_radix(&value[1..],16).expect("validated theme color");
@@ -78,9 +79,9 @@ fn backdrop(cr:&gtk::cairo::Context,w:f64,h:f64,theme:&Theme,image:Option<&Wallp
 fn widget_preview(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),widget:Widget,theme:&Theme,scale:f64){
     let (heading,main,detail)=match widget{
         Widget::Weather=>("WEATHER","24°","Sample forecast"),
-        Widget::System=>("SYSTEM","Atelier Desktop","Sample system status"),
+        Widget::System=>("SYSTEM","Atelier Desktop","Battery 82% · Sample"),
         Widget::Media=>("NOW PLAYING","Sample track","Previous · Play · Next"),
-        Widget::Resources=>("RESOURCES","CPU 42% · RAM 58%","Battery 82%"),
+        Widget::Resources=>{resources::draw(cr,area,&theme.palette);return;},
         Widget::Notifications=>("NOTIFICATIONS","Private","Contents hidden"),
     };
     color(cr,&theme.palette.muted);text(cr,area,heading,0.20,9.0*scale);
@@ -88,9 +89,12 @@ fn widget_preview(cr:&gtk::cairo::Context,area:(f64,f64,f64,f64),widget:Widget,t
     color(cr,&theme.palette.text);text(cr,area,detail,0.73,10.0*scale);
 }
 fn draw(cr:&gtk::cairo::Context,w:i32,h:i32,theme:&Theme,image:Option<&Wallpaper>,compact:bool,login:bool){
-    let (w,h)=(f64::from(w.max(1)),f64::from(h.max(1)));
-    let (w,offset)=if compact{let narrow=w.min(h*0.82);(narrow,(w-narrow)/2.0)}else{(w,0.0)};
-    let _=cr.save();cr.translate(offset,0.0);
+    let (available_w,available_h)=(f64::from(w.max(1)),f64::from(h.max(1)));
+    // Fit the selected display aspect ratio into the preview allocation;
+    // a narrow settings window should not silently switch the display mode.
+    let ratio=if compact{0.82}else{16.0/9.0};
+    let w=available_w.min(available_h*ratio);let h=w/ratio;
+    let _=cr.save();cr.translate((available_w-w)/2.0,(available_h-h)/2.0);
     cr.rectangle(0.0,0.0,w,h);cr.clip();
     backdrop(cr,w,h,theme,image);
     let compact=compact||w<h*1.55;
