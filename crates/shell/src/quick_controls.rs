@@ -85,8 +85,11 @@ fn worker<S:Send+'static,A:Send+'static>(
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct AudioView{id:String,description:String,volume:Option<u32>,muted:Option<bool>}
+fn inventory(snapshot:&AudioSnapshot,direction:Direction)->(&Option<String>,&[Device]){
+    match direction{Direction::Output=>(&snapshot.default_output,&snapshot.outputs),Direction::Input=>(&snapshot.default_input,&snapshot.inputs)}
+}
 fn default_device(snapshot:&AudioSnapshot,direction:Direction)->Option<AudioView>{
-    let (id,devices)=match direction{Direction::Output=>(&snapshot.default_output,&snapshot.outputs),Direction::Input=>(&snapshot.default_input,&snapshot.inputs)};
+    let (id,devices)=inventory(snapshot,direction);
     let id=id.as_ref()?;
     let d=devices.iter().find(|d|d.id==*id)?;
     Some(AudioView{id:d.id.clone(),description:d.description.clone(),volume:average(d),muted:d.muted})
@@ -98,13 +101,15 @@ fn average(device:&Device)->Option<u32>{
 }
 struct AudioCommand{direction:Direction,id:String,action:AudioAction}
 struct AudioWidgets{
-    section:gtk::Box,device:gtk::Label,value:gtk::Label,scale:gtk::Scale,apply:gtk::Button,mute:gtk::Button,
+    section:gtk::Box,device:gtk::Label,choice:gtk::ComboBoxText,make_default:gtk::Button,value:gtk::Label,scale:gtk::Scale,apply:gtk::Button,mute:gtk::Button,
 }
 impl AudioWidgets{
     fn new(title:&str)->Self{
         let section=gtk::Box::new(gtk::Orientation::Vertical,6);
         section.append(&label(title,"atelier-control-subtitle"));
-        let device=label("Checking device…","dim-label");section.append(&device);
+        let device=label("Checking default device…","dim-label");section.append(&device);
+        let choice=gtk::ComboBoxText::new();choice.set_size_request(-1,48);choice.set_sensitive(false);section.append(&choice);
+        let make_default=button("Set selected device as default");make_default.set_sensitive(false);section.append(&make_default);
         let value=label("Volume unavailable","body");section.append(&value);
         let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,100.0,1.0);
         scale.add_css_class("atelier-expressive-slider");scale.set_size_request(-1,48);scale.set_draw_value(false);
@@ -112,14 +117,32 @@ impl AudioWidgets{
         let controls=row();let apply=button("Apply volume");apply.add_css_class("suggested-action");let mute=button("Mute");mute.add_css_class("atelier-control-tonal");
         apply.set_hexpand(true);mute.set_hexpand(true);apply.set_sensitive(false);mute.set_sensitive(false);
         controls.append(&mute);controls.append(&apply);section.append(&controls);
-        Self{section,device,value,scale,apply,mute}
+        Self{section,device,choice,make_default,value,scale,apply,mute}
+    }
+    fn weak_inventory(&self,direction:Direction)->impl Fn(Option<&AudioSnapshot>)+'static{
+        let (choice,make_default)=(self.choice.downgrade(),self.make_default.downgrade());
+        move|snapshot|{
+            let (Some(choice),Some(make_default))=(choice.upgrade(),make_default.upgrade())else{return;};
+            choice.remove_all();
+            if let Some(snapshot)=snapshot{
+                let (default,devices)=inventory(snapshot,direction);
+                for device in devices{
+                    let suffix=if device.monitor{" (monitor)"}else{""};
+                    let active=if default.as_ref()==Some(&device.id){" · Default"}else{""};
+                    choice.append(Some(&device.id),&format!("{}{suffix}{active}",device.description));
+                }
+                if let Some(default)=default{choice.set_active_id(Some(default));}
+                choice.set_sensitive(!devices.is_empty());
+            }else{choice.set_sensitive(false);}
+            make_default.set_sensitive(false);
+        }
     }
     fn weak_display(&self)->impl Fn(Option<AudioView>)+'static{
         let (device,value,scale,apply,mute)=(self.device.downgrade(),self.value.downgrade(),self.scale.downgrade(),self.apply.downgrade(),self.mute.downgrade());
         move|view|{
             let (Some(device),Some(value),Some(scale),Some(apply),Some(mute))=(device.upgrade(),value.upgrade(),scale.upgrade(),apply.upgrade(),mute.upgrade())else{return;};
             if let Some(v)=view{
-                device.set_text(&v.description);
+                device.set_text(&format!("Current default: {}",v.description));
                 if let Some(percent)=v.volume{
                     scale.set_value(f64::from(percent.min(100)));scale.set_sensitive(true);
                     value.set_text(&format!("Current: {percent}%"));
@@ -135,6 +158,19 @@ impl AudioWidgets{
     }
     fn connect(&self,direction:Direction,state:Rc<RefCell<Option<AudioView>>>,request:Rc<dyn Fn(Request<AudioCommand>)>){
         let (value,apply)=(self.value.downgrade(),self.apply.downgrade());
+        let default_state=state.clone();let button=self.make_default.downgrade();
+        self.choice.connect_changed(move|choice|{
+            if let Some(button)=button.upgrade(){
+                let selected=choice.active_id();
+                button.set_sensitive(selected.as_ref().is_some_and(|id|default_state.borrow().as_ref().is_none_or(|v|v.id!=id.as_str())));
+            }
+        });
+        let choice=self.choice.downgrade();let send=request.clone();
+        self.make_default.connect_clicked(move |_|{
+            if let Some(id)=choice.upgrade().and_then(|c|c.active_id()){
+                send(Some(AudioCommand{direction,id:id.to_string(),action:AudioAction::Default}));
+            }
+        });
         let state_for_scale=state.clone();
         self.scale.connect_value_changed(move|scale|{
             let (Some(value),Some(apply))=(value.upgrade(),apply.upgrade())else{return;};
@@ -167,11 +203,13 @@ fn audio_card()->gtk::Box{
     let status=label("Checking audio…","dim-label");card.append(&status);
     let out_state=Rc::new(RefCell::new(None));let in_state=Rc::new(RefCell::new(None));
     let out_display=output.weak_display();let in_display=input.weak_display();
+    let out_inventory=output.weak_inventory(Direction::Output);let in_inventory=input.weak_inventory(Direction::Input);
     let (out,in_)= (out_state.clone(),in_state.clone());
     let request=worker(&card,&status,audio_snapshot,|cmd:AudioCommand|audio_action(cmd.direction,&cmd.id,cmd.action),move|snapshot|{
         let ov=snapshot.as_ref().and_then(|s|default_device(s,Direction::Output));
         let iv=snapshot.as_ref().and_then(|s|default_device(s,Direction::Input));
         *out.borrow_mut()=ov.clone();*in_.borrow_mut()=iv.clone();
+        out_inventory(snapshot.as_ref());in_inventory(snapshot.as_ref());
         out_display(ov);in_display(iv);
     });
     output.connect(Direction::Output,out_state,request.clone());input.connect(Direction::Input,in_state,request.clone());
