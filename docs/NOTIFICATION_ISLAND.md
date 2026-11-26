@@ -16,11 +16,15 @@ atelier-notifications progress "$id" 100 "Build" "Done"
 
 Use a replacement ID only within the same daemon lifetime. Legacy non-action notifications retain their existing replacement-by-ID behavior. Action-bearing replacements require the originating D-Bus unique name; action keys are opaque, consumed once per revision and sent to that origin, never executed as commands by the daemon. The custom Invoke method checks instance, ID, revision, expiry and action key. This is an ordinary same-session bus interface, not a privileged approval or authentication boundary. A disconnected origin cannot receive its action. The daemon does not yet advertise standard actions capability pending graphical controls and live-client delivery testing.
 
+## Experimental presentation
+
+Run `atelier-shell --panel --notification-island` for the centred, three-card layer-shell stack, or `atelier-shell --panel --notification-popups` for a single floating card. Both remain opt-in and mutually exclusive; neither starts a notification daemon. Cards display plain text, expandable details, progress and bounded action buttons. The revision watermark prevents startup replay, and DND clears the visible stack. Incomplete progress and active actions can remain visible while eligible; other cards use a five-second local lifetime. The existing shell palette and button radius supply card styling. The initial slide-in transition is experimental and not yet linked to the reduced-motion preference. Graphical behavior still requires CI and desktop testing.
+
 ## Next phases
 
-- Render compact, stacked and expanded cards in the layer-shell panel with smooth bounded transitions, progress bars and action controls. Preserve standard inbox fallback.
+- Refine transitions, preserve expansion state during updates, add compact layouts, responsive geometry, reduced-motion support and visual acceptance tests.
 - Add explicit pause, missed-card handling, lock-aware suppression and output placement.
 - Add a persistent script-friendly client for command tracking, safe action selection and presets. AI-agent integrations are explicitly out of scope. Do not use notifications for privileged or security-sensitive approvals.
 - Expose layout, position, animation and color options in Atelier Studio. Keep the interface compositor-independent wherever layer-shell is supported.
 
-No new daemon, automatic hooks, default shell changes or compositor lock integration are introduced by this foundation. CI must verify the changes before merge.
+No new daemon, AI integrations, default shell changes or compositor lock integration are introduced. Do not use the experimental popup surface for sensitive messages on a locked desktop; lock-aware suppression is still pending. CI must verify the changes before merge.
