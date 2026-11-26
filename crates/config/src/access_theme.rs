@@ -20,12 +20,33 @@ pub enum Typography{Sans,Monospace,Display}
 pub struct Palette{
     pub background:String,pub panel:String,pub text:String,pub muted:String,pub accent:String,
 }
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum GradientDirection{Horizontal,Vertical,Diagonal}
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum ImageFit{Cover,Contain,Stretch}
+/// The image, when requested, belongs to a separately reviewed bundle.
+/// No paths, URLs or media programs are accepted.
+#[derive(Debug,Default,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(tag="kind",rename_all="kebab-case",deny_unknown_fields)]
+pub enum Backdrop{
+    #[default] Solid,
+    Gradient{end:String,direction:GradientDirection},
+    Wallpaper{fit:ImageFit,dim:u32},
+}
+impl Backdrop{
+    fn is_solid(&self)->bool{matches!(self,Self::Solid)}
+    pub fn needs_image(&self)->bool{matches!(self,Self::Wallpaper{..})}
+}
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme{
     pub format:String,pub version:u32,pub name:String,
     pub layout:Layout,pub typography:Typography,pub palette:Palette,
     pub corner_radius:u32,pub clock:bool,pub date:bool,pub motion_ms:u32,
+    #[serde(default,skip_serializing_if="Backdrop::is_solid")]
+    pub backdrop:Backdrop,
 }
 /// Coordinates are fractions of a 1000 × 1000 logical canvas, not pixels.
 /// The trusted host owns authentication controls within the required card.
@@ -58,7 +79,7 @@ pub fn preset(id:&str)->Result<Theme>{
     };
     let [background,panel,text,muted,accent]=colors.map(str::to_owned);
     let theme=Theme{format:FORMAT.into(),version:1,name:name.into(),layout,typography,
-        palette:Palette{background,panel,text,muted,accent},corner_radius:radius,clock:true,date:true,motion_ms:160};
+        palette:Palette{background,panel,text,muted,accent},corner_radius:radius,clock:true,date:true,motion_ms:160,backdrop:Backdrop::Solid};
     theme.validate()?;Ok(theme)
 }
 impl Theme{
@@ -68,6 +89,11 @@ impl Theme{
             bail!("unsupported theme format, version or name");
         }
         if self.corner_radius>48||self.motion_ms>400{bail!("radius or motion outside supported bounds");}
+        match &self.backdrop{
+            Backdrop::Gradient{end,..}=>{rgb(end)?;}
+            Backdrop::Wallpaper{dim,..} if *dim>80=>bail!("wallpaper dim must be 0–80 percent"),
+            _=>{}
+        }
         let surfaces=[rgb(&self.palette.background)?,rgb(&self.palette.panel)?];
         for value in [&self.palette.text,&self.palette.muted,&self.palette.accent]{
             let fg=rgb(value)?;
@@ -126,6 +152,17 @@ mod tests{
         bad=theme.clone();bad.version=2;assert!(bad.json().is_err());
         bad=theme;bad.motion_ms=401;assert!(bad.json().is_err());
         assert!(Theme::parse(&" ".repeat(MAX_BYTES+1)).is_err());
+    }
+    #[test]
+    fn background_defaults_and_bounds(){
+        let mut theme=preset("classic").unwrap();
+        let old=theme.json().unwrap();assert!(!old.contains("backdrop"));
+        assert_eq!(Theme::parse(&old).unwrap().backdrop,Backdrop::Solid);
+        theme.backdrop=Backdrop::Gradient{end:"#445566".into(),direction:GradientDirection::Diagonal};
+        assert_eq!(Theme::parse(&theme.json().unwrap()).unwrap(),theme);
+        theme.backdrop=Backdrop::Wallpaper{fit:ImageFit::Cover,dim:81};assert!(theme.json().is_err());
+        theme.backdrop=Backdrop::Gradient{end:"url(https://example.org)".into(),direction:GradientDirection::Vertical};
+        assert!(theme.json().is_err());
     }
     #[test]
     fn import_export_refuses_overwrite_and_symlink(){
