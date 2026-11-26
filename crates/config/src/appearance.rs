@@ -355,7 +355,7 @@ impl Appearance{
             .atelier-control-window .atelier-control-subtitle {{ font-size: 16px; font-weight: 700; }} \
             .atelier-control-window .dim-label {{ color: {muted}; }} \
             .atelier-control-window button.atelier-control-active, .atelier-control-window button.suggested-action {{ background-image: none; background-color: {primary}; color: {on_primary}; }} \
-            .atelier-control-window button.atelier-control-tonal {{ background-image: none; background-color: {secondary}; color: {on_secondary}; }} \
+            .atelier-control-window button.atelier-control-tonal:not(.atelier-control-active) {{ background-image: none; background-color: {secondary}; color: {on_secondary}; }} \
             .atelier-control-window button.atelier-control-active, .atelier-control-window button.atelier-control-tonal {{ border-radius: 24px; }} \
             .atelier-control-window button.atelier-control-active:active, .atelier-control-window button.atelier-control-tonal:active {{ border-radius: 12px; }} \
             .atelier-control-window scale.atelier-expressive-slider trough {{ min-height: 16px; border-radius: 8px; background-color: {secondary}; }} \
@@ -481,6 +481,17 @@ impl AppearanceReview{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn expressive_controls_are_scoped_and_use_readable_roles(){
+        let mut a=Appearance::default();
+        a.shell_palette=Some(crate::themes::ShellPalette{surface:"#101522".into(),elevated:"#202b40".into(),text:"#f2f5ff".into(),muted:"#bdc8db".into()});
+        a.accent="#abc4ff".into();
+        let css=a.css().unwrap();
+        assert!(css.contains(".atelier-control-window button.atelier-control-active"));
+        assert!(css.contains(".atelier-control-window scale.atelier-expressive-slider"));
+        assert!(css.contains("background-color: #abc4ff; color: #000000"));
+        assert!(Appearance::default().css().unwrap().contains("@theme_selected_bg_color"));
+    }
     #[test]
     fn reviewed_save_preserves_previous_and_rejects_stale(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("appearance.toml");
