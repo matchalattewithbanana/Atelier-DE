@@ -108,9 +108,9 @@ impl Indicator{
         let slot=gtk::Box::new(gtk::Orientation::Horizontal,0);slot.set_size_request(22,8);
         slot.set_halign(gtk::Align::Center);slot.set_valign(gtk::Align::Center);
         let mark=gtk::Box::new(gtk::Orientation::Horizontal,0);mark.set_halign(gtk::Align::Center);
-        mark.set_hexpand(true);mark.add_css_class("atelier-dock-mark");mark.set_opacity(0.0);
+        mark.set_valign(gtk::Align::Center);mark.add_css_class("atelier-dock-mark");mark.set_opacity(0.0);
         slot.append(&mark);root.append(&slot);
-        let count=gtk::Label::new(None);count.add_css_class("atelier-dock-count");count.set_width_chars(4);count.set_visible(false);
+        let count=gtk::Label::new(None);count.add_css_class("atelier-dock-count");count.set_width_chars(4);count.set_max_width_chars(4);count.set_opacity(0.0);
         root.append(&count);Self{root,mark,count}
     }
     fn downgrade(&self)->WeakIndicator{WeakIndicator{mark:self.mark.downgrade(),count:self.count.downgrade()}}
@@ -121,7 +121,7 @@ impl WeakIndicator{
         if let (Some(mark),Some(label))=(self.mark.upgrade(),self.count.upgrade()){
             mark.set_opacity(if count>0{1.0}else{0.0});
             if active{mark.add_css_class("atelier-dock-mark-focused");}else{mark.remove_css_class("atelier-dock-mark-focused");}
-            label.set_visible(count>1||partial);
+            label.set_opacity(if count>1||partial{1.0}else{0.0});
             label.set_text(&if partial{if count==0{"?".into()}else{format!("{count}+")}}else{count.to_string()});
         }
     }
@@ -199,7 +199,7 @@ fn watch_tasks(window:&gtk::ApplicationWindow,container:&gtk::Box,backend:Rc<Tas
         initialized=true;*snapshot.borrow_mut()=next;
         let state=snapshot.borrow();
         for pin in &pins{pin.update(state.as_ref());}
-        let wanted:HashSet<_>=state.as_ref().into_iter().flat_map(|s|s.windows.iter().map(|w|Key::of(s,w))).collect();
+        let wanted:HashSet<_>=state.as_ref().into_iter().flat_map(|s|s.windows.iter().map(move|w|Key::of(s,w))).collect();
         tiles.retain(|key,tile|{
             if wanted.contains(key){true}else{container.remove(&tile.button);false}
         });
