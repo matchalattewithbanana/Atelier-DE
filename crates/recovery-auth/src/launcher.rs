@@ -135,6 +135,9 @@ fn exchange(mut command: Command, password: &mut [u8], timeout: Duration) -> io:
         });
     }
     let mut child = ChildGuard(command.spawn()?);
+    // Command retains its configured Stdio handle for reuse after spawn.
+    // Close the parent's duplicate of the child endpoint before waiting for EOF.
+    drop(command);
     let len = (secret.0.len() as u16).to_be_bytes();
     write_all(&mut socket, &[VERSION, len[0], len[1]], deadline)?;
     write_all(&mut socket, secret.0, deadline)?;
