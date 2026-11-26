@@ -92,6 +92,18 @@ pub(super) fn prepare(value:&str)->Result<()>{
     if oversized(pack,theme){bail!("selected upstream media exceeds the current staging limit");}
     println!("Source: https://github.com/{}\nRevision: {}\nTheme: {theme}\nCode license: {} (media/fonts may be separately licensed).\nDownload only this theme and upstream license into temporary user data. QML is untrusted executable code; no execution or system changes.",pack.repo,pack.revision,pack.license);
     if !confirm(&format!("fetch {value}"))?{return Ok(());}
+    let review=fetch_review(value)?;
+    println!("{}",review.detail()?);
+    let phrase=review.phrase();
+    if confirm(&phrase)?{println!("Prepared inert theme copy: {}",review.apply(&phrase)?.display());}
+    Ok(())
+}
+/// Fetch only after explicit CLI or graphical user selection. Retain the
+/// temporary directory for the existing screenshot and fingerprint review.
+pub(super) fn fetch_review(value:&str)->Result<login_theme::Review>{
+    if nix::unistd::Uid::effective().is_root(){bail!("run as the desktop user, not root");}
+    let (pack,theme)=lookup(value)?;
+    if oversized(pack,theme){bail!("selected upstream media exceeds the current staging limit");}
     let tree=serde_json::from_slice(&discovery::theme_tree(pack.repo,pack.revision)?)?;
     let files=plan(tree,theme)?;
     let temporary=tempfile::tempdir()?;let root=temporary.path().join("theme");fs::create_dir(&root)?;
@@ -102,11 +114,7 @@ pub(super) fn prepare(value:&str)->Result<()>{
         let mut output=fs::OpenOptions::new().create_new(true).write(true).open(dest)?;output.write_all(&bytes)?;
     }
     fs::write(root.join("UPSTREAM-SOURCE.txt"),format!("https://github.com/{}/tree/{}/themes/{theme}\nCode license: {}\nAsset/font rights and QML compatibility require independent review.\n",pack.repo,pack.revision,pack.license))?;
-    let review=login_theme::inspect(&root)?;
-    println!("{}",review.detail()?);
-    let phrase=review.phrase();
-    if confirm(&phrase)?{println!("Prepared inert theme copy: {}",review.apply(&phrase)?.display());}
-    Ok(())
+    Ok(login_theme::inspect(&root)?.retain_source(temporary))
 }
 #[cfg(test)]
 mod tests{
