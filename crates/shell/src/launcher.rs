@@ -57,11 +57,13 @@ pub fn browser(window:&gtk::ApplicationWindow,appearance:&atelier_config::Appear
             count.set_text(&format!("{visible} apps"));
             list.unselect_all();
             if !query.trim().is_empty(){
-                if let Some(row)=list.row_at_index(0).filter(|r|index(r).and_then(|i|ranks.borrow().get(i).copied().flatten()).is_some()){list.select_row(Some(&row));}
+                let mut i=0;while let Some(row)=list.row_at_index(i){
+                    if index(&row).and_then(|i|ranks.borrow().get(i).copied().flatten()).is_some(){list.select_row(Some(&row));break;}i+=1;
+                }
             }
         })
     };
-    {let refresh=refresh.clone();search.connect_search_changed(move |_|refresh());}
+    {let refresh=refresh.clone();search.connect_changed(move |_|refresh());}
     {let refresh=refresh.clone();categories.connect_changed(move |_|refresh());}
     {let window=window.downgrade();let status=status.downgrade();
         list.connect_row_activated(move|_,row|{
@@ -75,11 +77,10 @@ pub fn browser(window:&gtk::ApplicationWindow,appearance:&atelier_config::Appear
     }
     {let list=list.downgrade();let refresh=refresh.clone();
         search.connect_activate(move|entry|{
-            // SearchEntry signals can be delayed. Recompute immediately so
-            // Enter never launches a result for a previous query.
+            // Recompute before activation so Enter always uses the current query.
             refresh();
             if entry.text().trim().is_empty(){return;}
-            if let Some(list)=list.upgrade(){if let Some(row)=list.selected_row(){row.activate();}}
+            if let Some(list)=list.upgrade(){if let Some(row)=list.selected_row(){row.emit_activate();}}
         });
     }
     let keys=gtk::EventControllerKey::new();
