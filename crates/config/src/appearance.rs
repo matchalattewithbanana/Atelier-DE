@@ -239,6 +239,24 @@ impl NotificationAppearance {
     }
 }
 
+/// Local density preference; portable themes do not change display ergonomics.
+#[derive(Debug,Default,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum PanelDensity{#[default] Automatic,Comfortable,Compact}
+impl PanelDensity{
+    fn is_default(&self)->bool{*self==Self::Automatic}
+    pub fn compact(self,width:i32,workspaces:usize,spacing:u32)->bool{
+        match self{
+            Self::Compact=>true,Self::Comfortable=>false,Self::Automatic=>{
+                let threshold=1100+workspaces.saturating_sub(4).min(5) as i32*36+
+                    spacing.saturating_sub(8).min(16) as i32*8;
+                width<threshold
+            }
+        }
+    }
+}
+fn is_false(value:&bool)->bool{!*value}
+
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Appearance {
@@ -248,6 +266,10 @@ pub struct Appearance {
     pub cursor:CursorPreferences,
     pub panel_height:u32,
     pub panel_spacing:u32,
+    #[serde(skip_serializing_if="PanelDensity::is_default")]
+    pub panel_density:PanelDensity,
+    #[serde(skip_serializing_if="is_false")]
+    pub launcher_grid_default:bool,
     pub button_radius:u32,
     pub launcher_icon_size:u32,
     pub show_date:bool,
@@ -284,7 +306,7 @@ pub struct Appearance {
     pub shell_palette:Option<crate::themes::ShellPalette>,
 }
 impl Default for Appearance{
-    fn default()->Self{Self{version:1,accent:String::new(),cursor:CursorPreferences::default(),panel_height:40,panel_spacing:8,button_radius:10,launcher_icon_size:32,
+    fn default()->Self{Self{version:1,accent:String::new(),cursor:CursorPreferences::default(),panel_height:40,panel_spacing:8,panel_density:PanelDensity::Automatic,launcher_grid_default:false,button_radius:10,launcher_icon_size:32,
         show_date:true,show_battery:true,show_media:true,show_notifications:true,notifications:NotificationAppearance::default(),show_audio:true,show_terminal:true,dock_enabled:false,dock_auto_hide:false,dock_hide_fullscreen:true,dock_icon_size:32,dock_pins:Vec::new(),wallpaper_path:String::new(),wallpaper_fit:WallpaperFit::Cover,wallpaper_blur:0,wallpaper_slideshow:None,widgets:DesktopWidgets::default(),window_spacing:WindowSpacing::default(),window_border:WindowBorder::default(),window_shadow:WindowShadow::default(),window_corner_radius:0,window_rules:crate::WindowRules::default(),backdrop_blur:0,panel_backdrop_blur:0,dock_backdrop_blur:0,widget_backdrop_blur:0,transparency:Transparency::default(),motion:Motion::default(),shell_palette:None}}
 }
 impl Appearance{
@@ -529,6 +551,18 @@ impl AppearanceReview{
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn local_density_and_launcher_defaults_round_trip_and_preserve_old_profiles(){
+        let old:Appearance=toml::from_str("panel_height=48").unwrap();
+        assert_eq!(old.panel_density,PanelDensity::Automatic);assert!(!old.launcher_grid_default);
+        assert!(!toml::to_string(&old).unwrap().contains("panel_density"));
+        let next=Appearance{panel_density:PanelDensity::Compact,launcher_grid_default:true,..old};
+        assert_eq!(toml::from_str::<Appearance>(&toml::to_string(&next).unwrap()).unwrap(),next);
+        assert!(PanelDensity::Automatic.compact(1200,9,8));
+        assert!(!PanelDensity::Automatic.compact(1440,9,8));
+        assert!(PanelDensity::Compact.compact(1920,4,8));
+        assert!(!PanelDensity::Comfortable.compact(640,9,24));
+    }
     #[test]
     fn expressive_controls_are_scoped_and_use_readable_roles(){
         let reduced=Appearance{motion:Motion{opening_fade_ms:180,reduced_motion:true},..Appearance::default()};
