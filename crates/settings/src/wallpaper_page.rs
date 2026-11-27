@@ -26,6 +26,13 @@ fn paths(view:&gtk::TextView)->Vec<String>{
     let buffer=view.buffer();buffer.text(&buffer.start_iter(),&buffer.end_iter(),true).lines()
         .filter(|line|!line.is_empty()).map(str::to_owned).collect()
 }
+fn preview_source(image:&str,slideshow:Option<&WallpaperSlideshow>)->anyhow::Result<Option<String>>{
+    if let Some(list)=slideshow{list.validate()?;return Ok(list.images.first().cloned());}
+    Ok((!image.is_empty()).then(||image.to_owned()))
+}
+fn content_fit(id:Option<&str>)->gtk::ContentFit{
+    match id{Some("contain")=>gtk::ContentFit::Contain,Some("stretch")=>gtk::ContentFit::Fill,_=>gtk::ContentFit::Cover}
+}
 #[derive(Clone)]
 struct Fields{
     image:gtk::Entry,fit:gtk::ComboBoxText,enabled:gtk::CheckButton,interval:gtk::SpinButton,playlist:gtk::TextView,blur:gtk::SpinButton,
@@ -38,10 +45,13 @@ impl Fields{
         self.interval.set_value(a.wallpaper_slideshow.as_ref().map_or(5,|s|s.interval_minutes) as f64);
         self.playlist.buffer().set_text(&a.wallpaper_slideshow.as_ref().map_or(String::new(),|s|s.images.join("\n")));
     }
+    fn slideshow(&self)->Option<WallpaperSlideshow>{
+        self.enabled.is_active().then(||WallpaperSlideshow{images:paths(&self.playlist),interval_minutes:self.interval.value_as_int() as u32})
+    }
     fn collect(&self,a:&Appearance)->anyhow::Result<Appearance>{
         let mut next=a.clone();next.wallpaper_path=self.image.text().to_string();next.wallpaper_blur=self.blur.value_as_int() as u32;
         next.wallpaper_fit=match self.fit.active_id().as_deref(){Some("contain")=>WallpaperFit::Contain,Some("stretch")=>WallpaperFit::Stretch,_=>WallpaperFit::Cover};
-        next.wallpaper_slideshow=self.enabled.is_active().then(||WallpaperSlideshow{images:paths(&self.playlist),interval_minutes:self.interval.value_as_int() as u32});
+        next.wallpaper_slideshow=self.slideshow();
         next.validate()?;Ok(next)
     }
 }
@@ -71,8 +81,12 @@ pub fn build(parent:&gtk::Box){
     let browse=gtk::Button::with_label("Choose image directly");choose(&browse,&image,false);form.append(&browse);
     let fit=gtk::ComboBoxText::new();for (id,label) in [("cover","Fill (crop)"),("contain","Fit (letterbox)"),("stretch","Stretch")]{fit.append(Some(id),label);}fit.set_active_id(Some("cover"));form.append(&fit);
     form.append(&description("Static wallpaper blur (0 disables; not live window backdrop blur)"));let blur=gtk::SpinButton::with_range(0.0,24.0,1.0);form.append(&blur);
-    let picture=gtk::Picture::new();picture.set_can_shrink(true);picture.set_content_fit(gtk::ContentFit::Contain);picture.set_size_request(240,160);form.append(&picture);
-    let preview=gtk::Button::with_label("Preview selected image");form.append(&preview);
+    let picture=gtk::Picture::new();picture.set_can_shrink(true);picture.set_content_fit(gtk::ContentFit::Cover);
+    picture.set_overflow(gtk::Overflow::Hidden);
+    let frame=gtk::AspectFrame::builder().ratio(16.0/9.0).obey_child(false).child(&picture).build();
+    frame.set_size_request(240,180);frame.set_hexpand(true);form.append(&frame);
+    let preview_note=description("Sample 16:9 viewport · Preview the static image or first slideshow item.");form.append(&preview_note);
+    let preview=gtk::Button::with_label("Preview draft wallpaper");form.append(&preview);
     let clear=gtk::Button::with_label("Use solid background");form.append(&clear);
     form.append(&heading("Slideshow"));
     let enabled=gtk::CheckButton::with_label("Enable ordered slideshow");form.append(&enabled);
@@ -118,39 +132,62 @@ pub fn build(parent:&gtk::Box){
         p.buffer().set_text(&items.join("\n"));s.set_text("Library copied to draft playlist in sorted order.");
     });}
     {let fields=fields.clone();clear.connect_clicked(move|_|{fields.image.set_text("");fields.enabled.set_active(false);});}
-    {let picture=picture.downgrade();image.connect_changed(move|_|{if let Some(p)=picture.upgrade(){p.set_paintable(None::<&gtk::gdk::Paintable>);}});}
-    {let (baseline,fields,status,save)=(baseline.clone(),fields.clone(),status.clone(),save.downgrade());
-    reload.connect_clicked(move|_|match AppearanceReview::load(&path){
+    // Fit reuses decoded pixels. Source changes invalidate the old raster.
+    {let picture=picture.downgrade();fields.fit.connect_changed(move|fit|{if let Some(p)=picture.upgrade(){p.set_content_fit(content_fit(fit.active_id().as_deref()));}});}
+    let invalidate={let (picture,note)=(picture.downgrade(),preview_note.downgrade());move||{
+        if let Some(p)=picture.upgrade(){p.set_paintable(None::<&gtk::gdk::Paintable>);}
+        if let Some(n)=note.upgrade(){n.set_text("Draft changed · Preview again to decode the current wallpaper.");}
+    }};
+    {let f=invalidate.clone();image.connect_changed(move|_|f());}
+    {let f=invalidate.clone();blur.connect_value_changed(move|_|f());}
+    {let f=invalidate.clone();fields.enabled.connect_toggled(move|_|f());}
+    {let f=invalidate.clone();fields.playlist.buffer().connect_changed(move|_|f());}
+    {let f=invalidate.clone();fields.interval.connect_value_changed(move|_|f());}
+    {let (baseline,fields,status,save,invalidate)=(baseline.clone(),fields.clone(),status.clone(),save.downgrade(),invalidate.clone());
+    reload.connect_clicked(move|_|{invalidate();match AppearanceReview::load(&path){
         Ok(r)=>{fields.populate(&r.value);*baseline.borrow_mut()=Some(r);if let Some(s)=save.upgrade(){s.set_sensitive(true);}status.set_text("Saved wallpaper preferences loaded.");}
         Err(e)=>{baseline.borrow_mut().take();if let Some(s)=save.upgrade(){s.set_sensitive(false);}status.set_text(&format!("Cannot load appearance: {e:#}"));}
-    });}
+    }});}
     {let (baseline,fields,status)=(baseline.clone(),fields.clone(),status.clone());previous.connect_clicked(move|_|{
         let state=baseline.borrow();let Some(r)=state.as_ref()else{return;};
         match r.previous(){Ok(a)=>{fields.populate(&a);status.set_text("Previous wallpaper and slideshow preferences loaded into draft.");}Err(e)=>status.set_text(&format!("{e:#}"))}
     });}
-    {let (form,image,picture,status,blur)=(form.downgrade(),image.downgrade(),picture.downgrade(),status.downgrade(),blur.downgrade());preview.connect_clicked(move|_|{
-        let (Some(f),Some(i),Some(s))=(form.upgrade(),image.upgrade(),status.upgrade())else{return;};
-        let path=PathBuf::from(i.text().as_str());let Some(blur)=blur.upgrade()else{return;};let strength=blur.value_as_int() as u32;s.set_text("Decoding preview…");
-        let (picture,status)=(picture.clone(),status.clone());work(&f,move||wallpaper::decode_background(&path,strength),move|result|{
-            if let (Some(p),Some(s))=(picture.upgrade(),status.upgrade()){match result{Ok(r)=>{p.set_paintable(Some(&texture(r)));s.set_text("Preview only; desktop unchanged.");}Err(e)=>s.set_text(&format!("Preview rejected: {e:#}"))}}
+    {let (form,fields,picture,status,note,invalidate)=(form.downgrade(),fields.clone(),picture.downgrade(),status.downgrade(),preview_note.downgrade(),invalidate.clone());preview.connect_clicked(move|_|{
+        let (Some(f),Some(s))=(form.upgrade(),status.upgrade())else{return;};
+        invalidate();
+        let slideshow=fields.slideshow();
+        let path=match preview_source(fields.image.text().as_str(),slideshow.as_ref()){
+            Ok(Some(path))=>PathBuf::from(path),
+            Ok(None)=>{if let Some(n)=note.upgrade(){n.set_text("Solid background selected · No image to decode.");}s.set_text("Preview only; desktop unchanged.");return;}
+            Err(e)=>{s.set_text(&format!("Preview rejected: {e:#}"));return;}
+        };
+        let strength=fields.blur.value_as_int() as u32;s.set_text("Decoding preview…");
+        let (picture,status,note)=(picture.clone(),status.clone(),note.clone());
+        let is_slideshow=slideshow.is_some();
+        work(&f,move||wallpaper::decode_background(&path,strength),move|result|{
+            if let (Some(p),Some(s),Some(n))=(picture.upgrade(),status.upgrade(),note.upgrade()){match result{
+                Ok(r)=>{p.set_paintable(Some(&texture(r)));n.set_text(if is_slideshow{"First slideshow item · Sample 16:9 viewport"}else{"Static image · Sample 16:9 viewport"});s.set_text("Preview only; desktop unchanged.");}
+                Err(e)=>{n.set_text("No valid preview.");s.set_text(&format!("Preview rejected: {e:#}"));}
+            }}
         });
     });}
-    {let (form,fields,picture,status,baseline)=(form.downgrade(),fields.clone(),picture.downgrade(),status.downgrade(),baseline.clone());save.connect_clicked(move|_|{
+    {let (form,fields,picture,status,baseline,note)=(form.downgrade(),fields.clone(),picture.downgrade(),status.downgrade(),baseline.clone(),preview_note.downgrade());save.connect_clicked(move|_|{
         let (Some(f),Some(s))=(form.upgrade(),status.upgrade())else{return;};
         let next={let state=baseline.borrow();let Some(r)=state.as_ref()else{return;};match fields.collect(&r.value){Ok(a)=>a,Err(e)=>{s.set_text(&format!("{e:#}"));return;}}};
         s.set_text("Validating wallpaper preferences…");
-        let (picture,status,baseline)=(picture.clone(),status.clone(),baseline.clone());
+        let (picture,status,baseline,note)=(picture.clone(),status.clone(),baseline.clone(),note.clone());
         work(&f,move||{
-            let first=if let Some(playlist)=&next.wallpaper_slideshow{
+            if let Some(playlist)=&next.wallpaper_slideshow{
                 for path in &playlist.images{wallpaper::validate_candidate(std::path::Path::new(path))?;}
-                playlist.images.first().cloned()
-            }else if next.wallpaper_path.is_empty(){None}else{Some(next.wallpaper_path.clone())};
+            }
+            let first=preview_source(&next.wallpaper_path,next.wallpaper_slideshow.as_ref())?;
             let raster=first.map(|p|wallpaper::decode_background(std::path::Path::new(&p),next.wallpaper_blur)).transpose()?;
             Ok((next,raster))
         },move|result|{
             if let Some(s)=status.upgrade(){match result{
                 Ok((next,raster))=>{
                     if let Some(p)=picture.upgrade(){if let Some(r)=raster{p.set_paintable(Some(&texture(r)));}else{p.set_paintable(None::<&gtk::gdk::Paintable>);}}
+                    if let Some(n)=note.upgrade(){n.set_text(if next.wallpaper_slideshow.is_some(){"First slideshow item · Sample 16:9 viewport"}else if next.wallpaper_path.is_empty(){"Solid background selected · No image to decode."}else{"Static image · Sample 16:9 viewport"});}
                     if let Some(r)=baseline.borrow_mut().as_mut(){match r.save(next){
                         Ok(true)=>s.set_text("Wallpaper preferences saved. Updated native shell applies them live."),
                         Ok(false)=>s.set_text("No changes."),
@@ -162,4 +199,25 @@ pub fn build(parent:&gtk::Box){
         });
     });}
     reload.emit_clicked();
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn slideshow_preview_uses_first_item_not_static_path(){
+        let list=WallpaperSlideshow{images:vec!["/a.png".into(),"/b.png".into()],interval_minutes:5};
+        assert_eq!(preview_source("/static.png",Some(&list)).unwrap().as_deref(),Some("/a.png"));
+        assert_eq!(preview_source("/static.png",None).unwrap().as_deref(),Some("/static.png"));
+        assert_eq!(preview_source("",None).unwrap(),None);
+        let bad=WallpaperSlideshow{images:vec!["/a.png".into()],interval_minutes:5};
+        assert!(preview_source("/static.png",Some(&bad)).is_err());
+    }
+    #[test]
+    fn wallpaper_fit_matches_draft_choice(){
+        assert_eq!(content_fit(Some("cover")),gtk::ContentFit::Cover);
+        assert_eq!(content_fit(Some("contain")),gtk::ContentFit::Contain);
+        assert_eq!(content_fit(Some("stretch")),gtk::ContentFit::Fill);
+        assert_eq!(content_fit(None),gtk::ContentFit::Cover);
+    }
 }
