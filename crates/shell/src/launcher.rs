@@ -77,7 +77,7 @@ pub fn browser(window:&gtk::ApplicationWindow,appearance:&atelier_config::Appear
     let categories=gtk::ComboBoxText::new();for (_,name) in Category::OPTIONS{categories.append_text(name);}
     categories.set_active(Some(0));categories.set_hexpand(true);header.append(&categories);
     let count=gtk::Label::new(None);count.add_css_class("dim-label");header.append(&count);
-    let switch=gtk::ToggleButton::with_label("Grid");switch.set_tooltip_text(Some("Switch between list and application grid"));header.append(&switch);root.append(&header);
+    let switch=gtk::ToggleButton::with_label(if appearance.launcher_grid_default{"List"}else{"Grid"});switch.set_active(appearance.launcher_grid_default);switch.set_tooltip_text(Some("Switch between list and application grid"));header.append(&switch);root.append(&header);
     let edit=gtk::ToggleButton::with_label("Edit dock pins");
     edit.set_tooltip_text(Some("Switch application activation to pin editing; does not launch apps"));root.append(&edit);
     let hint=gtk::Label::new(Some("Pin editing: select an app to add or remove its dock pin. Turn off editing to launch apps."));
