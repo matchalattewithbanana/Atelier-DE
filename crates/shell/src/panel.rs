@@ -106,7 +106,7 @@ pub fn build(app: &gtk::Application, popups: bool, island: bool, live:Rc<RefCell
             if current.show_battery!=last_panel.show_battery{if current.show_battery{update_power(&battery);}else{battery.set_visible(false);}}
             last_panel=current.clone();
         }
-        let compact=panel_weak.upgrade().is_none_or(|panel|layout.update(&panel,current.panel_spacing));
+        let compact=panel_weak.upgrade().is_none_or(|panel|layout.update(&panel,current.panel_spacing,current.panel_density));
         if let Ok(now) = glib::DateTime::now_local() {
             if let Ok(text) = now.format(if current.show_date&&!compact { "%a %d %b · %H:%M" } else { "%H:%M" }) { clock.set_text(&text); }
             if let Ok(text)=now.format(if current.show_date{"%a %d %b · %H:%M"}else{"%H:%M"}){clock.set_tooltip_text(Some(&text));}

@@ -1,6 +1,7 @@
 //! Native settings application. Writes shared user preferences only.
 mod network_page;
 mod appearance_page;
+mod shell_preview;
 mod wallpaper_page;
 mod widgets_page;
 mod windows_page;
@@ -123,7 +124,7 @@ fn build_settings(app: &gtk::Application, initial_page: &str) {
         });
     }
     appearance.append(&themes);
-    let native_appearance = page(&stack, "shell-appearance", "Shell appearance", "Native panel and launcher preferences. This page has its own save and recovery controls; the window footer saves the separate general settings.");
+    let native_appearance = page(&stack, "shell-appearance", "Shell appearance", "Native panel, dock and launcher preferences with a draft preview. This page has its own save and recovery controls; the window footer saves separate general settings.");
     appearance_page::build(&native_appearance);
     let wallpaper=page(&stack,"wallpaper","Wallpaper","Native desktop background. Saved changes apply to the running updated native shell.");
     wallpaper_page::build(&wallpaper);

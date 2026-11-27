@@ -270,24 +270,28 @@ fn build_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     stack.add_titled(&studio::build(), Some("studio"), "Classic Appearance Studio");
     let native = gtk::Box::new(gtk::Orientation::Vertical, 12);
     native.set_margin_top(24); native.set_margin_bottom(24); native.set_margin_start(24); native.set_margin_end(24);
-    native.append(&label("Native appearance", "title-1"));
-    native.append(&label("Open the selected deployment's independent Atelier Settings. No Mango checkout is needed. Stage and activate a native settings product first. Native shell appearance and Classic rice preferences are separate.", "dim-label"));
-    let open = gtk::Button::with_label("Open native shell appearance");
-    native.append(&open);
-    let result = label("", "dim-label"); result.set_selectable(true); native.append(&result);
-    open.connect_clicked(move |button| {
-        button.set_sensitive(false); result.set_text("Opening verified Settings product…");
-        let button = button.downgrade(); let result = result.downgrade();
-        background(|| {
-            let output = std::process::Command::new(std::env::current_exe()?).args(["run-product","settings","--page","shell-appearance"]).output()?;
-            if !output.status.success() { anyhow::bail!("Settings exited with {}: {}",output.status,String::from_utf8_lossy(&output.stderr)); }
-            Ok(())
-        }, move |outcome| {
-            if let Some(result)=result.upgrade(){match outcome{Ok(())=>result.set_text("Settings closed. Restart the native shell to apply saved appearance."),Err(e)=>result.set_text(&format!("{e:#}"))}}
-            if let Some(button)=button.upgrade(){button.set_sensitive(true);}
+    native.append(&label("Native Appearance Studio", "title-1"));
+    native.append(&label("Open the selected deployment's independent Atelier Settings. No Mango checkout is needed. Stage and activate a native settings product first. Native shell appearance and Classic rice preferences remain separate.", "dim-label"));
+    let sections=gtk::Box::new(gtk::Orientation::Vertical,8);native.append(&sections);
+    let result=label("", "dim-label");result.set_selectable(true);native.append(&result);
+    for (page,title) in [("shell-appearance","Panel, dock & launcher"),("themes","Native color themes"),("wallpaper","Wallpapers & slideshow"),("widgets","Desktop widgets"),("notifications","Notifications"),("motion","Motion & accessibility"),("windows","Window appearance"),("window-rules","Window rules")]{
+        let open=gtk::Button::with_label(title);sections.append(&open);
+        let (sections,result)=(sections.downgrade(),result.downgrade());
+        open.connect_clicked(move |_|{
+            let (Some(group),Some(message))=(sections.upgrade(),result.upgrade())else{return;};
+            group.set_sensitive(false);message.set_text("Opening verified Settings product…");
+            let (sections,result)=(sections.clone(),result.clone());
+            background(move||{
+                let output=std::process::Command::new(std::env::current_exe()?).args(["run-product","settings","--page",page]).output()?;
+                if !output.status.success(){anyhow::bail!("Settings exited with {}: {}",output.status,String::from_utf8_lossy(&output.stderr));}
+                Ok(())
+            },move|outcome|{
+                if let Some(result)=result.upgrade(){match outcome{Ok(())=>result.set_text("Settings closed. Saved preferences apply according to each page; reopen affected windows or restart the session where indicated."),Err(e)=>result.set_text(&format!("{e:#}"))}}
+                if let Some(group)=sections.upgrade(){group.set_sensitive(true);}
+            });
         });
-    });
-    stack.add_titled(&native, Some("native-appearance"), "Native appearance");
+    }
+    stack.add_titled(&native, Some("native-appearance"), "Native Appearance Studio");
     stack.add_titled(&wallpapers::build(), Some("wallpapers"), "Wallpapers");
     stack.add_titled(&layout_studio::build(), Some("layout-studio"), "Panel, dock & widgets");
     window.set_child(Some(&layout));

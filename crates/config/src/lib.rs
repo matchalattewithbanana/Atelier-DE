@@ -14,7 +14,7 @@ pub mod dynamic_palette;
 #[cfg(feature = "wallpaper")]
 pub mod access_bundle;
 pub mod cursor_images;
-pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS, NotificationAppearance, NotificationStyle, NotificationPosition};
+pub use appearance::{appearance_path, Appearance, AppearanceReview, AppearanceMonitor, WallpaperFit, WallpaperSlideshow, DesktopWidgets, WidgetPosition, WindowSpacing, WindowBorder, WindowShadow, Transparency, Motion, CursorPreferences, CURSOR_PRESETS, NotificationAppearance, NotificationStyle, NotificationPosition, PanelDensity};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

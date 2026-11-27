@@ -1,5 +1,5 @@
 //! Independent native appearance draft and previous-version recovery.
-use atelier_config::{appearance_path,Appearance,AppearanceReview};
+use atelier_config::{appearance_path,Appearance,AppearanceReview,PanelDensity};
 use gtk::prelude::*;
 use std::{cell::RefCell,rc::Rc};
 use super::description;
@@ -8,12 +8,14 @@ use super::description;
 struct Fields{
     cursor_theme:gtk::Entry,cursor_size:gtk::SpinButton,
     accent:gtk::Entry,height:gtk::SpinButton,spacing:gtk::SpinButton,radius:gtk::SpinButton,icons:gtk::SpinButton,
-    toggles:Vec<gtk::CheckButton>,
+    toggles:Vec<gtk::CheckButton>,density:gtk::ComboBoxText,grid:gtk::CheckButton,
     dock:gtk::CheckButton,auto_hide:gtk::CheckButton,hide_fullscreen:gtk::CheckButton,dock_icons:gtk::SpinButton,pins:gtk::TextView,
 }
 impl Fields{
     fn populate(&self,p:&Appearance){
         self.accent.set_text(&p.accent);
+        self.density.set_active_id(Some(match p.panel_density{PanelDensity::Automatic=>"auto",PanelDensity::Comfortable=>"comfortable",PanelDensity::Compact=>"compact"}));
+        self.grid.set_active(p.launcher_grid_default);
         self.cursor_theme.set_text(&p.cursor.theme);self.cursor_size.set_value(p.cursor.size as f64);
         self.dock.set_active(p.dock_enabled);self.auto_hide.set_active(p.dock_auto_hide);self.hide_fullscreen.set_active(p.dock_hide_fullscreen);self.dock_icons.set_value(p.dock_icon_size as f64);self.pins.buffer().set_text(&p.dock_pins.join("\n"));
         for (field,value) in [(&self.height,p.panel_height),(&self.spacing,p.panel_spacing),(&self.radius,p.button_radius),(&self.icons,p.launcher_icon_size)]{field.set_value(value as f64);}
@@ -24,6 +26,7 @@ impl Fields{
         Appearance{cursor:atelier_config::CursorPreferences{theme:self.cursor_theme.text().trim().to_owned(),size:self.cursor_size.value_as_int() as u32},dock_enabled:self.dock.is_active(),dock_auto_hide:self.auto_hide.is_active(),dock_hide_fullscreen:self.hide_fullscreen.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
             dock_pins:pins.lines().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect(),accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
             button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
+            panel_density:match self.density.active_id().as_deref(){Some("compact")=>PanelDensity::Compact,Some("comfortable")=>PanelDensity::Comfortable,_=>PanelDensity::Automatic},launcher_grid_default:self.grid.is_active(),
             show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
             show_notifications:self.toggles[3].is_active(),show_audio:self.toggles[4].is_active(),show_terminal:self.toggles[5].is_active(),..baseline.clone()}
     }
@@ -35,6 +38,13 @@ fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64)->gtk::SpinButton{
 }
 pub fn build(parent:&gtk::Box){
     let path=match appearance_path(){Ok(p)=>p,Err(e)=>{parent.append(&description(&format!("{e:#}")));return;}};
+    parent.append(&super::heading("Shell preview"));
+    parent.append(&description("Draft illustration · No live changes. Sample geometry and colors, not a screenshot. Saved theme palette is used when present; otherwise a sample dark palette."));
+    let preview=gtk::DrawingArea::new();preview.set_content_height(270);preview.set_hexpand(true);parent.append(&preview);
+    let sample=gtk::ComboBoxText::new();
+    for (id,name) in [("wide","1440 px · 4 workspaces"),("narrow","800 px · 4 workspaces"),("external","1200 px · 9 workspaces")]{sample.append(Some(id),name);}
+    sample.set_active_id(Some("wide"));parent.append(&sample);
+    parent.append(&super::heading("Colors and pointer"));
     let accent=gtk::Entry::new();accent.set_placeholder_text(Some("#RRGGBB or blank for GTK default"));parent.append(&description("Accent for highlighted native shell buttons"));parent.append(&accent);
     parent.append(&super::heading("Pointer theme"));
     parent.append(&description("Select an installed Bibata or GoogleDot variant, enter another installed XCursor theme, or leave blank to inherit the environment. Restart the native session after saving. Presets do not install files."));
@@ -49,10 +59,14 @@ pub fn build(parent:&gtk::Box){
     let cursor_size=spin(parent,"Pointer size (when a theme is selected)",8.0,128.0);
     parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Bibata_Cursor/releases","Get Bibata cursors"));
     parent.append(&gtk::LinkButton::with_label("https://github.com/ful1e5/Google_Cursor/releases","Get GoogleDot cursors"));
+    parent.append(&super::heading("Panel and launcher"));
+    parent.append(&description("Automatic adapts to logical monitor width; Comfortable keeps labels and Compact uses icons. Enabled controls remain accessible by scrolling if needed."));
+    let density=gtk::ComboBoxText::new();for (id,name) in [("auto","Automatic density"),("comfortable","Comfortable · icons and labels"),("compact","Compact · icons")]{density.append(Some(id),name);}parent.append(&density);
     let height=spin(parent,"Panel minimum height",32.0,80.0);
     let spacing=spin(parent,"Panel item spacing",0.0,24.0);
     let radius=spin(parent,"Button radius",0.0,24.0);
     let icons=spin(parent,"Launcher icon size",16.0,64.0);
+    let grid=gtk::CheckButton::with_label("Open launcher in grid view by default");parent.append(&grid);
     let toggles:Vec<_>=["Show date","Show battery","Show media button","Show notifications button","Show audio button","Show terminal button"].iter().map(|title|{let field=gtk::CheckButton::with_label(title);parent.append(&field);field}).collect();
     parent.append(&super::heading("Application dock"));
     parent.append(&description("Optional bottom dock in panel mode. Native task support requires a compatible compositor. External desktops use launch-only mode."));
@@ -84,7 +98,7 @@ pub fn build(parent:&gtk::Box){
             let text=text.trim_end();buffer.set_text(&if text.is_empty(){id.to_string()}else{format!("{text}\n{id}")});
         }
     });}
-    let fields=Fields{cursor_theme,cursor_size,accent,height,spacing,radius,icons,toggles,dock,auto_hide,hide_fullscreen,dock_icons,pins};
+    let fields=Fields{cursor_theme,cursor_size,accent,height,spacing,radius,icons,toggles,density,grid,dock,auto_hide,hide_fullscreen,dock_icons,pins};
     let status=description("Load saved appearance to begin.");status.set_selectable(true);
     let reload=gtk::Button::with_label("Load saved appearance");
     let defaults=gtk::Button::with_label("Preview defaults");
@@ -92,14 +106,29 @@ pub fn build(parent:&gtk::Box){
     let save=gtk::Button::with_label("Save native appearance");save.add_css_class("suggested-action");
     for button in [&reload,&defaults,&previous,&save]{parent.append(button);}parent.append(&status);
     let state=Rc::new(RefCell::new(None::<AppearanceReview>));
+    {
+        let (fields,state,sample)=(fields.clone(),state.clone(),sample.clone());
+        preview.set_draw_func(move|_,cr,w,h|{
+            let state=state.borrow();let Some(review)=state.as_ref()else{return;};
+            let draft=fields.collect(&review.value);
+            let (width,tags)=match sample.active_id().as_deref(){Some("narrow")=>(800,4),Some("external")=>(1200,9),_=>(1440,4)};
+            super::shell_preview::draw(cr,w,h,&draft,width,tags);
+        });
+    }
+    {let weak=preview.downgrade();fields.accent.connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
+    for field in [&fields.height,&fields.spacing,&fields.radius,&fields.icons,&fields.dock_icons]{let weak=preview.downgrade();field.connect_value_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
+    for field in fields.toggles.iter().chain([&fields.dock,&fields.grid]){let weak=preview.downgrade();field.connect_toggled(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
+    for field in [&fields.density,&sample]{let weak=preview.downgrade();field.connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
+    {let weak=preview.downgrade();fields.pins.buffer().connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
     let enable={let (defaults,previous,save)=(defaults.downgrade(),previous.downgrade(),save.downgrade());Rc::new(move|enabled|{for button in [&defaults,&previous,&save]{if let Some(b)=button.upgrade(){b.set_sensitive(enabled);}}})};
     enable(false);
     {
-        let (fields,state,status,enable)=(fields.clone(),state.clone(),status.clone(),enable.clone());
-        reload.connect_clicked(move |_|match AppearanceReview::load(&path){
-            Ok(review)=>{fields.populate(&review.value);*state.borrow_mut()=Some(review);enable(true);status.set_text("Draft loaded. Colors, radius, panel and dock preferences update live; reopen the launcher for its icon size.");}
+        let (fields,state,status,enable,preview)=(fields.clone(),state.clone(),status.clone(),enable.clone(),preview.downgrade());
+        reload.connect_clicked(move |_|{match AppearanceReview::load(&path){
+            Ok(review)=>{fields.populate(&review.value);*state.borrow_mut()=Some(review);enable(true);status.set_text("Draft loaded. Colors, radius, panel and dock preferences update live; reopen the launcher for icon size and default view.");}
             Err(e)=>{state.borrow_mut().take();enable(false);status.set_text(&format!("Load failed; existing files unchanged: {e:#}"));}
-        });
+        }
+        if let Some(p)=preview.upgrade(){p.queue_draw();}});
     }
     {let (fields,status)=(fields.clone(),status.clone());defaults.connect_clicked(move |_|{fields.populate(&Appearance::default());status.set_text("Defaults in draft only.");});}
     {let (fields,state,status)=(fields.clone(),state.clone(),status.clone());previous.connect_clicked(move |_|{
@@ -110,7 +139,7 @@ pub fn build(parent:&gtk::Box){
         let mut baseline=state.borrow_mut();let Some(r)=baseline.as_mut()else{return;};
         let next=fields.collect(&r.value);
         match r.save(next){
-            Ok(true)=>status.set_text("Appearance saved. Updated shell applies panel and dock preferences live. Reopen launcher for icon size. Restart native session for cursor preferences."),
+            Ok(true)=>status.set_text("Appearance saved. Updated shell applies panel and dock preferences live. Reopen launcher for icon size and default view. Restart native session for cursor preferences."),
             Ok(false)=>status.set_text("No appearance changes."),
             Err(e)=>status.set_text(&format!("Save failed: {e:#}")),
         }
