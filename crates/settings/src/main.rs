@@ -5,6 +5,7 @@ mod shell_preview;
 mod wallpaper_page;
 mod widgets_page;
 mod windows_page;
+mod window_preview;
 mod window_rules_page;
 mod motion_page;
 mod notifications_page;
