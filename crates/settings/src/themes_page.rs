@@ -176,7 +176,14 @@ pub fn build(parent:&gtk::Box){
     canvas.update_property(&[gtk::accessible::Property::Label("Illustrative desktop theme preview")]);form.append(&canvas);
     let preview_state=Rc::new(RefCell::new(None::<PortableTheme>));
     {let model=preview_state.clone();canvas.set_draw_func(move|_,cr,w,h|{if let Some(t)=model.borrow().as_ref(){draw(cr,w,h,t);}});}
-    form.append(&description("Sample palette and opacity preview · Window content fades together; panel and dock controls stay opaque. Backdrop blur and widget opacity are not rendered here."));
+    form.append(&description("Sample palette and opacity preview · Window content fades together; panel and dock controls stay opaque."));
+    let effects=gtk::DrawingArea::new();effects.set_content_height(230);effects.set_hexpand(true);
+    effects.update_property(&[gtk::accessible::Property::Label("Backdrop blur and opacity comparison")]);
+    {let model=preview_state.clone();effects.set_draw_func(move|_,cr,w,h|{if let Some(t)=model.borrow().as_ref(){super::backdrop_preview::draw(cr,w,h,t);}});}
+    let comparison=gtk::Expander::new(Some("Compare backdrop effects"));
+    let effect_box=gtk::Box::new(gtk::Orientation::Vertical,6);
+    effect_box.append(&description("Synthetic pattern: sharp reference on the left, draft effect on the right. Box blur is illustrative; actual compositor output and pass budgets may differ."));
+    effect_box.append(&effects);comparison.set_child(Some(&effect_box));form.append(&comparison);
     let validity=description("Load a draft to begin.");form.append(&validity);
     let fields=Rc::new(Fields::new(&form));
     form.append(&heading("Wallpaper palette"));
@@ -206,6 +213,7 @@ pub fn build(parent:&gtk::Box){
     let populating=Rc::new(Cell::new(false));
     let refresh={
         let (fields,canvas,validity,json,apply)=(Rc::downgrade(&fields),canvas.downgrade(),validity.downgrade(),json.downgrade(),apply.downgrade());
+        let effects=effects.downgrade();
         let (model,reviewed,populating)=(preview_state.clone(),reviewed.clone(),populating.clone());
         move||{
             if populating.get(){return;}
@@ -217,6 +225,7 @@ pub fn build(parent:&gtk::Box){
                 Err(e)=>{model.borrow_mut().take();json.buffer().set_text("");validity.set_text(&format!("Invalid draft: {e:#}"));}
             }
             canvas.queue_draw();
+            if let Some(effects)=effects.upgrade(){effects.queue_draw();}
         }
     };
     fields.changed(refresh.clone());
