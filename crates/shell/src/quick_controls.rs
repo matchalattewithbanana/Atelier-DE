@@ -77,7 +77,7 @@ fn worker<S:Send+'static,A:Send+'static>(
             status.set_text("Service unavailable; reopen controls.");return;
         }
         busy.set(true);gate(true,reactive);
-        if !reactive{status.set_text("Updating…");}
+        if reactive{status.set_text("Refreshing device state…");}else{status.set_text("Updating…");}
         let (weak_card,weak_status)=(weak_card.clone(),weak_status.clone());
         let (busy,pending,updates,display,tx,gate)=(busy.clone(),pending.clone(),updates.clone(),display.clone(),tx.clone(),gate.clone());
         glib::timeout_add_local(Duration::from_millis(100),move||{
@@ -153,10 +153,12 @@ impl AudioDraft{
             self.draft=None;
         }
         if next.as_ref().and_then(|v|v.volume).is_none(){self.draft=None;}
+        // A satisfied draft must not reappear after a later external change.
+        if self.draft.map(u32::from)==next.as_ref().and_then(|v|v.volume){self.draft=None;}
         self.view=next;
     }
     fn edit(&mut self,percent:u8){
-        if !self.updating&&!self.review_required&&self.view.as_ref().and_then(|v|v.volume).is_some(){self.draft=Some(percent.min(100));}
+        if !self.updating&&!self.review_required&&self.view.as_ref().and_then(|v|v.volume).is_some(){let percent=percent.min(100);self.draft=if self.confirmed()==Some(u32::from(percent)){None}else{Some(percent)};}
     }
     fn confirmed(&self)->Option<u32>{self.view.as_ref()?.volume}
     fn percent(&self)->Option<u8>{self.confirmed().map(|p|self.draft.unwrap_or(p.min(100) as u8))}
@@ -220,13 +222,13 @@ impl AudioWidgets{
         let (device,value,scale,apply,mute)=(self.device.downgrade(),self.value.downgrade(),self.scale.downgrade(),self.apply.downgrade(),self.mute.downgrade());
         move||{
             let (Some(device),Some(value),Some(scale),Some(apply),Some(mute))=(device.upgrade(),value.upgrade(),scale.upgrade(),apply.upgrade(),mute.upgrade())else{return;};
-            let (view,percent,editable,can_apply,message)={
+            let (view,percent,editable,can_apply,review_required,message)={
                 let mut state=state.borrow_mut();state.updating=true;
-                (state.view.clone(),state.percent(),!state.review_required&&state.confirmed().is_some(),state.can_apply(),state.text())
+                (state.view.clone(),state.percent(),!state.review_required&&state.confirmed().is_some(),state.can_apply(),state.review_required,state.text())
             };
             if let Some(v)=view{
                 device.set_text(&format!("Current default: {}",v.description));
-                mute.set_sensitive(v.muted.is_some());mute.set_label(if v.muted==Some(true){"Unmute"}else{"Mute"});
+                mute.set_sensitive(!review_required&&v.muted.is_some());mute.set_label(if v.muted==Some(true){"Unmute"}else{"Mute"});
                 if v.muted==Some(true){mute.add_css_class("atelier-control-active");}else{mute.remove_css_class("atelier-control-active");}
             }else{
                 device.set_text("No default device reported");mute.set_sensitive(false);
@@ -264,12 +266,15 @@ impl AudioWidgets{
         });
         let s=state.clone();let r=request.clone();
         self.apply.connect_clicked(move |_|{
-            if let Some(command)=s.borrow().volume_action(direction){r(Some(command));}
+            let command=s.borrow().volume_action(direction);
+            if let Some(command)=command{r(Some(command));}
         });
         self.mute.connect_clicked(move |_|{
-            if let Some(v)=state.borrow().view.as_ref(){
-                if let Some(muted)=v.muted{request(Some(AudioCommand{direction,id:v.id.clone(),action:AudioAction::Mute(!muted)}));}
-            }
+            let command={
+                let state=state.borrow();
+                if state.review_required{None}else{state.view.as_ref().and_then(|v|v.muted.map(|muted|AudioCommand{direction,id:v.id.clone(),action:AudioAction::Mute(!muted)}))}
+            };
+            if let Some(command)=command{request(Some(command));}
         });
     }
 }
@@ -398,6 +403,50 @@ mod tests{
     fn average_requires_known_channels_and_preserves_amplified_values(){
         let mut d=Device{id:"speaker".into(),description:"Speaker".into(),muted:Some(false),monitor:false,channels:vec![Channel{name:"left".into(),percent:Some(110)},Channel{name:"right".into(),percent:Some(130)}]};
         assert_eq!(average(&d),Some(120));d.channels[1].percent=None;assert_eq!(average(&d),None);
+    }
+    fn view(id:&str,volume:Option<u32>)->AudioView{
+        AudioView{id:id.into(),description:id.into(),volume,muted:Some(false)}
+    }
+    #[test]
+    fn draft_survives_same_device_external_changes_until_satisfied(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(40))),false);
+        state.edit(65);
+        let mut next=view("speaker",Some(52));next.muted=Some(true);
+        state.reconcile(Some(next),true);
+        assert_eq!(state.percent(),Some(65));assert_eq!(state.confirmed(),Some(52));
+        assert_eq!(state.text(),"Current: 52% · Draft: 65%");
+        let command=state.volume_action(Direction::Output).unwrap();
+        assert_eq!(command.id,"speaker");assert_eq!(command.action,AudioAction::Volume(65));
+        state.reconcile(Some(view("speaker",Some(65))),true);
+        assert!(!state.can_apply());
+        state.reconcile(Some(view("speaker",Some(70))),true);
+        assert_eq!(state.percent(),Some(70));assert!(!state.can_apply());
+    }
+    #[test]
+    fn default_change_or_loss_never_transfers_draft_to_new_device(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(40))),false);state.edit(90);
+        state.reconcile(Some(view("headphones",Some(20))),true);
+        assert!(state.review_required);assert_eq!(state.draft,None);
+        state.edit(95);assert!(state.volume_action(Direction::Output).is_none());
+        state.reconcile(None,true);state.reconcile(Some(view("speaker",Some(30))),true);
+        assert!(state.review_required);assert!(state.volume_action(Direction::Output).is_none());
+        state.reconcile(Some(view("speaker",Some(30))),false);state.edit(45);
+        assert_eq!(state.volume_action(Direction::Output).unwrap().action,AudioAction::Volume(45));
+    }
+    #[test]
+    fn explicit_refresh_unknown_volume_and_amplification_are_safe(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(130))),false);
+        assert_eq!(state.volume_action(Direction::Output).unwrap().action,AudioAction::Volume(100));
+        state.edit(60);state.reconcile(Some(view("speaker",None)),true);
+        assert!(state.volume_action(Direction::Output).is_none());assert_eq!(state.draft,None);
+        state.reconcile(Some(view("speaker",Some(40))),true);
+        state.updating=true;state.edit(90);state.updating=false;
+        assert_eq!(state.percent(),Some(40));
+        state.edit(70);state.reconcile(Some(view("speaker",Some(40))),false);
+        assert_eq!(state.percent(),Some(40));assert!(!state.can_apply());
     }
     #[test]
     fn selector_inventory_ignores_volume_and_mute_but_not_default_or_device_changes(){
