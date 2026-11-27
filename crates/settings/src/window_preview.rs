@@ -54,11 +54,12 @@ fn shadow(cr:&Context,b:Rect,r:f64,radius:f64,opacity:f64){
         let _=cr.fill();let _=cr.restore();
     }
 }
-fn window(cr:&Context,a:&Appearance,b:Rect,focused:bool){
+fn window(cr:&Context,a:&Appearance,outer:Rect,focused:bool){
     let r=f64::from(a.window_corner_radius.min(24))*SCALE;
     let bw=f64::from(a.window_border.width.min(8))*SCALE;
-    // Draw the outline outside the sample client, keeping client size fixed.
-    let outer=b.expand(bw);
+    // Keep the tile's outer footprint fixed so borders do not consume the
+    // illustrated gap or overlap adjacent sample tiles.
+    let b=outer.expand(-bw);
     let _=cr.save();
     cr.push_group();
     if bw>0.0{fill(cr,outer,r+bw,border_color(a,focused),1.0);}
@@ -91,8 +92,8 @@ pub(super) fn draw(cr:&Context,width:i32,height:i32,a:&Appearance,right_focused:
     let sr=f64::from(a.window_shadow.radius.min(32))*SCALE;
     let opacity=f64::from(a.window_shadow.opacity.min(60))/100.0;
     // Place shadows behind both clients, then paint the focused client last.
-    for b in boxes{shadow(cr,b.expand(bw),radius+bw,sr,opacity);}
-    let active=usize::from(right_focused);
+    for b in boxes{shadow(cr,b,radius+bw,sr,opacity);}
+    let active=if right_focused{1}else{0};
     window(cr,a,boxes[1-active],false);
     window(cr,a,boxes[active],true);
     let _=cr.restore();
