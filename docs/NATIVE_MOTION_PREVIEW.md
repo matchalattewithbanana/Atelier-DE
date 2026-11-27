@@ -1,0 +1,3 @@
+# Native motion preview
+
+The Motion & accessibility editor offers an explicitly triggered, one-shot sample window opening fade. It derives duration from the shared Motion accessibility policy. Disabled animation and reduced motion show the final state immediately; draft changes settle playback, and replay invalidates older callbacks. The duration control is disabled while reduced motion overrides it without discarding the stored preference. The sample uses a synthetic Cairo scene and monotonic elapsed time, not the compositor or a live session. No configuration is written until the existing reviewed save operation. Tests cover elapsed-time bounds, reduced motion and offscreen rendering; actual compositor frame timing and physical GTK acceptance are separate.
