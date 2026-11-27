@@ -50,10 +50,26 @@ fn scene(cr:&Context,width:i32,height:i32,a:&Appearance,render:impl FnOnce(&Cont
     render(cr,&Colors::new(a));
     let _=cr.restore();
 }
+#[derive(Clone,Copy,Debug,Default)]
+pub(super) struct DockSample{
+    pub fullscreen:bool,
+    pub revealed:bool,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum DockPresentation{Hidden,RevealStrip,Visible}
+fn dock_presentation(a:&Appearance,sample:DockSample)->DockPresentation{
+    if !a.dock_enabled || (a.dock_hide_fullscreen && sample.fullscreen){
+        DockPresentation::Hidden
+    }else if a.dock_auto_hide && !sample.revealed{
+        DockPresentation::RevealStrip
+    }else{
+        DockPresentation::Visible
+    }
+}
 /// Scale a fixed illustrative scene to the available area. Logical monitor
 /// width controls the same density rule used by the real panel; the scene
 /// is not a pixel-exact compositor screenshot or wallpaper decoder.
-pub(super) fn draw(cr:&Context,width:i32,height:i32,a:&Appearance,monitor:i32,tags:usize){
+pub(super) fn draw(cr:&Context,width:i32,height:i32,a:&Appearance,monitor:i32,tags:usize,dock_sample:DockSample){
     scene(cr,width,height,a,|cr,colors|{
     let Colors{surface,raised,fg,accent}=*colors;
     let compact=a.panel_density.compact(monitor,tags,a.panel_spacing);
@@ -103,7 +119,12 @@ pub(super) fn draw(cr:&Context,width:i32,height:i32,a:&Appearance,monitor:i32,ta
             rect(cr,lx+24.0+size,yy+24.0,136.0,4.0,2.0,fg,0.5);
         }
     }
-    if a.dock_enabled{
+    let dock_state=dock_presentation(a,dock_sample);
+    if dock_state==DockPresentation::RevealStrip{
+        rect(cr,292.0,348.0,56.0,9.0,4.0,surface,1.0);
+        text(cr,316.0,355.0,"^",8.0,fg);
+    }
+    if dock_state==DockPresentation::Visible{
         let icon=f64::from(a.dock_icon_size)*0.55;
         // Only the first six pins fit this illustration; fixed utilities
         // still appear when the configured pin list is empty.
@@ -261,12 +282,32 @@ mod tests{
         assert_eq!(notification_geometry(&a,true).1,12.0);
     }
     #[test]
+    fn dock_preview_respects_disabled_autohide_and_fullscreen(){
+        let mut a=Appearance{dock_enabled:false,dock_auto_hide:true,dock_hide_fullscreen:true,..Appearance::default()};
+        let revealed=DockSample{revealed:true,fullscreen:false};
+        let fullscreen=DockSample{revealed:true,fullscreen:true};
+        assert_eq!(dock_presentation(&a,revealed),DockPresentation::Hidden);
+        a.dock_enabled=true;
+        assert_eq!(dock_presentation(&a,DockSample::default()),DockPresentation::RevealStrip);
+        assert_eq!(dock_presentation(&a,revealed),DockPresentation::Visible);
+        assert_eq!(dock_presentation(&a,fullscreen),DockPresentation::Hidden);
+        assert_eq!(dock_presentation(&a,DockSample{revealed:false,fullscreen:true}),DockPresentation::Hidden);
+        a.dock_hide_fullscreen=false;
+        assert_eq!(dock_presentation(&a,fullscreen),DockPresentation::Visible);
+        assert_eq!(dock_presentation(&a,DockSample{revealed:false,fullscreen:true}),DockPresentation::RevealStrip);
+        a.dock_auto_hide=false;
+        assert_eq!(dock_presentation(&a,DockSample::default()),DockPresentation::Visible);
+    }
+    #[test]
     fn preview_draws_extreme_valid_geometry_without_cairo_failure(){
         let surface=gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32,320,180).unwrap();
         let cr=Context::new(&surface).unwrap();
         let a=Appearance{panel_height:80,panel_spacing:24,dock_enabled:true,dock_icon_size:64,launcher_icon_size:64,launcher_grid_default:true,dock_pins:(0..32).map(|i|format!("app{i}.desktop")).collect(),..Appearance::default()};
-        draw(&cr,320,180,&a,640,9);
-        let mut a=a;a.widgets.enabled=true;a.widgets.media=true;a.widgets.system=true;a.widgets.width=360;
+        draw(&cr,320,180,&a,640,9,DockSample{revealed:true,fullscreen:false});
+        let mut a=a;a.dock_auto_hide=true;a.dock_hide_fullscreen=true;
+        draw(&cr,320,180,&a,640,9,DockSample::default());
+        draw(&cr,320,180,&a,640,9,DockSample{revealed:true,fullscreen:true});
+        a.widgets.enabled=true;a.widgets.media=true;a.widgets.system=true;a.widgets.width=360;
         widgets(&cr,320,180,&a);a.notifications.width=480;a.notifications.radius=32;
         notifications(&cr,320,180,&a,true,false);a.notifications.hide_when_session_unavailable=true;
         notifications(&cr,320,180,&a,true,true);

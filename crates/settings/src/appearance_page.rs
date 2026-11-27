@@ -44,6 +44,9 @@ pub fn build(parent:&gtk::Box){
     let sample=gtk::ComboBoxText::new();
     for (id,name) in [("wide","1440 px · 4 workspaces"),("narrow","800 px · 4 workspaces"),("external","1200 px · 9 workspaces")]{sample.append(Some(id),name);}
     sample.set_active_id(Some("wide"));parent.append(&sample);
+    let simulate_reveal=gtk::CheckButton::with_label("Simulate dock reveal");parent.append(&simulate_reveal);
+    let simulate_fullscreen=gtk::CheckButton::with_label("Simulate native fullscreen for dock");parent.append(&simulate_fullscreen);
+    parent.append(&description("Dock simulation only: auto-hide shows the bottom reveal strip until revealed. Native fullscreen may hide both. The panel and launcher illustration remains visible for comparison."));
     parent.append(&super::heading("Colors and pointer"));
     let accent=gtk::Entry::new();accent.set_placeholder_text(Some("#RRGGBB or blank for GTK default"));parent.append(&description("Accent for highlighted native shell buttons"));parent.append(&accent);
     parent.append(&super::heading("Pointer theme"));
@@ -107,17 +110,17 @@ pub fn build(parent:&gtk::Box){
     for button in [&reload,&defaults,&previous,&save]{parent.append(button);}parent.append(&status);
     let state=Rc::new(RefCell::new(None::<AppearanceReview>));
     {
-        let (fields,state,sample)=(fields.clone(),state.clone(),sample.clone());
+        let (fields,state,sample,simulate_reveal,simulate_fullscreen)=(fields.clone(),state.clone(),sample.clone(),simulate_reveal.clone(),simulate_fullscreen.clone());
         preview.set_draw_func(move|_,cr,w,h|{
             let state=state.borrow();let Some(review)=state.as_ref()else{return;};
             let draft=fields.collect(&review.value);
             let (width,tags)=match sample.active_id().as_deref(){Some("narrow")=>(800,4),Some("external")=>(1200,9),_=>(1440,4)};
-            super::shell_preview::draw(cr,w,h,&draft,width,tags);
+            super::shell_preview::draw(cr,w,h,&draft,width,tags,super::shell_preview::DockSample{revealed:simulate_reveal.is_active(),fullscreen:simulate_fullscreen.is_active()});
         });
     }
     {let weak=preview.downgrade();fields.accent.connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
     for field in [&fields.height,&fields.spacing,&fields.radius,&fields.icons,&fields.dock_icons]{let weak=preview.downgrade();field.connect_value_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
-    for field in fields.toggles.iter().chain([&fields.dock,&fields.grid]){let weak=preview.downgrade();field.connect_toggled(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
+    for field in fields.toggles.iter().chain([&fields.dock,&fields.grid,&fields.auto_hide,&fields.hide_fullscreen,&simulate_reveal,&simulate_fullscreen]){let weak=preview.downgrade();field.connect_toggled(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
     for field in [&fields.density,&sample]{let weak=preview.downgrade();field.connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
     {let weak=preview.downgrade();fields.pins.buffer().connect_changed(move|_|{if let Some(p)=weak.upgrade(){p.queue_draw();}});}
     let enable={let (defaults,previous,save)=(defaults.downgrade(),previous.downgrade(),save.downgrade());Rc::new(move|enabled|{for button in [&defaults,&previous,&save]{if let Some(b)=button.upgrade(){b.set_sensitive(enabled);}}})};
