@@ -2,7 +2,7 @@
 //! from GTK; each card owns one worker and one request at a time.
 use atelier_config::component;
 use atelier_services::{
-    audio::{audio_action,audio_snapshot,AudioAction,AudioSnapshot,Device,Direction},
+    audio::{audio_action,audio_default_action,audio_snapshot,AudioAction,AudioSnapshot,Device,Direction},
     network::{network_action,network_snapshot,NetworkAction,NetworkSnapshot},
     bluetooth::{bluetooth_action,bluetooth_snapshot,BluetoothAction,BluetoothSnapshot},
 };
@@ -41,6 +41,7 @@ fn worker<S:Send+'static,A:Send+'static>(
     card:&gtk::Box,status:&gtk::Label,read:impl Fn()->anyhow::Result<S>+Send+'static,
     act:impl Fn(A)->anyhow::Result<()>+Send+'static,
     display:impl Fn(Option<S>,bool)+'static,
+    write_groups:&[gtk::Box],
 )->(Rc<dyn Fn(Request<A>)>,Refresh){
     let (tx,rx)=mpsc::sync_channel::<(Request<A>,bool)>(1);
     let (events,updates)=mpsc::sync_channel::<Reply<S>>(1);
@@ -50,6 +51,14 @@ fn worker<S:Send+'static,A:Send+'static>(
             let snapshot=read().map_err(|e|e.to_string());
             if events.send(Reply{snapshot,action_error,reactive}).is_err(){break;}
         }
+    });
+    // Reactive audio reads may leave editors interactive, but all writes
+    // remain gated by insensitive parents until the serialized read finishes.
+    let weak_groups:Vec<_>=write_groups.iter().map(|group|group.downgrade()).collect();
+    let weak=card.downgrade();
+    let gate:Rc<dyn Fn(bool,bool)>=Rc::new(move|busy,reactive|{
+        if let Some(card)=weak.upgrade(){card.set_sensitive(!busy||(reactive&&!weak_groups.is_empty()));}
+        for group in &weak_groups{if let Some(group)=group.upgrade(){group.set_sensitive(!busy);}}
     });
     let busy=Rc::new(Cell::new(false));
     let pending=Rc::new(Cell::new(None::<bool>));
@@ -61,15 +70,16 @@ fn worker<S:Send+'static,A:Send+'static>(
         if !card.is_mapped(){return;}
         if busy.get(){
             if action.is_none(){pending.set(Some(pending.get().unwrap_or(true)&&reactive));}
+            else{status.set_text("Refreshing service; retry the action when ready.");}
             return;
         }
         if tx.try_send((action,reactive)).is_err(){
             status.set_text("Service unavailable; reopen controls.");return;
         }
-        busy.set(true);card.set_sensitive(false);
-        if !reactive{status.set_text("Updating…");}
+        busy.set(true);gate(true,reactive);
+        if reactive{status.set_text("Refreshing device state…");}else{status.set_text("Updating…");}
         let (weak_card,weak_status)=(weak_card.clone(),weak_status.clone());
-        let (busy,pending,updates,display,tx)=(busy.clone(),pending.clone(),updates.clone(),display.clone(),tx.clone());
+        let (busy,pending,updates,display,tx,gate)=(busy.clone(),pending.clone(),updates.clone(),display.clone(),tx.clone(),gate.clone());
         glib::timeout_add_local(Duration::from_millis(100),move||{
             let (Some(card),Some(status))=(weak_card.upgrade(),weak_status.upgrade())else{return glib::ControlFlow::Break;};
             match updates.try_recv(){
@@ -79,13 +89,13 @@ fn worker<S:Send+'static,A:Send+'static>(
                         Err(e)=>{display(None,reply.reactive);status.set_text(&format!("Unavailable: {}{e}",reply.action_error.map(|e|format!("{e}; ")).unwrap_or_default()));}
                     }
                     if let Some(reactive)=pending.take(){
-                        if card.is_mapped()&&tx.try_send((None,reactive)).is_ok(){return glib::ControlFlow::Continue;}
+                        if card.is_mapped()&&tx.try_send((None,reactive)).is_ok(){gate(true,reactive);return glib::ControlFlow::Continue;}
                     }
-                    busy.set(false);card.set_sensitive(true);
+                    busy.set(false);gate(false,false);
                 }
                 Err(mpsc::TryRecvError::Empty)=>return glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected)=>{
-                    pending.take();busy.set(false);display(None,false);card.set_sensitive(true);status.set_text("Service worker stopped.");
+                    pending.take();busy.set(false);display(None,false);gate(false,false);status.set_text("Service worker stopped.");
                 }
             }
             glib::ControlFlow::Break
@@ -125,9 +135,53 @@ fn average(device:&Device)->Option<u32>{
     let sum=device.channels.iter().try_fold(0u64,|sum,c|Some(sum+u64::from(c.percent?)))?;
     Some((sum/device.channels.len() as u64) as u32)
 }
+#[derive(Default)]
+struct AudioDraft{
+    view:Option<AudioView>,
+    draft:Option<u8>,
+    review_required:bool,
+    updating:bool,
+}
+impl AudioDraft{
+    fn reconcile(&mut self,next:Option<AudioView>,reactive:bool){
+        let same=self.view.as_ref().zip(next.as_ref()).is_some_and(|(a,b)|a.id==b.id);
+        if !reactive{self.draft=None;self.review_required=false;}
+        else if !same{
+            // Losing or changing a reviewed device during an edit requires
+            // explicit refresh before accepting input for the new target.
+            self.review_required|=self.view.is_some();
+            self.draft=None;
+        }
+        if next.as_ref().and_then(|v|v.volume).is_none(){self.draft=None;}
+        // A satisfied draft must not reappear after a later external change.
+        if self.draft.map(u32::from)==next.as_ref().and_then(|v|v.volume){self.draft=None;}
+        self.view=next;
+    }
+    fn edit(&mut self,percent:u8){
+        if !self.updating&&!self.review_required&&self.view.as_ref().and_then(|v|v.volume).is_some(){let percent=percent.min(100);self.draft=if self.confirmed()==Some(u32::from(percent)){None}else{Some(percent)};}
+    }
+    fn confirmed(&self)->Option<u32>{self.view.as_ref()?.volume}
+    fn percent(&self)->Option<u8>{self.confirmed().map(|p|self.draft.unwrap_or(p.min(100) as u8))}
+    fn can_apply(&self)->bool{
+        !self.review_required&&self.percent().zip(self.confirmed()).is_some_and(|(draft,current)|u32::from(draft)!=current)
+    }
+    fn volume_action(&self,direction:Direction)->Option<AudioCommand>{
+        if !self.can_apply(){return None;}
+        Some(AudioCommand{direction,id:self.view.as_ref()?.id.clone(),action:AudioAction::Volume(self.percent()?)})
+    }
+    fn text(&self)->String{
+        if self.review_required{return "Default changed · Refresh to review before editing".into();}
+        match (self.confirmed(),self.percent()){
+            (Some(current),Some(draft)) if self.draft.is_some()&&current!=u32::from(draft)=>format!("Current: {current}% · Draft: {draft}%"),
+            (Some(current),_)=>format!("Current: {current}%"),
+            _=>"Volume unavailable".into(),
+        }
+    }
+}
 struct AudioCommand{direction:Direction,id:String,action:AudioAction}
 struct AudioWidgets{
     section:gtk::Box,device:gtk::Label,choice:gtk::ComboBoxText,make_default:gtk::Button,value:gtk::Label,scale:gtk::Scale,apply:gtk::Button,mute:gtk::Button,
+    writes:[gtk::Box;2],
 }
 impl AudioWidgets{
     fn new(title:&str)->Self{
@@ -135,7 +189,8 @@ impl AudioWidgets{
         section.append(&label(title,"atelier-control-subtitle"));
         let device=label("Checking default device…","dim-label");section.append(&device);
         let choice=gtk::ComboBoxText::new();choice.set_size_request(-1,48);choice.set_sensitive(false);section.append(&choice);
-        let make_default=button("Set selected device as default");make_default.set_sensitive(false);section.append(&make_default);
+        let make_default=button("Set selected device as default");make_default.set_sensitive(false);
+        let default_group=gtk::Box::new(gtk::Orientation::Vertical,0);default_group.append(&make_default);section.append(&default_group);
         let value=label("Volume unavailable","body");section.append(&value);
         let scale=gtk::Scale::with_range(gtk::Orientation::Horizontal,0.0,100.0,1.0);
         scale.add_css_class("atelier-expressive-slider");scale.set_size_request(-1,48);scale.set_draw_value(false);
@@ -143,7 +198,7 @@ impl AudioWidgets{
         let controls=row();let apply=button("Apply volume");apply.add_css_class("suggested-action");let mute=button("Mute");mute.add_css_class("atelier-control-tonal");mute.add_css_class("atelier-control-switch");
         apply.set_hexpand(true);mute.set_hexpand(true);apply.set_sensitive(false);mute.set_sensitive(false);
         controls.append(&mute);controls.append(&apply);section.append(&controls);
-        Self{section,device,choice,make_default,value,scale,apply,mute}
+        Self{section,device,choice,make_default,value,scale,apply,mute,writes:[default_group,controls]}
     }
     fn weak_inventory(&self,direction:Direction)->impl Fn(Option<&AudioSnapshot>)+'static{
         let (choice,make_default)=(self.choice.downgrade(),self.make_default.downgrade());
@@ -163,32 +218,36 @@ impl AudioWidgets{
             make_default.set_sensitive(false);
         }
     }
-    fn weak_display(&self)->impl Fn(Option<AudioView>)+'static{
+    fn weak_display(&self,state:Rc<RefCell<AudioDraft>>)->impl Fn()+'static{
         let (device,value,scale,apply,mute)=(self.device.downgrade(),self.value.downgrade(),self.scale.downgrade(),self.apply.downgrade(),self.mute.downgrade());
-        move|view|{
+        move||{
             let (Some(device),Some(value),Some(scale),Some(apply),Some(mute))=(device.upgrade(),value.upgrade(),scale.upgrade(),apply.upgrade(),mute.upgrade())else{return;};
+            let (view,percent,editable,can_apply,review_required,message)={
+                let mut state=state.borrow_mut();state.updating=true;
+                (state.view.clone(),state.percent(),!state.review_required&&state.confirmed().is_some(),state.can_apply(),state.review_required,state.text())
+            };
             if let Some(v)=view{
                 device.set_text(&format!("Current default: {}",v.description));
-                if let Some(percent)=v.volume{
-                    scale.set_value(f64::from(percent.min(100)));scale.set_sensitive(true);
-                    value.set_text(&format!("Current: {percent}%"));
-                }else{scale.set_sensitive(false);value.set_text("Volume unavailable");}
-                apply.set_sensitive(v.volume.is_some_and(|p|p>100));
-                mute.set_sensitive(v.muted.is_some());mute.set_label(if v.muted==Some(true){"Unmute"}else{"Mute"});
+                mute.set_sensitive(!review_required&&v.muted.is_some());mute.set_label(if v.muted==Some(true){"Unmute"}else{"Mute"});
                 if v.muted==Some(true){mute.add_css_class("atelier-control-active");}else{mute.remove_css_class("atelier-control-active");}
             }else{
-                device.set_text("No default device reported");value.set_text("Volume unavailable");scale.set_sensitive(false);apply.set_sensitive(false);mute.set_sensitive(false);
+                device.set_text("No default device reported");mute.set_sensitive(false);
                 mute.set_label("Mute");mute.remove_css_class("atelier-control-active");
             }
+            // Do not disturb an in-progress drag if its draft is unchanged.
+            scale.set_sensitive(editable);
+            if let Some(percent)=percent{if scale.value().round() as u8!=percent{scale.set_value(f64::from(percent));}}
+            value.set_text(&message);apply.set_sensitive(can_apply);
+            state.borrow_mut().updating=false;
         }
     }
-    fn connect(&self,direction:Direction,state:Rc<RefCell<Option<AudioView>>>,request:Rc<dyn Fn(Request<AudioCommand>)>){
+    fn connect(&self,direction:Direction,state:Rc<RefCell<AudioDraft>>,request:Rc<dyn Fn(Request<AudioCommand>)>){
         let (value,apply)=(self.value.downgrade(),self.apply.downgrade());
         let default_state=state.clone();let button=self.make_default.downgrade();
         self.choice.connect_changed(move|choice|{
             if let Some(button)=button.upgrade(){
                 let selected=choice.active_id();
-                button.set_sensitive(selected.as_ref().is_some_and(|id|default_state.borrow().as_ref().is_none_or(|v|v.id!=id.as_str())));
+                button.set_sensitive(selected.as_ref().is_some_and(|id|default_state.borrow().view.as_ref().is_none_or(|v|v.id!=id.as_str())));
             }
         });
         let choice=self.choice.downgrade();let send=request.clone();
@@ -200,24 +259,22 @@ impl AudioWidgets{
         let state_for_scale=state.clone();
         self.scale.connect_value_changed(move|scale|{
             let (Some(value),Some(apply))=(value.upgrade(),apply.upgrade())else{return;};
-            let percent=scale.value().round() as u32;
-            if let Some(v)=state_for_scale.borrow().as_ref(){
-                if let Some(current)=v.volume{
-                    value.set_text(&format!("Current: {current}% · Draft: {percent}%"));
-                    apply.set_sensitive(percent!=current);
-                }
-            }
+            let mut state=state_for_scale.borrow_mut();
+            if state.updating{return;}
+            state.edit(scale.value().round().clamp(0.0,100.0) as u8);
+            value.set_text(&state.text());apply.set_sensitive(state.can_apply());
         });
-        let scale=self.scale.downgrade();let s=state.clone();let r=request.clone();
+        let s=state.clone();let r=request.clone();
         self.apply.connect_clicked(move |_|{
-            if let (Some(scale),Some(v))=(scale.upgrade(),s.borrow().as_ref()){
-                r(Some(AudioCommand{direction,id:v.id.clone(),action:AudioAction::Volume(scale.value().round().clamp(0.0,100.0) as u8)}));
-            }
+            let command=s.borrow().volume_action(direction);
+            if let Some(command)=command{r(Some(command));}
         });
         self.mute.connect_clicked(move |_|{
-            if let Some(v)=state.borrow().as_ref(){
-                if let Some(muted)=v.muted{request(Some(AudioCommand{direction,id:v.id.clone(),action:AudioAction::Mute(!muted)}));}
-            }
+            let command={
+                let state=state.borrow();
+                if state.review_required{None}else{state.view.as_ref().and_then(|v|v.muted.map(|muted|AudioCommand{direction,id:v.id.clone(),action:AudioAction::Mute(!muted)}))}
+            };
+            if let Some(command)=command{request(Some(command));}
         });
     }
 }
@@ -229,24 +286,28 @@ fn audio_card()->gtk::Box{
     input_expander.set_child(Some(&input.section));card.append(&input_expander);
     let footer=row();let refresh=button("Refresh");footer.append(&refresh);footer.append(&settings_button("audio"));card.append(&footer);
     let status=label("Checking audio…","dim-label");card.append(&status);
-    let out_state=Rc::new(RefCell::new(None));let in_state=Rc::new(RefCell::new(None));
-    let out_display=output.weak_display();let in_display=input.weak_display();
+    let out_state=Rc::new(RefCell::new(AudioDraft::default()));let in_state=Rc::new(RefCell::new(AudioDraft::default()));
+    let out_display=output.weak_display(out_state.clone());let in_display=input.weak_display(in_state.clone());
     let out_inventory=output.weak_inventory(Direction::Output);let in_inventory=input.weak_inventory(Direction::Input);
     let (out,in_)= (out_state.clone(),in_state.clone());
     let previous=RefCell::new(None::<AudioSnapshot>);
-    let (request,reactive)=worker(&card,&status,audio_snapshot,|cmd:AudioCommand|audio_action(cmd.direction,&cmd.id,cmd.action),move|snapshot,reactive|{
+    let writes=[output.writes[0].clone(),output.writes[1].clone(),input.writes[0].clone(),input.writes[1].clone()];
+    let (request,reactive)=worker(&card,&status,audio_snapshot,|cmd:AudioCommand|{
+        if cmd.action==AudioAction::Default{audio_action(cmd.direction,&cmd.id,cmd.action)}else{audio_default_action(cmd.direction,&cmd.id,cmd.action)}
+    },move|snapshot,reactive|{
         let mut previous=previous.borrow_mut();
         if reactive&&*previous==snapshot{return;}
         let ov=snapshot.as_ref().and_then(|s|default_device(s,Direction::Output));
         let iv=snapshot.as_ref().and_then(|s|default_device(s,Direction::Input));
-        let old_out=out.borrow().clone();let old_in=in_.borrow().clone();
-        *out.borrow_mut()=ov.clone();*in_.borrow_mut()=iv.clone();
+        let old_out=out.borrow().view.clone();let old_in=in_.borrow().view.clone();
+        let out_changed=old_out!=ov;let in_changed=old_in!=iv;
+        out.borrow_mut().reconcile(ov,reactive);in_.borrow_mut().reconcile(iv,reactive);
         if !reactive||inventory_changed(previous.as_ref(),snapshot.as_ref(),Direction::Output){out_inventory(snapshot.as_ref());}
         if !reactive||inventory_changed(previous.as_ref(),snapshot.as_ref(),Direction::Input){in_inventory(snapshot.as_ref());}
-        if !reactive||old_out!=ov{out_display(ov);}
-        if !reactive||old_in!=iv{in_display(iv);}
+        if !reactive||out_changed{out_display();}
+        if !reactive||in_changed{in_display();}
         *previous=snapshot;
-    });
+    },&writes);
     crate::audio_watch::attach(&card,reactive);
     output.connect(Direction::Output,out_state,request.clone());input.connect(Direction::Input,in_state,request.clone());
     refresh.connect_clicked(move |_|request(None));card
@@ -274,7 +335,7 @@ fn radio_card<S:Send+'static,A:Send+'static>(
             toggle.set_label(match value{Some(true)=>"Turn off",Some(false)=>"Turn on",None=>"Unavailable"});
             if value==Some(true){toggle.add_css_class("atelier-control-active");}else{toggle.remove_css_class("atelier-control-active");}
         }
-    });
+    },&[]);
     crate::connectivity_watch::attach(&card,provider,reactive);
     let send=request.clone();toggle.connect_clicked(move |_|{if let Some(value)=state.get(){send(Some(command(!value)));}});
     refresh.connect_clicked(move |_|request(None));card
@@ -342,6 +403,50 @@ mod tests{
     fn average_requires_known_channels_and_preserves_amplified_values(){
         let mut d=Device{id:"speaker".into(),description:"Speaker".into(),muted:Some(false),monitor:false,channels:vec![Channel{name:"left".into(),percent:Some(110)},Channel{name:"right".into(),percent:Some(130)}]};
         assert_eq!(average(&d),Some(120));d.channels[1].percent=None;assert_eq!(average(&d),None);
+    }
+    fn view(id:&str,volume:Option<u32>)->AudioView{
+        AudioView{id:id.into(),description:id.into(),volume,muted:Some(false)}
+    }
+    #[test]
+    fn draft_survives_same_device_external_changes_until_satisfied(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(40))),false);
+        state.edit(65);
+        let mut next=view("speaker",Some(52));next.muted=Some(true);
+        state.reconcile(Some(next),true);
+        assert_eq!(state.percent(),Some(65));assert_eq!(state.confirmed(),Some(52));
+        assert_eq!(state.text(),"Current: 52% · Draft: 65%");
+        let command=state.volume_action(Direction::Output).unwrap();
+        assert_eq!(command.id,"speaker");assert_eq!(command.action,AudioAction::Volume(65));
+        state.reconcile(Some(view("speaker",Some(65))),true);
+        assert!(!state.can_apply());
+        state.reconcile(Some(view("speaker",Some(70))),true);
+        assert_eq!(state.percent(),Some(70));assert!(!state.can_apply());
+    }
+    #[test]
+    fn default_change_or_loss_never_transfers_draft_to_new_device(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(40))),false);state.edit(90);
+        state.reconcile(Some(view("headphones",Some(20))),true);
+        assert!(state.review_required);assert_eq!(state.draft,None);
+        state.edit(95);assert!(state.volume_action(Direction::Output).is_none());
+        state.reconcile(None,true);state.reconcile(Some(view("speaker",Some(30))),true);
+        assert!(state.review_required);assert!(state.volume_action(Direction::Output).is_none());
+        state.reconcile(Some(view("speaker",Some(30))),false);state.edit(45);
+        assert_eq!(state.volume_action(Direction::Output).unwrap().action,AudioAction::Volume(45));
+    }
+    #[test]
+    fn explicit_refresh_unknown_volume_and_amplification_are_safe(){
+        let mut state=AudioDraft::default();
+        state.reconcile(Some(view("speaker",Some(130))),false);
+        assert_eq!(state.volume_action(Direction::Output).unwrap().action,AudioAction::Volume(100));
+        state.edit(60);state.reconcile(Some(view("speaker",None)),true);
+        assert!(state.volume_action(Direction::Output).is_none());assert_eq!(state.draft,None);
+        state.reconcile(Some(view("speaker",Some(40))),true);
+        state.updating=true;state.edit(90);state.updating=false;
+        assert_eq!(state.percent(),Some(40));
+        state.edit(70);state.reconcile(Some(view("speaker",Some(40))),false);
+        assert_eq!(state.percent(),Some(40));assert!(!state.can_apply());
     }
     #[test]
     fn selector_inventory_ignores_volume_and_mute_but_not_default_or_device_changes(){

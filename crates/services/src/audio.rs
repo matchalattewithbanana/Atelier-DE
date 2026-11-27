@@ -98,9 +98,14 @@ fn snapshot_with(mut call: impl FnMut(&[&str]) -> Result<String>) -> Result<Audi
 pub fn audio_snapshot() -> Result<AudioSnapshot> { snapshot_with(run) }
 
 fn action_with(direction: Direction, id: &str, action: AudioAction, mut call: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
+    checked_action(direction,id,action,false,&mut call)
+}
+fn checked_action(direction:Direction,id:&str,action:AudioAction,require_default:bool,call:&mut impl FnMut(&[&str])->Result<String>)->Result<()> {
     if !valid_id(id) { bail!("invalid audio device identifier"); }
     if matches!(action, AudioAction::Volume(value) if value > 100) { bail!("volume must be between 0 and 100 percent"); }
-    if !list(direction, &mut call)?.iter().any(|device| device.id == id) { bail!("selected audio device is unavailable"); }
+    let devices=list(direction,call)?;
+    if !devices.iter().any(|device|device.id==id){bail!("selected audio device is unavailable");}
+    if require_default&&default_device(direction,&devices,call).as_deref()!=Some(id){bail!("default audio device changed; review the new device");}
     let target = direction.target();
     match action {
         AudioAction::Volume(value) => call(&[&format!("set-{target}-volume"), id, &format!("{value}%")])?,
@@ -110,6 +115,12 @@ fn action_with(direction: Direction, id: &str, action: AudioAction, mut call: im
     Ok(())
 }
 pub fn audio_action(direction: Direction, id: &str, action: AudioAction) -> Result<()> { action_with(direction, id, action, run) }
+/// Recheck the reviewed default before a volume or mute write. The named
+/// target is still explicit; pactl does not offer an atomic compare-and-set.
+pub fn audio_default_action(direction:Direction,id:&str,action:AudioAction)->Result<()>{
+    if action==AudioAction::Default{bail!("expected a volume or mute action");}
+    checked_action(direction,id,action,true,&mut run)
+}
 
 #[cfg(test)]
 mod tests {
@@ -134,6 +145,22 @@ mod tests {
         assert!(parse_devices("invalid", Direction::Input).is_err());
         assert!(parse_devices(r#"[{"name":"@DEFAULT_SOURCE@"}]"#, Direction::Input).is_err());
         assert!(parse_devices("[]", Direction::Input).unwrap().is_empty());
+    }
+    #[test]
+    fn reviewed_default_action_refuses_changed_or_unavailable_default(){
+        for default in ["other",""]{
+            let mut calls=0;
+            let result=checked_action(Direction::Output,"alsa_output.test",AudioAction::Volume(45),true,&mut |args|{
+                calls+=1;
+                match args{["--format=json","list","sinks"]=>Ok(SINKS.into()),["get-default-sink"]=>Ok(default.into()),_=>panic!("must not write")}
+            });
+            assert!(result.is_err());assert_eq!(calls,2);
+        }
+        let mut writes=0;
+        checked_action(Direction::Output,"alsa_output.test",AudioAction::Mute(true),true,&mut |args|{
+            match args{["--format=json","list","sinks"]=>Ok(SINKS.into()),["get-default-sink"]=>Ok("alsa_output.test".into()),["set-sink-mute","alsa_output.test","1"]=>{writes+=1;Ok(String::new())},_=>panic!("unexpected call")}
+        }).unwrap();
+        assert_eq!(writes,1);
     }
     #[test]
     fn controls_only_discovered_named_devices_and_limits_volume() {
