@@ -22,9 +22,9 @@ impl Fields{
         for (field,value) in self.toggles.iter().zip([p.show_date,p.show_battery,p.show_media,p.show_notifications,p.show_audio,p.show_terminal]){field.set_active(value);}
     }
     fn collect(&self,baseline:&Appearance)->Appearance{
-        let buffer=self.pins.buffer();let pins=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
+        let pins=super::dock_pins_editor::ids(&self.pins.buffer());
         Appearance{cursor:atelier_config::CursorPreferences{theme:self.cursor_theme.text().trim().to_owned(),size:self.cursor_size.value_as_int() as u32},dock_enabled:self.dock.is_active(),dock_auto_hide:self.auto_hide.is_active(),dock_hide_fullscreen:self.hide_fullscreen.is_active(),dock_icon_size:self.dock_icons.value_as_int() as u32,
-            dock_pins:pins.lines().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect(),accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
+            dock_pins:pins,accent:self.accent.text().to_string(),panel_height:self.height.value_as_int() as u32,panel_spacing:self.spacing.value_as_int() as u32,
             button_radius:self.radius.value_as_int() as u32,launcher_icon_size:self.icons.value_as_int() as u32,
             panel_density:match self.density.active_id().as_deref(){Some("compact")=>PanelDensity::Compact,Some("comfortable")=>PanelDensity::Comfortable,_=>PanelDensity::Automatic},launcher_grid_default:self.grid.is_active(),
             show_date:self.toggles[0].is_active(),show_battery:self.toggles[1].is_active(),show_media:self.toggles[2].is_active(),
@@ -74,30 +74,7 @@ pub fn build(parent:&gtk::Box){
     let auto_hide=gtk::CheckButton::with_label("Auto-hide dock; reveal at bottom center");parent.append(&auto_hide);
     let hide_fullscreen=gtk::CheckButton::with_label("Hide dock during native fullscreen");parent.append(&hide_fullscreen);
     let dock_icons=spin(parent,"Dock icon size",16.0,64.0);
-    parent.append(&description("Choose an installed application to append, or edit the exact case-sensitive desktop IDs below. Order is left to right."));
-    let picker=gtk::ComboBoxText::new();picker.set_hexpand(true);
-    let mut apps:Vec<_>=gtk::gio::AppInfo::all().into_iter().filter(|app|app.should_show()).collect();
-    apps.sort_by_key(|app|app.display_name().to_lowercase());
-    let mut seen=std::collections::HashSet::new();
-    for app in apps{
-        if let Some(id)=app.id(){
-            if id.ends_with(".desktop") && seen.insert(id.to_string()){
-                picker.append(Some(&id),&format!("{} ({id})",app.display_name()));
-            }
-        }
-    }
-    let add=gtk::Button::with_label("Add pin");
-    let row=gtk::Box::new(gtk::Orientation::Horizontal,8);row.append(&picker);row.append(&add);parent.append(&row);
-    let pins=gtk::TextView::new();pins.set_monospace(true);pins.set_wrap_mode(gtk::WrapMode::WordChar);
-    parent.append(&gtk::ScrolledWindow::builder().child(&pins).min_content_height(100).build());
-    {let picker=picker.downgrade();let pins=pins.downgrade();add.connect_clicked(move |_|{
-        let (Some(picker),Some(pins))=(picker.upgrade(),pins.upgrade())else{return;};
-        let Some(id)=picker.active_id()else{return;};let buffer=pins.buffer();
-        let text=buffer.text(&buffer.start_iter(),&buffer.end_iter(),true);
-        if !text.lines().any(|line|line.trim()==id.as_str()){
-            let text=text.trim_end();buffer.set_text(&if text.is_empty(){id.to_string()}else{format!("{text}\n{id}")});
-        }
-    });}
+    let pins=super::dock_pins_editor::build(parent);
     let fields=Fields{cursor_theme,cursor_size,accent,height,spacing,radius,icons,toggles,density,grid,dock,auto_hide,hide_fullscreen,dock_icons,pins};
     let status=description("Load saved appearance to begin.");status.set_selectable(true);
     let reload=gtk::Button::with_label("Load saved appearance");
