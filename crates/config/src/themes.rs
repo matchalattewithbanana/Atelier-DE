@@ -3,6 +3,7 @@ use crate::{Appearance,WindowBorder,WindowSpacing,WindowShadow,Transparency};
 use anyhow::{bail,Context,Result};
 use serde::{Deserialize,Serialize};
 use std::{fs,io::Write,path::Path};
+pub mod presets;
 
 pub(super) fn rgb(value:&str)->Result<[u8;3]>{
     if value.len()!=7||!value.starts_with('#')||!value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit){bail!("expected #RRGGBB color");}
