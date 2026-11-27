@@ -234,6 +234,10 @@ impl NotificationAppearance {
     pub fn style_for_launch(&self,island:bool)->NotificationStyle{
         match self.style{NotificationStyle::LaunchDefault if island=>NotificationStyle::Island,NotificationStyle::LaunchDefault=>NotificationStyle::Floating,style=>style}
     }
+    /// The floating presenter shows one card regardless of stack preference.
+    pub fn card_limit(&self,island:bool)->usize{
+        if self.style_for_launch(island)==NotificationStyle::Floating{1}else{self.max_cards.clamp(1,3) as usize}
+    }
     pub fn position_for_style(&self,style:NotificationStyle)->NotificationPosition{
         match self.position{NotificationPosition::Automatic if style==NotificationStyle::Island=>NotificationPosition::TopCenter,NotificationPosition::Automatic=>NotificationPosition::TopRight,position=>position}
     }
