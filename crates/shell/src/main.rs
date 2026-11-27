@@ -9,6 +9,7 @@ mod media_artwork;
 mod media_wave;
 mod quick_controls;
 mod audio_watch;
+mod connectivity_watch;
 mod notification_centre;
 mod notification_bus;
 #[cfg(feature = "layer-panel")]

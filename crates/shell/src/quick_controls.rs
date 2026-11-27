@@ -252,7 +252,7 @@ fn audio_card()->gtk::Box{
     refresh.connect_clicked(move |_|request(None));card
 }
 fn radio_card<S:Send+'static,A:Send+'static>(
-    title:&str,page:&'static str,read:impl Fn()->anyhow::Result<S>+Send+'static,
+    title:&str,page:&'static str,provider:crate::connectivity_watch::Provider,read:impl Fn()->anyhow::Result<S>+Send+'static,
     act:impl Fn(A)->anyhow::Result<()>+Send+'static,
     state_of:impl Fn(S)->(Option<bool>,String)+'static,command:impl Fn(bool)->A+'static,
 )->gtk::Box{
@@ -263,8 +263,11 @@ fn radio_card<S:Send+'static,A:Send+'static>(
     let status=label("Checking…","dim-label");card.append(&status);
     let state=Rc::new(Cell::new(None::<bool>));
     let (weak_toggle,weak_detail,s)=(toggle.downgrade(),detail.downgrade(),state.clone());
-    let (request,_reactive)=worker(&card,&status,read,act,move|snapshot,_|{
+    let previous=RefCell::new(None::<(Option<bool>,String)>);
+    let (request,reactive)=worker(&card,&status,read,act,move|snapshot,reactive|{
         let (value,summary)=snapshot.map(&state_of).unwrap_or((None,"Provider unavailable".into()));
+        if reactive&&previous.borrow().as_ref().is_some_and(|(old,detail)|*old==value&&detail==&summary){return;}
+        *previous.borrow_mut()=Some((value,summary.clone()));
         s.set(value);
         if let (Some(toggle),Some(detail))=(weak_toggle.upgrade(),weak_detail.upgrade()){
             detail.set_text(&summary);toggle.set_sensitive(value.is_some());
@@ -272,8 +275,31 @@ fn radio_card<S:Send+'static,A:Send+'static>(
             if value==Some(true){toggle.add_css_class("atelier-control-active");}else{toggle.remove_css_class("atelier-control-active");}
         }
     });
+    crate::connectivity_watch::attach(&card,provider,reactive);
     let send=request.clone();toggle.connect_clicked(move |_|{if let Some(value)=state.get(){send(Some(command(!value)));}});
     refresh.connect_clicked(move |_|request(None));card
+}
+fn network_summary(s:NetworkSnapshot)->(Option<bool>,String){
+    let mut summary=match s.wifi_enabled{Some(true)=>"Wi-Fi enabled",Some(false)=>"Wi-Fi disabled",None=>"Wi-Fi state unknown"}.to_owned();
+    let mut active=s.devices.iter().filter(|d|d.kind=="wifi"&&d.state=="connected").filter_map(|d|d.connection.as_deref()).collect::<Vec<_>>();
+    active.sort_unstable();active.dedup();
+    if s.wifi_enabled==Some(true)&&!active.is_empty(){
+        let count=active.len();
+        let names=active.iter().take(3).map(|name|name.chars().take(80).collect::<String>()).collect::<Vec<_>>().join(", ");
+        summary.push_str(&format!(" · Connected: {names}"));
+        if count>3{summary.push_str(&format!(" +{}",count-3));}
+    }
+    (s.wifi_enabled,summary)
+}
+fn bluetooth_summary(s:BluetoothSnapshot)->(Option<bool>,String){
+    let mut summary=match s.powered{Some(true)=>"Bluetooth enabled",Some(false)=>"Bluetooth disabled",None=>"Bluetooth state unknown"}.to_owned();
+    if s.controllers.len()==1{
+        let connected=s.paired_devices.iter().filter(|d|d.connected==Some(true)).count();
+        let unknown=s.paired_devices.iter().filter(|d|d.connected.is_none()).count();
+        summary.push_str(&format!(" · {} paired · {connected} connected",s.paired_devices.len()));
+        if unknown>0{summary.push_str(&format!(" · {unknown} connection states unknown"));}
+    }else{summary.push_str(&format!(" · {} controllers detected",s.controllers.len()));}
+    (s.powered,summary)
 }
 /// Same view for the panel popover and standalone launcher. Stack pages
 /// map independently; audio is not queried until its page is visible.
@@ -287,10 +313,11 @@ pub fn content(app:&gtk::Application)->gtk::Box{
     let switcher=gtk::StackSwitcher::new();switcher.set_stack(Some(&pages));switcher.set_halign(gtk::Align::Center);
     switcher.add_css_class("atelier-control-tabs");root.append(&switcher);
     let connectivity=gtk::Box::new(gtk::Orientation::Vertical,8);
-    connectivity.append(&radio_card("Wi-Fi","network",network_snapshot,network_action,
-        |s:NetworkSnapshot|(s.wifi_enabled,match s.wifi_enabled{Some(true)=>"Wi-Fi enabled",Some(false)=>"Wi-Fi disabled",None=>"Wi-Fi state unknown"}.into()),NetworkAction::Wifi));
-    connectivity.append(&radio_card("Bluetooth","bluetooth",bluetooth_snapshot,bluetooth_action,
-        |s:BluetoothSnapshot|(s.powered,match s.powered{Some(true)=>"Bluetooth enabled",Some(false)=>"Bluetooth disabled",None=>"Bluetooth state unknown"}.into()),BluetoothAction::Power));
+    use crate::connectivity_watch::Provider;
+    connectivity.append(&radio_card("Wi-Fi","network",Provider::Network,network_snapshot,network_action,
+        network_summary,NetworkAction::Wifi));
+    connectivity.append(&radio_card("Bluetooth","bluetooth",Provider::Bluetooth,bluetooth_snapshot,bluetooth_action,
+        bluetooth_summary,BluetoothAction::Power));
     pages.add_titled(&connectivity,Some("connectivity"),"Connectivity");
     pages.add_titled(&audio_card(),Some("audio"),"Audio");
     root.append(&pages);
@@ -330,6 +357,21 @@ mod tests{
         new=sample();new.outputs[0].description="Renamed".into();
         assert!(inventory_changed(Some(&old),Some(&new),Direction::Output));
         assert!(inventory_changed(Some(&old),None,Direction::Output));
+    }
+    #[test]
+    fn connectivity_summary_does_not_infer_unknown_or_inactive_connections(){
+        use atelier_services::{network,bluetooth};
+        let wifi=|state:&str,name:&str|network::Device{name:name.into(),kind:"wifi".into(),state:state.into(),connection:Some(name.into())};
+        let result=network_summary(NetworkSnapshot{schema:1,wifi_enabled:Some(true),devices:vec![wifi("connected","Home"),wifi("disconnected","Old"),wifi("connected","Home")],profiles:vec![]});
+        assert_eq!(result,(Some(true),"Wi-Fi enabled · Connected: Home".into()));
+        let result=network_summary(NetworkSnapshot{schema:1,wifi_enabled:None,devices:vec![wifi("connected","Home")],profiles:vec![]});
+        assert_eq!(result,(None,"Wi-Fi state unknown".into()));
+        let adapter=||bluetooth::Controller{address:"00:11:22:33:44:55".into(),name:"Adapter".into()};
+        let device=|connected|bluetooth::Device{address:"AA:BB:CC:DD:EE:FF".into(),name:"Device".into(),connected};
+        let result=bluetooth_summary(BluetoothSnapshot{schema:1,controllers:vec![adapter()],powered:Some(true),paired_devices:vec![device(Some(true)),device(None)]});
+        assert_eq!(result,(Some(true),"Bluetooth enabled · 2 paired · 1 connected · 1 connection states unknown".into()));
+        let result=bluetooth_summary(BluetoothSnapshot{schema:1,controllers:vec![adapter(),adapter()],powered:None,paired_devices:vec![]});
+        assert_eq!(result,(None,"Bluetooth state unknown · 2 controllers detected".into()));
     }
     #[test]
     fn missing_default_never_guesses_device(){
