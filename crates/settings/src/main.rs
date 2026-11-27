@@ -11,6 +11,7 @@ mod motion_page;
 mod notifications_page;
 mod notification_rules_page;
 mod themes_page;
+mod backdrop_preview;
 use atelier_config::{config_path, Config, Layout, Theme};
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
