@@ -250,7 +250,7 @@ fn apply_layout(window:&gtk::ApplicationWindow,scroll:&gtk::ScrolledWindow,revea
     revealer.set_transition_duration(n.transition_ms(appearance.motion));
 }
 fn limit(n:&NotificationAppearance,island:bool)->usize{
-    if n.style_for_launch(island)==NotificationStyle::Floating{1}else{n.max_cards as usize}
+    n.card_limit(island)
 }
 
 pub fn start(app: &gtk::Application, panel: &gtk::ApplicationWindow, island: bool, live:Rc<RefCell<Appearance>>) {
