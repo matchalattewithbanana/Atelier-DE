@@ -16,6 +16,7 @@ use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
 mod audio_page;
 mod bluetooth_page;
+mod window_preview;
 
 fn main() -> glib::ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
