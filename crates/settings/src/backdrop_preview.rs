@@ -90,9 +90,11 @@ pub(super) fn draw(cr:&Context,width:i32,height:i32,t:&PortableTheme){
         let _=cr.save();cr.rectangle(x+80.0,y+34.0,80.0,48.0);cr.clip();
         if effective>0{if let Ok(img)=surface(&blur(&original,effective)){paint_sample(cr,x,y+34.0,&img);}}
         let a=f64::from(opacity.min(100))/100.0;
-        cr.set_source_rgba(base[0],base[1],base[2],a);let _=cr.paint();
-        cr.set_source_rgba(fg[0],fg[1],fg[2],if client{a}else{1.0});
+        if client{cr.push_group();}
+        cr.set_source_rgba(base[0],base[1],base[2],if client{1.0}else{a});let _=cr.paint();
+        cr.set_source_rgb(fg[0],fg[1],fg[2]);
         cr.set_font_size(17.0);cr.move_to(x+103.0,y+64.0);let _=cr.show_text("Aa");
+        if client{let _=cr.pop_group_to_source();let _=cr.paint_with_alpha(a);}
         let _=cr.restore();
         label(cr,x,y+95.0,10.0,"Reference    /    Effect",[0.72,0.78,0.88]);
     }
