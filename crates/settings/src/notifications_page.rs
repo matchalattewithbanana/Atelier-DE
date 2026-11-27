@@ -85,6 +85,10 @@ fn spin(parent:&gtk::Box,title:&str,min:f64,max:f64,step:f64)->gtk::SpinButton{
 pub fn build(parent:&gtk::Box){
     let path=match appearance_path(){Ok(p)=>p,Err(e)=>{parent.append(&description(&format!("{e:#}")));return;}};
     parent.append(&description("These preferences affect an already enabled Atelier popup presenter. Start the shell with --panel --notification-island or --panel --notification-popups to opt in. They do not start or replace a notification daemon."));
+    parent.append(&description("Draft preview · Sample notifications only. Simulate the launch mode and advisory session privacy without sending a notification or changing session state."));
+    let preview=gtk::DrawingArea::new();preview.set_content_height(270);preview.set_hexpand(true);parent.append(&preview);
+    let island=gtk::CheckButton::with_label("Simulate notification island launch mode");parent.append(&island);
+    let unavailable=gtk::CheckButton::with_label("Simulate unavailable or locked session");parent.append(&unavailable);
     let fields=Fields{
         style:choice(parent,"Layout",&[("launch-default","Follow shell launch mode"),("island","Notification island"),("floating","Single floating card"),("compact","Compact stack")]),
         position:choice(parent,"Placement",&[("automatic","Automatic"),("top-left","Top left"),("top-center","Top center"),("top-right","Top right")]),
@@ -107,7 +111,19 @@ pub fn build(parent:&gtk::Box){
     let state=Rc::new(RefCell::new(None::<AppearanceReview>));
     save.set_sensitive(false);previous.set_sensitive(false);
     {
-        let (state,fields,status,save,previous)=(state.clone(),fields.clone(),status.clone(),save.downgrade(),previous.downgrade());
+        let (state,fields,island,unavailable)=(state.clone(),fields.clone(),island.clone(),unavailable.clone());
+        preview.set_draw_func(move|_,cr,w,h|{
+            let state=state.borrow();let Some(review)=state.as_ref()else{return;};
+            let mut draft=review.value.clone();draft.notifications=fields.collect();
+            super::shell_preview::notifications(cr,w,h,&draft,island.is_active(),unavailable.is_active());
+        });
+    }
+    for field in [&fields.style,&fields.position]{let p=preview.downgrade();field.connect_changed(move|_|{if let Some(p)=p.upgrade(){p.queue_draw();}});}
+    for field in [&fields.width,&fields.cards,&fields.radius,&fields.opacity]{let p=preview.downgrade();field.connect_value_changed(move|_|{if let Some(p)=p.upgrade(){p.queue_draw();}});}
+    for field in [&fields.privacy,&island,&unavailable]{let p=preview.downgrade();field.connect_toggled(move|_|{if let Some(p)=p.upgrade(){p.queue_draw();}});}
+    parent.append(&description("Preview is static; output selection, timeout and animation are not simulated. Palette and panel height come from the loaded native profile."));
+    {
+        let (state,fields,status,save,previous,preview)=(state.clone(),fields.clone(),status.clone(),save.downgrade(),previous.downgrade(),preview.downgrade());
         reload.connect_clicked(move |_| {
             let result=AppearanceReview::load(&path);
             let enabled=result.is_ok();
@@ -117,6 +133,7 @@ pub fn build(parent:&gtk::Box){
             }
             if let Some(button)=save.upgrade(){button.set_sensitive(enabled);}
             if let Some(button)=previous.upgrade(){button.set_sensitive(enabled);}
+            if let Some(p)=preview.upgrade(){p.queue_draw();}
         });
     }
     {let (fields,status)=(fields.clone(),status.clone());defaults.connect_clicked(move |_| {
