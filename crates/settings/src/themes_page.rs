@@ -175,9 +175,9 @@ fn preset_library(parent:&gtk::Box,populate:impl Fn(&PortableTheme)+'static,stat
     use atelier_config::themes::presets::CATALOG;
     parent.append(&heading("Built-in theme library"));
     parent.append(&description("Browse and preview full visual presets. Loading replaces draft colors, geometry and effects, not local wallpaper, pins or accessibility settings."));
-    let search=gtk::SearchEntry::new();search.set_placeholder_text(Some("Search presets by name, color or style"));parent.append(&search);
+    let search=gtk::Entry::new();search.set_placeholder_text(Some("Search presets by name, color or style"));parent.append(&search);
     let picker=gtk::ComboBoxText::new();picker.set_hexpand(true);parent.append(&picker);
-    let detail=description("");parent.append(&detail);
+    let detail=description("No matching presets.");parent.append(&detail);
     let sample=gtk::DrawingArea::new();sample.set_content_height(200);sample.set_hexpand(true);
     sample.update_property(&[gtk::accessible::Property::Label("Selected built-in theme preview")]);parent.append(&sample);
     let load=gtk::Button::with_label("Load preset into draft");load.set_sensitive(false);parent.append(&load);
@@ -205,7 +205,7 @@ fn preset_library(parent:&gtk::Box,populate:impl Fn(&PortableTheme)+'static,stat
         }
     };
     filter("");
-    {let filter=filter.clone();search.connect_search_changed(move|entry|filter(entry.text().as_str()));}
+    {let filter=filter.clone();search.connect_changed(move|entry|filter(entry.text().as_str()));}
     {let status=status.downgrade();load.connect_clicked(move|_|{
         let choice=selected.borrow();let Some(t)=choice.as_ref()else{return;};
         populate(t);
