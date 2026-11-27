@@ -115,8 +115,15 @@ fn draw(cr:&gtk::cairo::Context,width:i32,height:i32,t:&PortableTheme){
     };
     let label=|x:f64,y:f64,size:f64,value:&str,color:&str|{source(color);cr.set_font_size(size);cr.move_to(x,y);let _=cr.show_text(value);};
     rect(0.0,0.0,440.0,240.0,10.0,&p.surface);
+    // Synthetic backdrop makes opacity visible; no actual compositor blur.
+    rect(8.0,4.0,208.0,232.0,14.0,accent);
+    rect(224.0,4.0,208.0,232.0,14.0,&p.muted);
+    let translucent=|x:f64,y:f64,w:f64,h:f64,r:f64,color:&str,opacity:u32|{
+        cr.push_group();rect(x,y,w,h,r,color);let _=cr.pop_group_to_source();
+        let _=cr.paint_with_alpha(f64::from(opacity.min(100))/100.0);
+    };
     let panel=t.panel_height as f64*0.55;let radius=t.button_radius as f64*0.45;
-    rect(6.0,6.0,428.0,panel,radius,&p.elevated);
+    translucent(6.0,6.0,428.0,panel,radius,&p.elevated,t.transparency.panel);
     rect(12.0,10.0,58.0,(panel-8.0).max(8.0),radius,accent);
     for i in 0..4{let x=78.0+i as f64*(17.0+t.panel_spacing as f64*0.45);rect(x,14.0,12.0,8.0,2.0,if i==0{accent}else{&p.muted});}
     label(365.0,6.0+panel/2.0+4.0,10.0,"12:00",&p.text);
@@ -129,16 +136,19 @@ fn draw(cr:&gtk::cairo::Context,width:i32,height:i32,t:&PortableTheme){
         if spread>0.0&&t.window_shadow.opacity>0&&h>0.0{
             for band in (1..=4).rev(){let r=spread*band as f64/4.0;cr.set_source_rgba(0.0,0.0,0.0,t.window_shadow.opacity as f64/100.0*(5-band) as f64/16.0);cr.rectangle(x-r,y-r,w+2.0*r,h+2.0*r);let _=cr.fill();}
         }
+        cr.push_group();
         if border>0.0{rect(x,y,w,h,t.window_corner_radius as f64*0.6,if i==0{&t.window_border.focused}else{&t.window_border.unfocused});}
         rect(x+border,y+border,w-2.0*border,h-2.0*border,t.window_corner_radius as f64*0.6,&p.elevated);
         if h>30.0{
             label(x+8.0+border,y+17.0+border,11.0,if i==0{"Focused window"}else{"Inactive window"},&p.text);
             for j in 0..3{let line_y=y+28.0+j as f64*9.0;if line_y+3.0<bottom-border{rect(x+8.0+border,line_y,(w-20.0-border*2.0)*(1.0-j as f64*0.15),3.0,1.0,&p.muted);}}
         }
+        let _=cr.pop_group_to_source();
+        let _=cr.paint_with_alpha(f64::from(t.transparency.window_alpha(i==0,false)));
     }
     let icon=t.dock_icon_size as f64*0.43;let dock_w=5.0*(icon+9.0)+8.0;
     let dock_h=icon+10.0;let x=(440.0-dock_w)/2.0;
-    rect(x,240.0-dock_h-5.0,dock_w,dock_h,radius,&p.elevated);
+    translucent(x,240.0-dock_h-5.0,dock_w,dock_h,radius,&p.elevated,t.transparency.dock);
     for i in 0..5{rect(x+8.0+i as f64*(icon+9.0),240.0-dock_h,icon,icon,radius,if i==0{accent}else{&p.muted});}
     let _=cr.restore();
 }
@@ -166,6 +176,7 @@ pub fn build(parent:&gtk::Box){
     canvas.update_property(&[gtk::accessible::Property::Label("Illustrative desktop theme preview")]);form.append(&canvas);
     let preview_state=Rc::new(RefCell::new(None::<PortableTheme>));
     {let model=preview_state.clone();canvas.set_draw_func(move|_,cr,w,h|{if let Some(t)=model.borrow().as_ref(){draw(cr,w,h,t);}});}
+    form.append(&description("Sample palette and opacity preview · Window content fades together; panel and dock controls stay opaque. Backdrop blur and widget opacity are not rendered here."));
     let validity=description("Load a draft to begin.");form.append(&validity);
     let fields=Rc::new(Fields::new(&form));
     form.append(&heading("Wallpaper palette"));

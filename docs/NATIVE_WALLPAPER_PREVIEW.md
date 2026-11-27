@@ -1,0 +1,4 @@
+# Native wallpaper and theme previews
+
+## Wallpaper and portable-theme preview fidelity
+The wallpaper editor previews the same source selection as save: the first ordered slideshow item when enabled, otherwise the static image. Solid background mode is identified without decoding a file. A sample 16:9 viewport reflects Cover, Contain and Stretch directly; changing fit reuses the decoded texture. Source, slideshow and static blur changes invalidate old pixels until an explicit preview. The existing bounded worker and reviewed save remain in place; no live desktop changes or timer simulation are performed by preview. Portable-theme previews now composite client opacity as a group and panel/dock background opacity separately from foreground glyphs over a synthetic contrasting background. Widget opacity and actual compositor backdrop blur are explicitly not rendered in that schematic.
