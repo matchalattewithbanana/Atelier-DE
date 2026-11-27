@@ -1,6 +1,7 @@
 //! Native settings application. Writes shared user preferences only.
 mod network_page;
 mod appearance_page;
+mod dock_pins_editor;
 mod shell_preview;
 mod wallpaper_page;
 mod widgets_page;
