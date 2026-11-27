@@ -1,16 +1,13 @@
 //! Adaptive panel presentation. The enabled controls are never dropped
 //! to fit the output; scrolling is the last-resort access path.
 use gtk::prelude::*;
+use atelier_config::PanelDensity;
 use std::cell::Cell;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Density{Comfortable,Compact}
-fn density(width:i32,workspaces:usize,spacing:u32)->Density{
-    // Logical output pixels. External nine-tag strips and unusually wide
-    // user spacing need more room. Unknown geometry favors compact mode.
-    let threshold=1100+workspaces.saturating_sub(4).min(5) as i32*36+
-        spacing.saturating_sub(8).min(16) as i32*8;
-    if width>=threshold{Density::Comfortable}else{Density::Compact}
+fn density(preference:PanelDensity,width:i32,workspaces:usize,spacing:u32)->Density{
+    if preference.compact(width,workspaces,spacing){Density::Compact}else{Density::Comfortable}
 }
 pub struct Shortcut{
     pub button:gtk::Button,
@@ -42,9 +39,9 @@ impl Layout{
     }
     /// Use monitor geometry rather than the potentially oversized child's
     /// requested width. No reparenting, popup recreation or focus changes.
-    pub fn update(&self,panel:&gtk::ApplicationWindow,spacing:u32)->bool{
+    pub fn update(&self,panel:&gtk::ApplicationWindow,spacing:u32,preference:PanelDensity)->bool{
         let width=panel.surface().and_then(|s|s.display().monitor_at_surface(&s)).map_or(0,|m|m.geometry().width());
-        let next=density(width,self.workspace_count,spacing);
+        let next=density(preference,width,self.workspace_count,spacing);
         let compact=next==Density::Compact;
         if self.density.replace(Some(next))!=Some(next){
             for shortcut in &self.shortcuts{shortcut.compact(compact);}
@@ -64,11 +61,11 @@ mod tests{
     use super::*;
     #[test]
     fn logical_width_and_workspace_count_select_density(){
-        assert_eq!(density(0,4,8),Density::Compact);
-        assert_eq!(density(800,4,8),Density::Compact);
-        assert_eq!(density(1100,4,8),Density::Comfortable);
-        assert_eq!(density(1200,9,8),Density::Compact);
-        assert_eq!(density(1440,9,8),Density::Comfortable);
-        assert_eq!(density(1200,4,24),Density::Compact);
+        assert_eq!(density(PanelDensity::Automatic,0,4,8),Density::Compact);
+        assert_eq!(density(PanelDensity::Automatic,800,4,8),Density::Compact);
+        assert_eq!(density(PanelDensity::Automatic,1100,4,8),Density::Comfortable);
+        assert_eq!(density(PanelDensity::Automatic,1200,9,8),Density::Compact);
+        assert_eq!(density(PanelDensity::Automatic,1440,9,8),Density::Comfortable);
+        assert_eq!(density(PanelDensity::Automatic,1200,4,24),Density::Compact);
     }
 }
