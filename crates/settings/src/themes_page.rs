@@ -169,6 +169,49 @@ fn chooser(button:&gtk::Button,entry:&gtk::Entry,save:bool,image:bool){
         });dialog.show();
     });
 }
+/// Browse a separate candidate; only the explicit load button replaces the
+/// current visual draft and triggers the existing review invalidation.
+fn preset_library(parent:&gtk::Box,populate:impl Fn(&PortableTheme)+'static,status:&gtk::Label){
+    use atelier_config::themes::presets::CATALOG;
+    parent.append(&heading("Built-in theme library"));
+    parent.append(&description("Browse and preview full visual presets. Loading replaces draft colors, geometry and effects, not local wallpaper, pins or accessibility settings."));
+    let search=gtk::Entry::new();search.set_placeholder_text(Some("Search presets by name, color or style"));parent.append(&search);
+    let picker=gtk::ComboBoxText::new();picker.set_hexpand(true);parent.append(&picker);
+    let detail=description("No matching presets.");parent.append(&detail);
+    let sample=gtk::DrawingArea::new();sample.set_content_height(200);sample.set_hexpand(true);
+    sample.update_property(&[gtk::accessible::Property::Label("Selected built-in theme preview")]);parent.append(&sample);
+    let load=gtk::Button::with_label("Load preset into draft");load.set_sensitive(false);parent.append(&load);
+    let themes=Rc::new(CATALOG.iter().filter_map(|p|p.theme().ok().map(|t|(p,t))).collect::<Vec<_>>());
+    let selected=Rc::new(RefCell::new(None::<PortableTheme>));
+    {let selected=selected.clone();sample.set_draw_func(move|_,cr,w,h|{if let Some(t)=selected.borrow().as_ref(){draw(cr,w,h,t);}});}
+    {
+        let (themes,selected,detail,sample,load)=(themes.clone(),selected.clone(),detail.downgrade(),sample.downgrade(),load.downgrade());
+        picker.connect_changed(move|picker|{
+            let id=picker.active_id();
+            let choice=id.as_deref().and_then(|id|themes.iter().find(|(p,_)|p.id==id));
+            *selected.borrow_mut()=choice.map(|(_,t)|t.clone());
+            if let Some(d)=detail.upgrade(){d.set_text(choice.map(|(p,_)|p.detail).unwrap_or("No matching presets."));}
+            if let Some(s)=sample.upgrade(){s.queue_draw();}
+            if let Some(b)=load.upgrade(){b.set_sensitive(choice.is_some());}
+        });
+    }
+    let filter={
+        let (themes,picker)=(themes.clone(),picker.downgrade());
+        move|query:&str|{
+            let Some(picker)=picker.upgrade()else{return;};
+            let old=picker.active_id();picker.remove_all();
+            for (p,_) in themes.iter().filter(|(p,_)|p.matches(query)){picker.append(Some(p.id),p.name);}
+            if !old.as_deref().is_some_and(|id|picker.set_active_id(Some(id))){picker.set_active(Some(0));}
+        }
+    };
+    filter("");
+    {let filter=filter.clone();search.connect_changed(move|entry|filter(entry.text().as_str()));}
+    {let status=status.downgrade();load.connect_clicked(move|_|{
+        let choice=selected.borrow();let Some(t)=choice.as_ref()else{return;};
+        populate(t);
+        if let Some(s)=status.upgrade(){s.set_text(&format!("{} loaded into draft. Review before applying.",t.name));}
+    });}
+}
 pub fn build(parent:&gtk::Box){
     let path=match appearance_path(){Ok(p)=>p,Err(e)=>{parent.append(&description(&format!("{e:#}")));return;}};
     let form=gtk::Box::new(gtk::Orientation::Vertical,12);parent.append(&form);
@@ -185,6 +228,7 @@ pub fn build(parent:&gtk::Box){
     effect_box.append(&description("Synthetic pattern: sharp reference on the left, draft effect on the right. Box blur is illustrative; actual compositor output and pass budgets may differ."));
     effect_box.append(&effects);comparison.set_child(Some(&effect_box));form.append(&comparison);
     let validity=description("Load a draft to begin.");form.append(&validity);
+    let library=gtk::Box::new(gtk::Orientation::Vertical,8);form.append(&library);
     let fields=Rc::new(Fields::new(&form));
     form.append(&heading("Wallpaper palette"));
     let image=gtk::Entry::new();image.set_placeholder_text(Some("Absolute local image path"));form.append(&image);
@@ -204,7 +248,6 @@ pub fn build(parent:&gtk::Box){
     let load=gtk::Button::with_label("Reload saved theme");form.append(&load);
     let previous=gtk::Button::with_label("Load previous visual preferences into draft");form.append(&previous);
     let defaults=gtk::Button::with_label("Load default visual preferences into draft");form.append(&defaults);
-    let blue=gtk::Button::with_label("Blue glass preset (draft only)");form.append(&blue);
     let check=gtk::Button::with_label("Review draft");form.append(&check);
     let apply=gtk::Button::with_label("Apply reviewed theme");apply.add_css_class("suggested-action");apply.set_sensitive(false);form.append(&apply);
     let status=description("Themes exclude wallpaper paths, pins, widget selection and commands.");status.set_selectable(true);parent.append(&status);
@@ -250,13 +293,7 @@ pub fn build(parent:&gtk::Box){
     {let (populate,status)=(populate.clone(),status.clone());defaults.connect_clicked(move|_|{
         populate(&PortableTheme::capture("Default native theme".into(),&Appearance::default()));status.set_text("Defaults loaded into draft only.");
     });}
-    {let (populate,status,fields)=(populate.clone(),status.clone(),fields.clone());blue.connect_clicked(move|_|{
-        let mut draft=fields.collect();draft.shell_palette=None;draft.accent.clear();
-        match draft.applied(&Appearance::default()).and_then(|a|from_seed([40,91,180],false,&a)){
-            Ok(mut theme)=>{theme.name="Blue glass".into();theme.panel_backdrop_blur=8;theme.dock_backdrop_blur=8;theme.widget_backdrop_blur=8;theme.transparency=Transparency{focused:100,unfocused:94,panel:82,dock:82,widgets:88};populate(&theme);status.set_text("Blue glass preset loaded into draft. Review before applying.");}
-            Err(e)=>status.set_text(&format!("Preset unavailable: {e:#}")),
-        }
-    });}
+    preset_library(&library,populate.clone(),&status);
     {let (populate,file,status)=(populate.clone(),file.clone(),status.clone());import.connect_clicked(move|_|{
         match PortableTheme::import(&PathBuf::from(file.text().as_str())){
             Ok(t)=>{populate(&t);status.set_text("Imported draft only.");}
